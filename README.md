@@ -1,15 +1,36 @@
 # Voice Assistant for ReSpeaker 4-Mic Array
 
-A voice assistant service for Raspberry Pi using the ReSpeaker 4-Mic Array, with local hotword detection ("alexa") and OpenAI Realtime API integration.
+A voice assistant service for Raspberry Pi using the ReSpeaker 4-Mic Array, with local hotword detection ("alexa") and OpenAI integration.
 
 ## Features
 
-- 🎤 **Local Hotword Detection**: Uses openWakeWord for offline "alexa" wake word detection
-- 🔊 **4-Mic Array Support**: Full support for ReSpeaker 4-Mic Array (AC108 device)
-- 🤖 **OpenAI Realtime API**: Bidirectional audio streaming with GPT-4o
-- 🎯 **Voice Activity Detection**: Intelligent interruption handling during playback
-- 🔄 **State Machine**: Robust state management (IDLE → LISTENING → PROCESSING → INTERRUPTED)
-- 🐍 **Modern Python**: Built with Python 3.11+ using uv package manager
+- 🎤 **Local Hotword Detection**: openWakeWord for offline "alexa" wake word detection
+- 🔊 **ReSpeaker 4-Mic Array**: Full support for AC108 device (paInt16 mono)
+- 🤖 **OpenAI Integration**: Speech-to-text with Whisper, future Realtime API support
+- 🎯 **Real-Time Audio**: Multi-consumer architecture with callback-based capture
+- 📡 **Event-Driven**: Pub-sub system for decoupled components
+- 🐍 **Modern Python**: Built with Python 3.11+ using `uv` package manager
+
+## Quick Start
+
+```bash
+# 1. Install dependencies
+export PATH="$HOME/.local/bin:$PATH"
+uv sync
+
+# 2. Configure
+cp config/config.yaml.example config/config.yaml
+nano config/config.yaml  # Add your OpenAI API key
+
+# 3. Download models
+uv run voice-assistant download-models
+
+# 4. Test hotword detection
+uv run voice-assistant test-hotword --debug
+
+# 5. Test speech-to-text
+uv run voice-assistant test-stt
+```
 
 ## Hardware Requirements
 
@@ -19,301 +40,420 @@ A voice assistant service for Raspberry Pi using the ReSpeaker 4-Mic Array, with
 
 ## Installation
 
-### 1. Clone or navigate to the project
+### System Dependencies
+
+These should already be installed on Raspberry Pi OS:
+- `portaudio19-dev` - Audio I/O
+- `libasound2-dev` - ALSA support
+- `python3-dev` - Python headers
+- `libffi-dev` - FFI library
+
+### Python Setup
 
 ```bash
 cd /home/pi/llm-assistant/voice-assistant
-```
-
-### 2. Verify system dependencies
-
-All required system libraries should already be installed on your Raspberry Pi:
-- `portaudio19-dev` - Audio I/O
-- `libasound2-dev` - ALSA support
-- `python3-dev` - Python development headers
-- `libffi-dev` - Foreign Function Interface
-
-### 3. Install Python dependencies
-
-```bash
 export PATH="$HOME/.local/bin:$PATH"
 uv sync
 ```
 
-This will create a virtual environment and install all dependencies.
-
-### 4. Configure the service
-
-Copy the example configuration and edit it:
+### Configuration
 
 ```bash
 cp config/config.yaml.example config/config.yaml
 nano config/config.yaml
 ```
 
-**Important**: Add your OpenAI API key to `config/config.yaml`:
-
+Add your OpenAI API key:
 ```yaml
 openai:
-  api_key: "sk-..."  # Your actual OpenAI API key
+  api_key: "sk-..."  # Your actual API key
 ```
 
-### 5. Download hotword models
-
-Download the pre-trained wake word models:
+###  Download Hotword Models
 
 ```bash
 uv run voice-assistant download-models
 ```
 
-### 6. Verify the installation
-
-Run the verification command:
+### Verify Installation
 
 ```bash
 uv run voice-assistant verify
 ```
-
-This will check all dependencies, audio devices, and hotword models.
-
-### 7. Test the service
-
-Run the service manually to test:
-
-```bash
-uv run voice-assistant run --log-level DEBUG
-```
-
-Say "alexa" to activate, then speak your question. The assistant will respond via audio.
 
 ## CLI Commands
 
-The voice assistant includes a comprehensive command-line interface:
+### Core Commands
 
 ```bash
-# Run the voice assistant
+# Run the voice assistant (future)
 uv run voice-assistant run [--log-level DEBUG]
 
-# Verify installation and dependencies
-uv run voice-assistant verify
-
-# Download pre-trained hotword models
-uv run voice-assistant download-models
-
-# Show current configuration
+# Show configuration
 uv run voice-assistant config
 
-# Test audio recording
+# Verify setup
+uv run voice-assistant verify
+
+# Download hotword models
+uv run voice-assistant download-models
+```
+
+### Test Commands
+
+```bash
+# Test hotword detection (records 5s after "alexa")
+uv run voice-assistant test-hotword [--debug]
+
+# Test with native paInt16 mono (verification)
+uv run voice-assistant test-hotword-native
+
+# Test speech-to-text (event-driven demo)
+uv run voice-assistant test-stt
+
+# Test audio recording (15s capture & playback)
+uv run voice-assistant record [--duration 15]
+
+# Test audio hardware
 uv run voice-assistant test-audio
 ```
 
-### Get help
+## Architecture
 
-```bash
-uv run voice-assistant --help
-uv run voice-assistant run --help
+### Overview
+
+```
+┌──────────────────────────────────────────────────────┐
+│              Event-Driven Architecture               │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  Audio Stream (Callback Thread)                     │
+│         ↓                                            │
+│    ┌────────────────┐                                │
+│    │ AudioHandler   │  Broadcasts to:                │
+│    │ (Producer)     │  • hotword_queue (skip-ahead)  │
+│    └────────┬───────┘  • audio_queue (buffered)      │
+│             │                                         │
+│             ↓                                         │
+│    ┌────────────────┐                                │
+│    │ HotwordDetector│                                │
+│    └────────┬───────┘                                │
+│             │ Publishes                               │
+│             ↓                                         │
+│    ┌────────────────┐                                │
+│    │   EventBus     │                                │
+│    └────────┬───────┘                                │
+│             │ Broadcasts                              │
+│      ┌──────┴──────┬────────────┐                    │
+│      ↓             ↓            ↓                    │
+│  Consumer1     Consumer2    Consumer3                │
+│  (STT)         (Realtime)   (Recording)              │
+│                                                      │
+└──────────────────────────────────────────────────────┘
 ```
 
-## Running as a System Service
+### Key Concepts
 
-### Install the systemd service
+#### 1. Multi-Consumer Audio
 
-```bash
-# Copy service file
-sudo cp voice-assistant.service /etc/systemd/system/
+One audio stream broadcasts to multiple queues:
 
-# Reload systemd
-sudo systemctl daemon-reload
+- **hotword_queue** (size=3): Small, skip-ahead for low latency detection
+- **audio_queue** (size=100): Large, buffered for complete audio capture
 
-# Enable service to start on boot
-sudo systemctl enable voice-assistant
+```python
+# Hotword detection (skip-ahead)
+audio = audio_handler.read_hotword_chunk()
 
-# Start the service
-sudo systemctl start voice-assistant
-
-# Check status
-sudo systemctl status voice-assistant
+# Complete audio for streaming/transcription (buffered)
+audio = audio_handler.read_audio_chunk()
 ```
 
-### View logs
+#### 2. Event-Driven
 
-```bash
-# Real-time logs
-sudo journalctl -u voice-assistant -f
+Components communicate via events, not direct calls:
 
-# Recent logs
-sudo journalctl -u voice-assistant -n 100
+```python
+# Publisher (hotword detector)
+event = HotwordEvent(timestamp=now, hotword="alexa", score=0.95)
+event_bus.publish("hotword_detected", event)
+
+# Subscriber (consumer)
+event_bus.subscribe("hotword_detected", my_callback)
 ```
 
-### Control the service
+#### 3. Real-Time Performance
 
-```bash
-# Stop the service
-sudo systemctl stop voice-assistant
+- **Callback mode**: Audio captured in background thread (non-blocking)
+- **Skip-ahead**: Hotword queue drops old frames to stay current
+- **Parallel consumers**: All process independently, no blocking
 
-# Restart the service
-sudo systemctl restart voice-assistant
+### Code Structure
 
-# Disable auto-start
-sudo systemctl disable voice-assistant
+```
+src/voice_assistant/
+├── core/                    # Core components (producers)
+│   ├── audio_handler.py     # Multi-consumer audio capture
+│   ├── event_bus.py         # Pub-sub event system
+│   └── hotword_detector.py  # Wake word detection
+│
+├── consumers/               # Event subscribers
+│   └── stt_consumer.py      # Speech-to-text consumer
+│
+├── services/                # External services
+│   ├── openai_client.py     # OpenAI Realtime API client
+│   └── state_machine.py     # State management
+│
+├── commands/                # Test commands
+│   ├── test_mode.py         # Hotword test
+│   └── simple_record.py     # Audio test
+│
+├── cli.py                   # Command-line interface
+├── config.py                # Configuration management
+└── main.py                  # Service orchestrator (future)
 ```
 
 ## Configuration
 
-Edit `config/config.yaml` to customize:
+Edit `config/config.yaml`:
+
+### Audio Settings
+
+```yaml
+audio:
+  device: "ac108"        # ALSA device name
+  sample_rate: 16000     # Hz
+  channels: 1            # Mono (works best with openWakeWord)
+  chunk_size: 1280       # 80ms chunks (required by openWakeWord)
+```
 
 ### Hotword Detection
 
 ```yaml
 hotword:
-  threshold: 0.5  # Lower = more sensitive
+  model: "alexa"
+  threshold: 0.5         # 0.0-1.0 (lower = more sensitive)
 ```
 
-- **Lower threshold (0.3-0.4)**: More sensitive, may have false activations
-- **Higher threshold (0.6-0.7)**: Less sensitive, may miss wake word
+**Tuning**:
+- Lower (0.3-0.4): More sensitive, may have false positives
+- Higher (0.6-0.7): Less sensitive, may miss wake word
+- Use `--debug` to see scores and tune
 
 ### Voice Activity Detection
 
 ```yaml
 vad:
-  aggressiveness: 2  # 0-3
+  aggressiveness: 2      # 0-3
 ```
 
-- **0**: Least aggressive, detects more speech
-- **3**: Most aggressive, requires clearer speech
+- **0**: Least aggressive (detects more speech)
+- **3**: Most aggressive (requires clearer speech)
 
-### Audio Device
+## How It Works
 
-If your device name differs:
+### Hotword Detection
 
-```yaml
-audio:
-  device: "ac108"  # Change if needed
+1. Audio captured in background thread (callback mode)
+2. Broadcasted to `hotword_queue` (skip-ahead) and `audio_queue` (buffered)
+3. Hotword detector reads from `hotword_queue`
+4. When "alexa" detected → publishes `HotwordEvent`
+5. All subscribed consumers react independently
+
+### Speech-to-Text Consumer
+
+1. Subscribes to `hotword_detected` events
+2. When event received:
+   - Records 5 seconds from `audio_queue`
+   - Sends to OpenAI Whisper API
+   - Logs transcription
+3. Runs in separate thread, doesn't block detector
+
+### Adding Custom Consumers
+
+```python
+from voice_assistant.core import EventBus, HotwordEvent, AudioHandler
+
+class MyConsumer:
+    def __init__(self, event_bus, audio_handler):
+        self.event_bus = event_bus
+        self.audio_handler = audio_handler
+        event_bus.subscribe("hotword_detected", self.on_hotword)
+    
+    def on_hotword(self, event: HotwordEvent):
+        # React to hotword
+        audio = self.audio_handler.read_audio_chunk()
+        # ... process audio ...
+    
+    def cleanup(self):
+        self.event_bus.unsubscribe("hotword_detected", self.on_hotword)
 ```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Voice Assistant                      │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  ┌──────────┐    ┌──────────────┐    ┌──────────────┐ │
-│  │  Audio   │───▶│   Hotword    │───▶│    State     │ │
-│  │ Handler  │    │  Detector    │    │   Machine    │ │
-│  └──────────┘    └──────────────┘    └──────────────┘ │
-│       │                                      │          │
-│       │          ┌──────────────┐            │          │
-│       └─────────▶│   OpenAI     │◀───────────┘          │
-│                  │  Realtime    │                       │
-│                  │    Client    │                       │
-│                  └──────────────┘                       │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-
-States:
-  IDLE ──hotword──▶ LISTENING ──response──▶ PROCESSING ──done──▶ IDLE
-                                                   │
-                                                   └──interrupt──▶ INTERRUPTED ──▶ LISTENING
-```
-
-## State Machine
-
-- **IDLE**: Continuously listening for "alexa" hotword
-- **LISTENING**: Hotword detected, streaming audio to OpenAI
-- **PROCESSING**: Playing AI response, monitoring for interruptions
-- **INTERRUPTED**: User spoke during playback, stop and listen again
 
 ## Troubleshooting
 
-### Audio device not found
+### Hotword Not Detecting
 
-List available devices:
+**Check scores**:
+```bash
+uv run voice-assistant test-hotword --debug
+```
 
+Look for lines like:
+```
+Debug: Max score = 0.0129 (alexa), threshold = 0.5
+```
+
+**If scores are always 0.0000**:
+- Run `uv run voice-assistant download-models`
+- Check model file: `ls -lh models/`
+
+**If scores are low (0.01-0.3)**:
+- Speak louder or closer to mic
+- Lower threshold in config
+- Check audio levels: `alsamixer`
+
+**If scores are good but no detection**:
+- Check threshold setting
+- Ensure using correct audio format (paInt16 mono)
+
+### Audio Issues
+
+**Test audio capture**:
+```bash
+uv run voice-assistant record --duration 10
+```
+
+This records 10s and plays it back.
+
+**Check audio device**:
 ```bash
 arecord -l
+uv run voice-assistant config
 ```
 
-Update `config/config.yaml` with the correct device name.
+**Low audio levels**:
+```bash
+alsamixer
+# Adjust "Capture" or "ADC" levels
+```
 
-### Hotword not detecting
+### Import Errors After Reorganization
 
-Try adjusting the threshold:
+Update imports:
+```python
+# Old
+from voice_assistant.audio_handler import AudioHandler
+
+# New
+from voice_assistant.core import AudioHandler
+# or
+from voice_assistant.core.audio_handler import AudioHandler
+```
+
+### Performance Issues
+
+Check queue status in logs:
+```
+hotword_queue: 0-3 frames (good - skip-ahead working)
+audio_queue: 10-50 frames (good - buffering)
+```
+
+If audio_queue grows >80 frames, system may be falling behind.
+
+## Running as Service (Future)
 
 ```bash
-uv run python -m voice_assistant --log-level DEBUG
+# Install
+sudo cp voice-assistant.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable voice-assistant
+sudo systemctl start voice-assistant
+
+# Monitor
+sudo journalctl -u voice-assistant -f
 ```
-
-Watch for detection scores in logs and adjust `hotword.threshold` accordingly.
-
-### OpenAI connection issues
-
-Check your API key and internet connection:
-
-```bash
-curl https://api.openai.com/v1/models -H "Authorization: Bearer YOUR_API_KEY"
-```
-
-### Permission denied on audio device
-
-Add your user to the audio group:
-
-```bash
-sudo usermod -a -G audio pi
-```
-
-Then log out and back in.
 
 ## Development
 
-### Run tests
+### Project Setup
 
 ```bash
+# Clone
+git clone <repo>
+cd voice-assistant
+
+# Install
+uv sync
+
+# Run tests
 uv run pytest
-```
 
-### Lint code
-
-```bash
+# Lint
 uv run ruff check src/
 ```
 
-### Format code
+### Code Style
 
-```bash
-uv run ruff format src/
-```
+- Use `ruff` for linting and formatting
+- Follow PEP 8
+- Type hints where appropriate
+- Docstrings for public APIs
 
-## Project Structure
+### Adding Features
 
-```
-voice-assistant/
-├── src/
-│   └── voice_assistant/
-│       ├── __init__.py          # Package initialization
-│       ├── __main__.py          # CLI entry point
-│       ├── main.py              # Main orchestrator
-│       ├── audio_handler.py     # Audio I/O and VAD
-│       ├── hotword_detector.py  # Hotword detection
-│       ├── openai_client.py     # OpenAI API client
-│       ├── state_machine.py     # State management
-│       └── config.py            # Configuration loader
-├── config/
-│   ├── config.yaml.example      # Configuration template
-│   └── config.yaml              # Your configuration (git-ignored)
-├── models/                      # Hotword models (auto-downloaded)
-├── pyproject.toml               # Project dependencies
-├── voice-assistant.service      # Systemd service file
-└── README.md                    # This file
-```
+1. **New Consumer**: Add to `src/voice_assistant/consumers/`
+2. **New Service**: Add to `src/voice_assistant/services/`
+3. **New Command**: Add to `src/voice_assistant/commands/` and `cli.py`
+4. **Core Component**: Add to `src/voice_assistant/core/`
 
-## License
+## Technical Details
 
-MIT
+### Audio Format
+
+- **Capture**: paInt16 mono @ 16kHz
+- **Chunks**: 1280 samples (80ms) - required by openWakeWord
+- **Queues**: Separate for hotword (skip-ahead) and consumers (buffered)
+
+### Hotword Detection
+
+- **Library**: openWakeWord (TensorFlow Lite)
+- **Model**: alexa_v0.1.tflite
+- **Input**: int16 numpy array (not float32!)
+- **Stateful**: Needs every frame for context
+
+### Real-Time Performance
+
+**Before optimization**:
+- Blocking read: 62ms
+- Detection: 18ms
+- Total: 80ms (falling behind 0.13ms/frame)
+
+**After optimization**:
+- Callback mode: ~0ms (background thread)
+- Detection: 18ms
+- Total: 18ms (real-time capable!)
+
+## Known Issues
+
+1. **NumPy 2.x incompatibility**: Constrained to numpy <2.0 for tflite-runtime
+2. **ALSA warnings**: Harmless warnings about unavailable devices (ignore)
+3. **GPU discovery warning**: Normal on Raspberry Pi (uses CPU)
+
+## Future Enhancements
+
+- [ ] OpenAI Realtime API consumer (bidirectional streaming)
+- [ ] Recording consumer (save conversations)
+- [ ] Analytics consumer (usage tracking)
+- [ ] Web UI for monitoring
+- [ ] Multi-hotword support
+- [ ] Custom wake word training
 
 ## Credits
 
 - [openWakeWord](https://github.com/dscripka/openWakeWord) - Local hotword detection
-- [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) - Voice AI
+- [OpenAI](https://platform.openai.com/) - Whisper API & Realtime API
 - [ReSpeaker 4-Mic Array](https://wiki.seeedstudio.com/ReSpeaker_4_Mic_Array_for_Raspberry_Pi/) - Hardware
 
+## License
+
+MIT

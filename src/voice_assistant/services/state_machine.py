@@ -3,7 +3,7 @@
 import logging
 from enum import Enum, auto
 from threading import Lock
-from typing import Callable, Optional
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -34,34 +34,32 @@ class StateMachine:
 
     def transition(self, new_state: State) -> bool:
         """Transition to a new state.
-        
+
         Args:
             new_state: Target state
-            
+
         Returns:
             True if transition was successful, False otherwise
         """
         with self._lock:
             old_state = self._state
-            
+
             # Validate transition
             if not self._is_valid_transition(old_state, new_state):
-                logger.warning(
-                    f"Invalid state transition: {old_state.name} -> {new_state.name}"
-                )
+                logger.warning(f"Invalid state transition: {old_state.name} -> {new_state.name}")
                 return False
-            
+
             self._state = new_state
             logger.info(f"State transition: {old_state.name} -> {new_state.name}")
-            
+
             # Execute callbacks
             self._execute_callbacks(old_state, new_state)
-            
+
             return True
 
     def _is_valid_transition(self, from_state: State, to_state: State) -> bool:
         """Check if state transition is valid.
-        
+
         Valid transitions:
         - IDLE -> LISTENING (hotword detected)
         - LISTENING -> PROCESSING (OpenAI response started)
@@ -75,17 +73,12 @@ class StateMachine:
             State.PROCESSING: [State.IDLE, State.INTERRUPTED],
             State.INTERRUPTED: [State.LISTENING],
         }
-        
+
         return to_state in valid_transitions.get(from_state, [])
 
-    def register_callback(
-        self,
-        from_state: State,
-        to_state: State,
-        callback: Callable
-    ):
+    def register_callback(self, from_state: State, to_state: State, callback: Callable):
         """Register a callback for a state transition.
-        
+
         Args:
             from_state: Source state
             to_state: Target state
@@ -113,4 +106,3 @@ class StateMachine:
             old_state = self._state
             self._state = State.IDLE
             logger.info(f"State machine reset: {old_state.name} -> IDLE")
-

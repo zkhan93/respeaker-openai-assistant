@@ -14,7 +14,7 @@ class Config:
 
     def __init__(self, config_path: str = "config/config.yaml"):
         """Initialize configuration from YAML file.
-        
+
         Args:
             config_path: Path to the configuration YAML file
         """
@@ -29,25 +29,25 @@ class Config:
                 f"Configuration file not found: {self.config_path}\n"
                 "Please create config/config.yaml from the template."
             )
-        
+
         with open(self.config_path, "r") as f:
             self.config = yaml.safe_load(f)
-        
+
         logger.info(f"Configuration loaded from {self.config_path}")
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value by key.
-        
+
         Args:
             key: Configuration key (supports dot notation, e.g., 'audio.sample_rate')
             default: Default value if key not found
-            
+
         Returns:
             Configuration value
         """
         keys = key.split(".")
         value = self.config
-        
+
         for k in keys:
             if isinstance(value, dict):
                 value = value.get(k)
@@ -55,7 +55,7 @@ class Config:
                     return default
             else:
                 return default
-        
+
         return value
 
     @property
@@ -87,4 +87,3 @@ class Config:
     def vad_aggressiveness(self) -> int:
         """Get VAD aggressiveness level (0-3)."""
         return self.get("vad.aggressiveness", 2)
-
