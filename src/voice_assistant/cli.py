@@ -207,6 +207,185 @@ def test_audio():
     return True
 
 
+def simple_record(duration: int = 15):
+    """Simple audio recording test (no processing)."""
+    from voice_assistant.simple_record import main as simple_record_main
+    
+    try:
+        simple_record_main(duration, auto_play=True)
+        sys.exit(0)
+    except KeyboardInterrupt:
+        print("\nTest stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def test_hotword(debug: bool = False):
+    """Test hotword detection and recording without OpenAI."""
+    from voice_assistant.test_mode import TestMode
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    
+    try:
+        test = TestMode(config_path="config/config.yaml", debug=debug)
+        test.run()
+    except KeyboardInterrupt:
+        print("\nTest stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def test_hotword_native():
+    """Test hotword detection using native paInt16 mono (official openWakeWord style)."""
+    import signal
+    import numpy as np
+    import pyaudio
+    from openwakeword.model import Model
+    
+    # Configuration matching official openWakeWord example
+    FORMAT = pyaudio.paInt16  # 16-bit PCM
+    CHANNELS = 1              # Mono
+    RATE = 16000             # 16kHz
+    CHUNK = 1280             # 80ms
+    
+    running = True
+    
+    def signal_handler(sig, frame):
+        nonlocal running
+        print("\n\nStopping...")
+        running = False
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Find AC108 device
+    p = pyaudio.PyAudio()
+    device_index = None
+    
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if 'ac108' in info['name'].lower():
+            device_index = i
+            print(f"Found device: {info['name']} (index {i})")
+            break
+    
+    if device_index is None:
+        print("ERROR: Could not find ac108 device")
+        sys.exit(1)
+    
+    # Open stream
+    print(f"\nOpening AC108 in native paInt16 mono format...")
+    print(f"  Format: paInt16 (16-bit PCM)")
+    print(f"  Channels: 1 (mono)")
+    print(f"  Rate: 16000 Hz")
+    print(f"  Chunk: {CHUNK} samples (80ms)")
+    print()
+    
+    try:
+        mic_stream = p.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            input_device_index=device_index,
+            frames_per_buffer=CHUNK
+        )
+        print("✓ Stream opened successfully!")
+        print()
+    except Exception as e:
+        print(f"❌ Failed to open stream: {e}")
+        sys.exit(1)
+    
+    # Load model
+    print("Loading openWakeWord model...")
+    owwModel = Model(wakeword_models=["alexa"])
+    print("✓ Model loaded")
+    print()
+    
+    print("#"*70)
+    print("🎤 NATIVE HOTWORD DETECTION TEST")
+    print("#"*70)
+    print()
+    print("This uses the exact method from openWakeWord's official example:")
+    print("  - Direct paInt16 mono from AC108 (no conversion)")
+    print("  - int16 numpy array passed to model.predict()")
+    print()
+    print("Say 'ALEXA' clearly and loudly...")
+    print("Press Ctrl+C to stop")
+    print()
+    
+    frame_count = 0
+    max_score_seen = 0.0
+    detection_count = 0
+    
+    while running:
+        try:
+            # Get audio - official example style
+            audio = np.frombuffer(
+                mic_stream.read(CHUNK, exception_on_overflow=False),
+                dtype=np.int16
+            )
+            
+            # Feed to openWakeWord model - pass int16 directly
+            prediction = owwModel.predict(audio)
+            
+            score = prediction.get('alexa', 0.0)
+            if score > max_score_seen:
+                max_score_seen = score
+            
+            frame_count += 1
+            
+            # Log every second (12.5 frames @ 80ms)
+            if frame_count % 13 == 0:
+                print(f"Frame {frame_count:4d}: score = {score:.6f} (max: {max_score_seen:.6f})")
+            
+            # Detect
+            if score >= 0.5:
+                detection_count += 1
+                print()
+                print(f"🎉 ALEXA DETECTED #{detection_count}! Score: {score:.4f}")
+                print()
+        
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            break
+    
+    mic_stream.stop_stream()
+    mic_stream.close()
+    p.terminate()
+    
+    print()
+    print("="*70)
+    print("TEST SUMMARY")
+    print("="*70)
+    print(f"Total frames processed: {frame_count}")
+    print(f"Total detections: {detection_count}")
+    print(f"Maximum score seen: {max_score_seen:.6f}")
+    print()
+    
+    if detection_count > 0:
+        print("✅ SUCCESS: Hotword detection is working with native format!")
+        print("   This confirms AC108 supports paInt16 mono directly.")
+    elif max_score_seen < 0.01:
+        print("❌ PROBLEM: Model produced very low scores")
+        print("   Check microphone connection and gain settings.")
+    else:
+        print("⚠️  Model is working but no detections")
+        print(f"   Max score: {max_score_seen:.4f} (threshold: 0.5)")
+        print("   Try speaking louder or closer to the microphone.")
+
+
 def run_service(log_level="INFO"):
     """Run the main voice assistant service."""
     from voice_assistant.main import VoiceAssistant
@@ -273,14 +452,46 @@ Examples:
     # Config command
     subparsers.add_parser("config", help="Show current configuration")
     
+    # Simple record command
+    record_parser = subparsers.add_parser(
+        "record", 
+        help="Record and play back audio to verify hardware (15 seconds)"
+    )
+    record_parser.add_argument(
+        "--duration",
+        type=int,
+        default=15,
+        help="Recording duration in seconds (default: 15)",
+    )
+    
     # Test audio command
     subparsers.add_parser("test-audio", help="Test audio recording from microphone")
+    
+    # Test hotword command
+    hotword_parser = subparsers.add_parser(
+        "test-hotword", 
+        help="Test hotword detection and recording (no OpenAI)"
+    )
+    hotword_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detection scores for debugging",
+    )
+    
+    # Test hotword native command
+    subparsers.add_parser(
+        "test-hotword-native",
+        help="Test hotword using native paInt16 mono (official openWakeWord method)"
+    )
     
     args = parser.parse_args()
     
     # Execute command
     if args.command == "run":
         run_service(log_level=args.log_level)
+    
+    elif args.command == "record":
+        simple_record(duration=args.duration)
     
     elif args.command == "verify":
         success = verify_setup()
@@ -297,6 +508,14 @@ Examples:
     elif args.command == "test-audio":
         success = test_audio()
         sys.exit(0 if success else 1)
+    
+    elif args.command == "test-hotword":
+        test_hotword(debug=args.debug)
+        sys.exit(0)
+    
+    elif args.command == "test-hotword-native":
+        test_hotword_native()
+        sys.exit(0)
     
     else:
         parser.print_help()

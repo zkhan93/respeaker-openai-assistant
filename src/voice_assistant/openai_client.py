@@ -168,6 +168,10 @@ class OpenAIRealtimeClient:
         try:
             async for message in self.websocket:
                 await self._handle_message(message)
+        except asyncio.CancelledError:
+            logger.info("Listen task cancelled")
+            self.connected = False
+            raise
         except websockets.exceptions.ConnectionClosed:
             logger.warning("WebSocket connection closed")
             self.connected = False

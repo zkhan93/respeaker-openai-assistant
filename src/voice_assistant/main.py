@@ -57,6 +57,7 @@ class VoiceAssistant:
         # Control flags
         self.running = False
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.tasks: list = []
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -68,6 +69,16 @@ class VoiceAssistant:
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
+        
+        # Cancel all running tasks
+        if self.loop and self.tasks:
+            for task in self.tasks:
+                if not task.done():
+                    task.cancel()
+            
+        # Schedule cleanup in the event loop
+        if self.loop:
+            self.loop.call_soon_threadsafe(self.loop.stop)
 
     def run(self):
         """Run the voice assistant service."""
@@ -77,7 +88,12 @@ class VoiceAssistant:
         self.audio_handler.start_stream()
         
         # Run async event loop
-        asyncio.run(self._async_main())
+        try:
+            asyncio.run(self._async_main())
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+        finally:
+            logger.info("Service stopped")
 
     async def _async_main(self):
         """Async main event loop."""
@@ -103,9 +119,14 @@ class VoiceAssistant:
             # Start main loop
             main_task = asyncio.create_task(self._main_loop())
             
-            # Wait for tasks
-            await asyncio.gather(listen_task, main_task)
+            # Track tasks for cancellation
+            self.tasks = [listen_task, main_task]
             
+            # Wait for tasks
+            await asyncio.gather(listen_task, main_task, return_exceptions=True)
+            
+        except asyncio.CancelledError:
+            logger.info("Tasks cancelled, shutting down...")
         except Exception as e:
             logger.error(f"Error in main loop: {e}", exc_info=True)
         finally:

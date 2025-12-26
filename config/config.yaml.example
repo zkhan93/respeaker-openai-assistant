@@ -10,8 +10,8 @@ openai:
 audio:
   device: "ac108"  # ALSA device name for ReSpeaker 4-Mic Array
   sample_rate: 16000  # Hz
-  channels: 4  # Number of microphone channels
-  chunk_size: 320  # Samples per chunk (20ms at 16kHz)
+  channels: 1  # Use mono (AC108 supports this and works perfectly with openWakeWord)
+  chunk_size: 1280  # Samples per chunk (80ms at 16kHz - required by openWakeWord)
 
 # Hotword Detection Configuration
 hotword:

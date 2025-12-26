@@ -35,8 +35,7 @@ class HotwordDetector:
             # Load the pre-trained alexa model
             # openWakeWord will download the model automatically on first use
             self.model = Model(
-                wakeword_models=[model_name],
-                inference_framework="onnx"
+                wakeword_models=[model_name]
             )
             logger.info(f"Loaded hotword model: {model_name}")
         except Exception as e:
@@ -73,6 +72,31 @@ class HotwordDetector:
         except Exception as e:
             logger.error(f"Error in hotword detection: {e}")
             return False
+    
+    def get_scores(self, audio_data: bytes) -> dict:
+        """Get detection scores for audio chunk (for debugging).
+        
+        Args:
+            audio_data: PCM16 mono audio data
+            
+        Returns:
+            Dictionary of model names to scores
+        """
+        try:
+            # Convert bytes to numpy array (int16)
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            
+            # openWakeWord expects float32 normalized to [-1, 1]
+            audio_float = audio_array.astype(np.float32) / 32768.0
+            
+            # Predict on audio chunk
+            predictions = self.model.predict(audio_float)
+            
+            return predictions
+            
+        except Exception as e:
+            logger.error(f"Error getting scores: {e}")
+            return {}
 
     def reset(self):
         """Reset the hotword detector state."""

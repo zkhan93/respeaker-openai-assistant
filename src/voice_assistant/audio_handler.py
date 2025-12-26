@@ -18,8 +18,8 @@ class AudioHandler:
         self,
         device_name: str = "ac108",
         sample_rate: int = 16000,
-        channels: int = 4,
-        chunk_size: int = 320,  # 20ms at 16kHz
+        channels: int = 1,  # Mono - AC108 supports it and works better with openWakeWord
+        chunk_size: int = 1280,  # 80ms at 16kHz (required by openWakeWord)
         vad_aggressiveness: int = 2,
     ):
         """Initialize audio handler.
@@ -28,7 +28,7 @@ class AudioHandler:
             device_name: ALSA device name (e.g., 'ac108')
             sample_rate: Sample rate in Hz
             channels: Number of input channels
-            chunk_size: Number of samples per chunk
+            chunk_size: Number of samples per chunk (must be multiple of 80ms for openWakeWord)
             vad_aggressiveness: VAD aggressiveness level (0-3)
         """
         self.device_name = device_name
@@ -58,7 +58,7 @@ class AudioHandler:
         device_index = self._find_device_index()
         
         self.stream = self.audio.open(
-            format=pyaudio.paInt32,  # S32_LE format
+            format=pyaudio.paInt16,  # 16-bit PCM - works perfectly with openWakeWord
             channels=self.channels,
             rate=self.sample_rate,
             input=True,
@@ -80,7 +80,7 @@ class AudioHandler:
         """Read audio chunk from stream.
         
         Returns:
-            Raw audio data as bytes (S32_LE format), or None if error
+            Raw audio data as bytes (PCM16 mono format), or None if error
         """
         if self.stream is None:
             logger.error("Audio stream not started")
@@ -94,27 +94,20 @@ class AudioHandler:
             return None
 
     def convert_to_pcm16_mono(self, data: bytes) -> bytes:
-        """Convert S32_LE 4-channel audio to PCM16 mono.
+        """Convert audio data to PCM16 mono format.
+        
+        Since we're now using paInt16 mono directly from AC108,
+        this method simply returns the data as-is (no conversion needed).
+        Kept for backward compatibility with existing code.
         
         Args:
-            data: Raw audio data (S32_LE, 4 channels)
+            data: Raw audio data (already PCM16 mono)
             
         Returns:
-            PCM16 mono audio data
+            PCM16 mono audio data (same as input)
         """
-        # Convert S32_LE to int32 array
-        samples = np.frombuffer(data, dtype=np.int32)
-        
-        # Reshape to (samples, channels)
-        samples = samples.reshape(-1, self.channels)
-        
-        # Convert to mono by averaging channels
-        mono = np.mean(samples, axis=1).astype(np.int32)
-        
-        # Convert from 32-bit to 16-bit
-        mono_16 = (mono / 65536).astype(np.int16)
-        
-        return mono_16.tobytes()
+        # No conversion needed - already in correct format!
+        return data
 
     def is_speech(self, pcm16_data: bytes) -> bool:
         """Check if audio chunk contains speech using VAD.
@@ -127,8 +120,20 @@ class AudioHandler:
         """
         try:
             # VAD requires 10, 20, or 30ms frames
-            # Our chunk_size is 320 samples = 20ms at 16kHz
-            return self.vad.is_speech(pcm16_data, self.sample_rate)
+            # Our chunk may be 80ms (1280 samples), so we need to split it
+            # Split into 20ms chunks (320 samples)
+            frame_duration_ms = 20
+            frame_size = int(self.sample_rate * frame_duration_ms / 1000) * 2  # *2 for 16-bit
+            
+            # Check if any sub-frame contains speech
+            for i in range(0, len(pcm16_data), frame_size):
+                frame = pcm16_data[i:i+frame_size]
+                if len(frame) == frame_size:  # Only process full frames
+                    if self.vad.is_speech(frame, self.sample_rate):
+                        return True
+            
+            return False
+            
         except Exception as e:
             logger.error(f"VAD error: {e}")
             return False
