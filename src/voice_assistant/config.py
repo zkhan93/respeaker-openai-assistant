@@ -87,3 +87,15 @@ class Config:
     def vad_aggressiveness(self) -> int:
         """Get VAD aggressiveness level (0-3)."""
         return self.get("vad.aggressiveness", 2)
+
+
+def load_config(config_path: str = "config/config.yaml") -> Config:
+    """Load configuration from file.
+    
+    Args:
+        config_path: Path to configuration file
+        
+    Returns:
+        Config instance
+    """
+    return Config(config_path)
