@@ -2,8 +2,9 @@
 
 import logging
 import signal
+import time
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 from .audio_handler import AudioHandler
 from .event_bus import EventBus, HotwordEvent
@@ -17,8 +18,8 @@ class VoiceDetectionService:
     
     This is the core loop that:
     1. Reads audio from AudioHandler (hotword queue)
-    2. Runs hotword detection
-    3. Publishes hotword events
+    2. Runs hotword detection with debouncing
+    3. Publishes hotword events (max once per cooldown period)
     
     Voice activity events are published automatically by AudioHandler.
     
@@ -31,6 +32,7 @@ class VoiceDetectionService:
         audio_handler: AudioHandler,
         event_bus: EventBus,
         hotword_detector: HotwordDetector,
+        hotword_cooldown: float = 2.0,  # Seconds to wait before next hotword detection
     ):
         """Initialize detection service.
         
@@ -38,13 +40,18 @@ class VoiceDetectionService:
             audio_handler: Audio handler for reading audio
             event_bus: Event bus for publishing events
             hotword_detector: Hotword detector instance
+            hotword_cooldown: Seconds to wait after hotword detection before detecting again
         """
         self.audio_handler = audio_handler
         self.event_bus = event_bus
         self.hotword_detector = hotword_detector
+        self.hotword_cooldown = hotword_cooldown
         self.running = False
         
-        logger.info("VoiceDetectionService initialized")
+        # Track last detection time for each hotword model (debouncing)
+        self.last_detection_time: Dict[str, float] = {}
+        
+        logger.info(f"VoiceDetectionService initialized (hotword_cooldown={hotword_cooldown}s)")
     
     def start(self):
         """Start the detection loop.
@@ -81,7 +88,21 @@ class VoiceDetectionService:
                     
                     for model_name, score in scores.items():
                         if score >= self.hotword_detector.threshold:
-                            # Hotword detected! Publish event
+                            # Check debouncing - has enough time passed since last detection?
+                            current_time = time.time()
+                            last_time = self.last_detection_time.get(model_name, 0)
+                            time_since_last = current_time - last_time
+                            
+                            if time_since_last < self.hotword_cooldown:
+                                # Still in cooldown period, skip this detection
+                                logger.debug(
+                                    f"Hotword '{model_name}' detected (score: {score:.3f}) but in cooldown "
+                                    f"({time_since_last:.2f}s < {self.hotword_cooldown}s), skipping"
+                                )
+                                continue
+                            
+                            # Cooldown passed - publish event!
+                            self.last_detection_time[model_name] = current_time
                             queue_status = self.audio_handler.get_queue_status()
                             
                             event = HotwordEvent(
@@ -97,7 +118,6 @@ class VoiceDetectionService:
                             self.event_bus.publish("hotword_detected", event)
                             
                             # Brief pause
-                            import time
                             time.sleep(0.1)
         
         except KeyboardInterrupt:

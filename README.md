@@ -121,6 +121,15 @@ uv run voice-assistant record [--duration 15]
 uv run voice-assistant test-audio
 ```
 
+**Recommended Testing Flow:**
+1. **`test-events`** - See all events in real-time (no API key needed)
+   - Verify hotword detection works
+   - Check voice activity detection
+   - Understand event timing
+2. **`test-stt`** - Test full STT pipeline (requires API key)
+   - Verifies OpenAI integration
+   - Tests complete event-driven flow
+
 ## Architecture
 
 ### Overview
@@ -324,6 +333,8 @@ hotword:
 - Higher (0.6-0.7): Less sensitive, may miss wake word
 - Use `--debug` to see scores and tune
 
+**Debouncing**: The system automatically prevents multiple hotword events for a single utterance using a 2-second cooldown period. This means after detecting "alexa" once, it won't fire another event for 2 seconds, even if the detection continues (which is normal as you speak the word).
+
 ### Voice Activity Detection
 
 ```yaml
@@ -341,7 +352,9 @@ vad:
 1. Audio captured in background thread (callback mode)
 2. Broadcasted to `hotword_queue` (skip-ahead) and `audio_queue` (buffered)
 3. Hotword detector reads from `hotword_queue`
-4. When "alexa" detected → publishes `HotwordEvent`
+4. When "alexa" detected and cooldown period passed → publishes `HotwordEvent`
+   - **Debouncing**: 2-second cooldown prevents duplicate events
+   - Single word "alexa" = single event (even though detection spans multiple frames)
 5. All subscribed consumers react independently
 
 ### Speech-to-Text Consumer
