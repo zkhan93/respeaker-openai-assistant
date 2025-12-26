@@ -19,6 +19,15 @@ class HotwordEvent:
     audio_queue_size: int  # How many frames are in queue at detection time
 
 
+@dataclass
+class VoiceActivityEvent:
+    """Event emitted when voice activity starts or stops."""
+
+    timestamp: datetime
+    activity_type: str  # 'started' or 'stopped'
+    duration: float = 0.0  # Duration in seconds (only for 'stopped')
+
+
 class EventBus:
     """Simple event bus for pub-sub communication between components."""
 

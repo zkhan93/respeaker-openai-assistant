@@ -2,6 +2,7 @@
 
 import logging
 import queue
+from datetime import datetime
 from typing import List, Optional
 
 import pyaudio
@@ -26,6 +27,8 @@ class AudioHandler:
         channels: int = 1,  # Mono - AC108 supports it and works better with openWakeWord
         chunk_size: int = 1280,  # 80ms at 16kHz (required by openWakeWord)
         vad_aggressiveness: int = 2,
+        event_bus=None,  # Optional EventBus for voice activity events
+        silence_threshold: int = 15,  # ~1 second of silence (at 80ms per chunk)
     ):
         """Initialize audio handler.
 
@@ -35,6 +38,8 @@ class AudioHandler:
             channels: Number of input channels
             chunk_size: Number of samples per chunk (must be multiple of 80ms for openWakeWord)
             vad_aggressiveness: VAD aggressiveness level (0-3)
+            event_bus: Optional EventBus to publish voice activity events
+            silence_threshold: Number of silent chunks before considering voice stopped
         """
         self.device_name = device_name
         self.sample_rate = sample_rate
@@ -48,6 +53,13 @@ class AudioHandler:
         # Initialize VAD
         self.vad = webrtcvad.Vad(vad_aggressiveness)
 
+        # Voice activity tracking
+        self.event_bus = event_bus
+        self.silence_threshold = silence_threshold
+        self.voice_active = False
+        self.voice_start_time = None
+        self.silence_frames = 0
+
         # Multi-consumer queues
         self.consumer_queues: List[queue.Queue] = []
         self.hotword_queue = queue.Queue(maxsize=3)  # Small queue, can skip frames
@@ -60,13 +72,14 @@ class AudioHandler:
         logger.info(
             f"AudioHandler initialized: {sample_rate}Hz, {channels}ch, "
             f"chunk_size={chunk_size}, vad={vad_aggressiveness}, "
-            f"multi-consumer mode with {len(self.consumer_queues)} queues"
+            f"multi-consumer mode with {len(self.consumer_queues)} queues, "
+            f"VAD events={'enabled' if event_bus else 'disabled'}"
         )
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         """Audio callback - called by PyAudio in background thread.
 
-        Broadcasts audio to all registered consumer queues.
+        Broadcasts audio to all registered consumer queues and tracks voice activity.
         """
         if status:
             logger.warning(f"Audio callback status: {status}")
@@ -80,7 +93,69 @@ class AudioHandler:
                 # that want to skip-ahead to latest frame
                 pass
 
+        # Track voice activity if event bus is configured
+        if self.event_bus:
+            self._track_voice_activity(in_data)
+
         return (None, pyaudio.paContinue)
+
+    def _track_voice_activity(self, audio_data: bytes):
+        """Track voice activity and emit events when voice starts/stops.
+        
+        Called from audio callback thread.
+        
+        Args:
+            audio_data: Raw audio data from callback
+        """
+        try:
+            is_speech = self.is_speech(audio_data)
+
+            if is_speech:
+                self.silence_frames = 0
+
+                # Voice activity started?
+                if not self.voice_active:
+                    self.voice_active = True
+                    self.voice_start_time = datetime.now()
+
+                    # Import here to avoid circular dependency
+                    from .event_bus import VoiceActivityEvent
+
+                    event = VoiceActivityEvent(
+                        timestamp=self.voice_start_time,
+                        activity_type='started'
+                    )
+
+                    logger.info("Voice activity started")
+                    self.event_bus.publish("voice_activity_started", event)
+            else:
+                # Increment silence counter
+                if self.voice_active:
+                    self.silence_frames += 1
+
+                    # Voice activity stopped?
+                    if self.silence_frames >= self.silence_threshold:
+                        self.voice_active = False
+                        stop_time = datetime.now()
+                        duration = (stop_time - self.voice_start_time).total_seconds()
+
+                        # Import here to avoid circular dependency
+                        from .event_bus import VoiceActivityEvent
+
+                        event = VoiceActivityEvent(
+                            timestamp=stop_time,
+                            activity_type='stopped',
+                            duration=duration
+                        )
+
+                        logger.info(f"Voice activity stopped (duration: {duration:.1f}s)")
+                        self.event_bus.publish("voice_activity_stopped", event)
+
+                        self.voice_start_time = None
+                        self.silence_frames = 0
+
+        except Exception as e:
+            logger.error(f"Error tracking voice activity: {e}", exc_info=True)
 
     def start_stream(self):
         """Start audio input stream in callback mode."""

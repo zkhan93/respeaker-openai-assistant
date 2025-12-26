@@ -1,10 +1,8 @@
 """Run the main voice assistant service."""
 
 import logging
-import signal
-from datetime import datetime
 
-from voice_assistant.core import AudioHandler, HotwordDetector, EventBus, HotwordEvent
+from voice_assistant.core import AudioHandler, HotwordDetector, EventBus, VoiceDetectionService
 from voice_assistant.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -39,9 +37,13 @@ def main(log_level: str = "INFO") -> bool:
     print("=" * 70)
     print()
     print("Event-Driven Architecture:")
-    print("  Audio Stream → Hotword Detector → EventBus")
-    print("                                      ↓")
-    print("                             Consumers (subscribe)")
+    print("  Audio Stream → Voice Detection Service → EventBus")
+    print("                                              ↓")
+    print("  Events: • hotword_detected")
+    print("          • voice_activity_started")
+    print("          • voice_activity_stopped")
+    print("                                              ↓")
+    print("                                 Consumers (subscribe)")
     print()
     print("Say 'ALEXA' to activate")
     print("Press Ctrl+C to stop")
@@ -49,15 +51,16 @@ def main(log_level: str = "INFO") -> bool:
     print()
     
     # Create core components
-    audio_handler = AudioHandler()
     event_bus = EventBus()
+    audio_handler = AudioHandler(event_bus=event_bus)  # Pass event bus for VAD events
     hotword_detector = HotwordDetector()
+    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
     
     # TODO: Create and register consumers here
     # Example:
     #   realtime_consumer = RealtimeConsumer(event_bus, audio_handler, config.openai_api_key)
     #   recording_consumer = RecordingConsumer(event_bus, audio_handler)
-    # They will automatically subscribe to hotword events
+    # They will automatically subscribe to events
     
     logger.info("NOTE: Consumer registration not yet implemented")
     logger.info("For now, use: voice-assistant test-stt")
@@ -67,58 +70,18 @@ def main(log_level: str = "INFO") -> bool:
     
     # Start audio stream
     audio_handler.start_stream()
-    logger.info("Audio stream started (callback mode)")
+    logger.info("Audio stream started (callback mode with VAD events)")
     print("✓ Audio stream started")
-    print("✓ Listening for 'alexa'...")
+    print("✓ Voice detection service ready")
+    print("✓ Listening for 'alexa' and voice activity...")
     print()
     
-    running = True
-    
-    def signal_handler(sig, frame):
-        nonlocal running
-        logger.info(f"Received signal {sig}, shutting down...")
-        running = False
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Main detection loop
+    # Run detection service (blocks until stopped)
     try:
-        while running:
-            # Get latest audio for hotword detection (skip-ahead queue)
-            audio_data = audio_handler.read_hotword_chunk()
-            
-            if audio_data:
-                # Check for hotword
-                pcm16_data = audio_handler.convert_to_pcm16_mono(audio_data)
-                scores = hotword_detector.get_scores(pcm16_data)
-                
-                for model_name, score in scores.items():
-                    if score >= hotword_detector.threshold:
-                        # Hotword detected! Publish event
-                        queue_status = audio_handler.get_queue_status()
-                        
-                        event = HotwordEvent(
-                            timestamp=datetime.now(),
-                            hotword=model_name,
-                            score=score,
-                            audio_queue_size=queue_status['audio_queue']
-                        )
-                        
-                        logger.info(f"Hotword '{model_name}' detected! Score: {score:.3f}")
-                        print(f"\n🎤 Hotword '{model_name}' detected! (score: {score:.3f})")
-                        
-                        # Publish event - consumers will handle it
-                        event_bus.publish("hotword_detected", event)
-                        
-                        # Brief pause
-                        import time
-                        time.sleep(0.1)
-    
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        detection_service.start()
+        return True
     except Exception as e:
-        logger.error(f"Error in main loop: {e}", exc_info=True)
+        logger.error(f"Error running detection service: {e}", exc_info=True)
         return False
     finally:
         # Cleanup
@@ -127,8 +90,6 @@ def main(log_level: str = "INFO") -> bool:
         audio_handler.cleanup()
         logger.info("Cleanup complete")
         print("\n✓ Service stopped")
-    
-    return True
 
 
 if __name__ == "__main__":

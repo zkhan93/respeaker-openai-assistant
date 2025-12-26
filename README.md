@@ -25,10 +25,10 @@ nano config/config.yaml  # Add your OpenAI API key
 # 3. Download models
 uv run voice-assistant download-models
 
-# 4. Test hotword detection
-uv run voice-assistant test-hotword --debug
+# 4. Test event system (no OpenAI needed)
+uv run voice-assistant test-events
 
-# 5. Test speech-to-text
+# 5. Test speech-to-text (requires OpenAI API key)
 uv run voice-assistant test-stt
 ```
 
@@ -102,14 +102,17 @@ uv run voice-assistant download-models
 ### Test Commands
 
 ```bash
+# Monitor all events in real-time (diagnostic tool)
+uv run voice-assistant test-events
+
+# Test speech-to-text (event-driven demo)
+uv run voice-assistant test-stt
+
 # Test hotword detection (records 5s after "alexa")
 uv run voice-assistant test-hotword [--debug]
 
 # Test with native paInt16 mono (verification)
 uv run voice-assistant test-hotword-native
-
-# Test speech-to-text (event-driven demo)
-uv run voice-assistant test-stt
 
 # Test audio recording (15s capture & playback)
 uv run voice-assistant record [--duration 15]
@@ -123,33 +126,38 @@ uv run voice-assistant test-audio
 ### Overview
 
 ```
-┌──────────────────────────────────────────────────────┐
-│              Event-Driven Architecture               │
-├──────────────────────────────────────────────────────┤
-│                                                      │
-│  Audio Stream (Callback Thread)                     │
-│         ↓                                            │
-│    ┌────────────────┐                                │
-│    │ AudioHandler   │  Broadcasts to:                │
-│    │ (Producer)     │  • hotword_queue (skip-ahead)  │
-│    └────────┬───────┘  • audio_queue (buffered)      │
-│             │                                         │
-│             ↓                                         │
-│    ┌────────────────┐                                │
-│    │ HotwordDetector│                                │
-│    └────────┬───────┘                                │
-│             │ Publishes                               │
-│             ↓                                         │
-│    ┌────────────────┐                                │
-│    │   EventBus     │                                │
-│    └────────┬───────┘                                │
-│             │ Broadcasts                              │
-│      ┌──────┴──────┬────────────┐                    │
-│      ↓             ↓            ↓                    │
-│  Consumer1     Consumer2    Consumer3                │
-│  (STT)         (Realtime)   (Recording)              │
-│                                                      │
-└──────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│              Event-Driven Architecture                    │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│  Audio Stream (Callback Thread)                          │
+│         ↓                                                 │
+│    ┌────────────────────┐                                 │
+│    │  AudioHandler      │  Emits VAD events               │
+│    │  (Producer + VAD)  │  Broadcasts audio to:           │
+│    └─────┬──────────┬───┘  • hotword_queue (skip-ahead)  │
+│          │          │      • audio_queue (buffered)       │
+│          │ VAD      │ Audio                               │
+│          │ Events   │ Frames                              │
+│          ↓          ↓                                      │
+│    ┌─────────┐  ┌──────────────────┐                      │
+│    │EventBus │  │VoiceDetection    │                      │
+│    │         │←─│Service           │                      │
+│    │         │  │(Hotword Loop)    │                      │
+│    └────┬────┘  └──────────────────┘                      │
+│         │                                                  │
+│         │ Events:                                          │
+│         │  • hotword_detected                              │
+│         │  • voice_activity_started                        │
+│         │  • voice_activity_stopped                        │
+│         │                                                  │
+│         ↓                                                  │
+│    ┌────────────┬────────────┬────────────┐               │
+│    ↓            ↓            ↓            ↓               │
+│ Consumer1   Consumer2    Consumer3    Consumer4           │
+│ (STT)       (Realtime)   (Recording)  (Custom)            │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ### Key Concepts
@@ -173,13 +181,53 @@ audio = audio_handler.read_audio_chunk()
 
 Components communicate via events, not direct calls:
 
-```python
-# Publisher (hotword detector)
-event = HotwordEvent(timestamp=now, hotword="alexa", score=0.95)
-event_bus.publish("hotword_detected", event)
+**Available Events:**
 
-# Subscriber (consumer)
-event_bus.subscribe("hotword_detected", my_callback)
+1. **hotword_detected** - Wake word detected
+```python
+event = HotwordEvent(
+    timestamp=now,
+    hotword="alexa",
+    score=0.95,
+    audio_queue_size=42
+)
+event_bus.publish("hotword_detected", event)
+```
+
+2. **voice_activity_started** - User started speaking
+```python
+event = VoiceActivityEvent(
+    timestamp=now,
+    activity_type='started'
+)
+event_bus.publish("voice_activity_started", event)
+```
+
+3. **voice_activity_stopped** - User stopped speaking
+```python
+event = VoiceActivityEvent(
+    timestamp=now,
+    activity_type='stopped',
+    duration=3.2  # seconds
+)
+event_bus.publish("voice_activity_stopped", event)
+```
+
+**Subscribing to Events:**
+
+```python
+# Subscribe to events
+event_bus.subscribe("hotword_detected", on_hotword)
+event_bus.subscribe("voice_activity_stopped", on_voice_stopped)
+
+# Example: Capture exact duration of user speech
+def on_hotword(event: HotwordEvent):
+    self.recording = True
+    # Start background thread to collect audio
+
+def on_voice_stopped(event: VoiceActivityEvent):
+    self.recording = False
+    # Transcribe collected audio (exact duration!)
 ```
 
 #### 3. Real-Time Performance
@@ -188,25 +236,61 @@ event_bus.subscribe("hotword_detected", my_callback)
 - **Skip-ahead**: Hotword queue drops old frames to stay current
 - **Parallel consumers**: All process independently, no blocking
 
+#### 4. Voice Detection Service (Core Loop)
+
+The `VoiceDetectionService` is a reusable orchestration component that:
+- Runs the main detection loop (hotword detection)
+- Publishes hotword events
+- Integrates with AudioHandler (which publishes voice activity events)
+- Can be used by any command to build different functionality
+
+**Why separate from commands?**
+- Commands are UI/entry points
+- Core loop is reusable business logic
+- Different commands can use the same detection service with different consumers
+
+**Example Usage:**
+
+```python
+# Create core components
+event_bus = EventBus()
+audio_handler = AudioHandler(event_bus=event_bus)  # VAD events enabled
+hotword_detector = HotwordDetector()
+detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+
+# Register consumers (they subscribe to events)
+stt_consumer = SpeechToTextConsumer(event_bus, audio_handler, api_key)
+realtime_consumer = RealtimeConsumer(event_bus, audio_handler, api_key)
+
+# Start audio stream
+audio_handler.start_stream()
+
+# Run detection loop (blocks until stopped)
+detection_service.start()
+```
+
 ### Code Structure
 
 ```
 src/voice_assistant/
-├── core/                    # Core components (producers)
-│   ├── audio_handler.py     # Multi-consumer audio capture
-│   ├── event_bus.py         # Pub-sub event system
-│   └── hotword_detector.py  # Wake word detection
+├── core/                        # Core components (producers & orchestration)
+│   ├── audio_handler.py         # Audio capture + VAD event emission
+│   ├── detection_service.py     # Detection loop (hotword + orchestration)
+│   ├── event_bus.py             # Pub-sub event system
+│   └── hotword_detector.py      # Wake word detection
 │
-├── consumers/               # Event subscribers
-│   └── stt_consumer.py      # Speech-to-text consumer
+├── consumers/                   # Event subscribers
+│   └── stt_consumer.py          # Speech-to-text consumer
 │
-├── services/                # External services
-│   ├── openai_client.py     # OpenAI Realtime API client
-│   └── state_machine.py     # State management
+├── services/                    # External services
+│   ├── openai_client.py         # OpenAI Realtime API client
+│   └── state_machine.py         # State management
 │
-├── commands/                # Test commands
-│   ├── test_mode.py         # Hotword test
-│   └── simple_record.py     # Audio test
+├── commands/                    # CLI commands (use core components)
+│   ├── run.py                   # Main service command
+│   ├── test_stt.py              # Test STT consumer
+│   ├── test_hotword.py          # Hotword detection test
+│   └── ...                      # Other utilities
 │
 ├── cli.py                   # Command-line interface
 ├── config.py                # Configuration management

@@ -14,6 +14,7 @@ Examples:
   voice-assistant run                    # Run the voice assistant service
   voice-assistant verify                 # Verify installation
   voice-assistant download-models        # Download hotword models
+  voice-assistant test-events            # Monitor all events (hotword + VAD)
   voice-assistant test-hotword --debug   # Test hotword with debug output
   voice-assistant test-stt               # Test speech-to-text consumer
         """,
@@ -83,6 +84,12 @@ Examples:
         help="Test speech-to-text consumer with event-driven architecture"
     )
     
+    # Test events command
+    subparsers.add_parser(
+        "test-events",
+        help="Monitor all voice detection events in real-time"
+    )
+    
     args = parser.parse_args()
     
     # Route to appropriate command
@@ -123,6 +130,10 @@ Examples:
         
         elif args.command == "test-stt":
             from voice_assistant.commands.test_stt import main
+            sys.exit(0 if main() else 1)
+        
+        elif args.command == "test-events":
+            from voice_assistant.commands.test_events import main
             sys.exit(0 if main() else 1)
         
         else:

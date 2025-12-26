@@ -2,6 +2,7 @@
 
 import io
 import logging
+import threading
 import time
 import wave
 from typing import Optional
@@ -9,7 +10,7 @@ from typing import Optional
 import openai
 
 from ..core.audio_handler import AudioHandler
-from ..core.event_bus import EventBus, HotwordEvent
+from ..core.event_bus import EventBus, HotwordEvent, VoiceActivityEvent
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class SpeechToTextConsumer:
         event_bus: EventBus,
         audio_handler: AudioHandler,
         openai_api_key: str,
-        recording_duration: float = 5.0,
+        max_recording_duration: float = 30.0,
     ):
         """Initialize STT consumer.
 
@@ -30,36 +31,88 @@ class SpeechToTextConsumer:
             event_bus: Event bus to subscribe to
             audio_handler: Audio handler to pull audio from
             openai_api_key: OpenAI API key for Whisper
-            recording_duration: How long to record after hotword (seconds)
+            max_recording_duration: Maximum recording duration (seconds)
         """
         self.event_bus = event_bus
         self.audio_handler = audio_handler
-        self.recording_duration = recording_duration
+        self.max_recording_duration = max_recording_duration
 
         # Initialize OpenAI client
         self.openai_client = openai.OpenAI(api_key=openai_api_key)
 
-        # Subscribe to hotword events
-        self.event_bus.subscribe("hotword_detected", self.on_hotword_detected)
+        # Recording state
+        self.recording = False
+        self.recording_start_time = None
+        self.recorded_frames = []
+        self.recording_thread = None
 
-        logger.info(f"SpeechToTextConsumer initialized (recording_duration={recording_duration}s)")
+        # Subscribe to events
+        self.event_bus.subscribe("hotword_detected", self.on_hotword_detected)
+        self.event_bus.subscribe("voice_activity_stopped", self.on_voice_stopped)
+
+        logger.info(f"SpeechToTextConsumer initialized (max_duration={max_recording_duration}s)")
 
     def on_hotword_detected(self, event: HotwordEvent):
-        """Handle hotword detected event.
+        """Handle hotword detected event - start recording.
 
         Args:
             event: Hotword event with timestamp and details
         """
-        logger.info(f"🎤 Hotword detected! Starting {self.recording_duration}s transcription...")
+        if self.recording:
+            logger.warning("Already recording, ignoring hotword")
+            return
+
+        logger.info(f"🎤 Hotword detected! Starting recording...")
         logger.info(f"   Hotword: '{event.hotword}' (score: {event.score:.3f})")
         logger.info(f"   Queue size at detection: {event.audio_queue_size} frames")
 
+        # Start recording
+        self.recording = True
+        self.recording_start_time = time.time()
+        self.recorded_frames = []
+
+        # Start background thread to collect audio
+        self.recording_thread = threading.Thread(target=self._audio_collection_loop, daemon=True)
+        self.recording_thread.start()
+
+        logger.info("✓ Recording started, waiting for voice activity to stop...")
+
+    def on_voice_stopped(self, event: VoiceActivityEvent):
+        """Handle voice activity stopped event - stop recording and transcribe.
+
+        Args:
+            event: Voice activity event with timestamp and duration
+        """
+        if not self.recording:
+            # Not recording, ignore
+            return
+
+        logger.info(f"🔇 Voice stopped (duration: {event.duration:.1f}s)")
+
         try:
-            # Record audio for specified duration
-            audio_data = self._record_audio(self.recording_duration)
+            # Stop recording (this will stop the background thread)
+            self.recording = False
+            
+            # Wait for recording thread to finish
+            if self.recording_thread and self.recording_thread.is_alive():
+                self.recording_thread.join(timeout=1.0)
+            
+            # Collect any remaining audio chunks
+            self._collect_remaining_audio()
+            
+            recording_duration = time.time() - self.recording_start_time
+
+            if not self.recorded_frames:
+                logger.error("No audio recorded")
+                return
+
+            logger.info(f"✓ Recording complete ({recording_duration:.1f}s, {len(self.recorded_frames)} frames)")
+
+            # Convert frames to WAV
+            audio_data = self._frames_to_wav(self.recorded_frames)
 
             if not audio_data:
-                logger.error("Failed to record audio")
+                logger.error("Failed to convert audio to WAV")
                 return
 
             # Transcribe using OpenAI Whisper
@@ -75,50 +128,58 @@ class SpeechToTextConsumer:
                 logger.warning("No transcription returned")
 
         except Exception as e:
-            logger.error(f"Error processing hotword event: {e}", exc_info=True)
+            logger.error(f"Error processing voice stopped event: {e}", exc_info=True)
+        finally:
+            # Clear recording state
+            self.recording = False
+            self.recorded_frames = []
+            self.recording_start_time = None
 
-    def _record_audio(self, duration: float) -> Optional[bytes]:
-        """Record audio from OpenAI queue.
+    def _audio_collection_loop(self):
+        """Background thread to continuously collect audio while recording."""
+        logger.debug("Audio collection thread started")
+        
+        while self.recording:
+            chunk = self.audio_handler.read_audio_chunk(timeout=0.1)
+            if chunk:
+                self.recorded_frames.append(chunk)
+            
+            # Safety check - don't exceed max duration
+            if self.recording_start_time:
+                elapsed = time.time() - self.recording_start_time
+                if elapsed >= self.max_recording_duration:
+                    logger.warning(f"Max recording duration ({self.max_recording_duration}s) reached")
+                    self.recording = False
+                    break
+        
+        logger.debug("Audio collection thread stopped")
+
+    def _collect_remaining_audio(self):
+        """Collect any remaining audio chunks from the queue (non-blocking)."""
+        timeout = 0.05  # 50ms timeout per chunk
+        
+        while True:
+            chunk = self.audio_handler.read_audio_chunk(timeout=timeout)
+            if chunk:
+                self.recorded_frames.append(chunk)
+            else:
+                # No more chunks available
+                break
+
+    def _frames_to_wav(self, frames: list) -> Optional[bytes]:
+        """Convert recorded frames to WAV format.
 
         Args:
-            duration: Duration to record in seconds
+            frames: List of raw audio frames (PCM16 mono)
 
         Returns:
             WAV audio data as bytes, or None if error
         """
-        sample_rate = self.audio_handler.sample_rate
-        chunk_duration = self.audio_handler.chunk_size / sample_rate  # 80ms
-        num_chunks = int(duration / chunk_duration)
-
-        logger.info(f"Recording {num_chunks} chunks (~{duration:.1f}s)...")
-
-        frames = []
-        chunks_recorded = 0
-
-        for i in range(num_chunks):
-            chunk = self.audio_handler.read_audio_chunk(timeout=0.2)
-            if chunk:
-                frames.append(chunk)
-                chunks_recorded += 1
-
-                # Log progress every second
-                if (i + 1) % 13 == 0:
-                    elapsed = (i + 1) * chunk_duration
-                    logger.info(f"  Recording... {elapsed:.1f}s")
-            else:
-                logger.warning(f"Timeout reading chunk {i + 1}/{num_chunks}")
-
         if not frames:
-            logger.error("No audio frames recorded")
             return None
 
-        logger.info(
-            f"✓ Recorded {chunks_recorded} chunks ({chunks_recorded * chunk_duration:.1f}s)"
-        )
-
-        # Combine frames into WAV format
-        wav_data = self._create_wav(frames, sample_rate)
-        return wav_data
+        sample_rate = self.audio_handler.sample_rate
+        return self._create_wav(frames, sample_rate)
 
     def _create_wav(self, frames: list, sample_rate: int) -> bytes:
         """Create WAV file from audio frames.
