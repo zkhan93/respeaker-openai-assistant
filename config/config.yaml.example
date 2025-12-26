@@ -1,0 +1,38 @@
+# Voice Assistant Configuration Example
+# Copy this file to config.yaml and fill in your actual values
+
+# OpenAI API Configuration
+openai:
+  api_key: "your-openai-api-key-here"  # Replace with your actual API key
+  model: "gpt-realtime"  # OpenAI Realtime API model
+
+# Audio Configuration
+audio:
+  device: "ac108"  # ALSA device name for ReSpeaker 4-Mic Array
+  sample_rate: 16000  # Hz
+  channels: 4  # Number of microphone channels
+  chunk_size: 320  # Samples per chunk (20ms at 16kHz)
+
+# Hotword Detection Configuration
+hotword:
+  model: "alexa"  # Wake word model
+  threshold: 0.5  # Detection threshold (0.0-1.0)
+  # Lower threshold = more sensitive (more false positives)
+  # Higher threshold = less sensitive (more false negatives)
+
+# Voice Activity Detection (VAD) Configuration
+vad:
+  aggressiveness: 2  # VAD aggressiveness level (0-3)
+  # 0 = least aggressive (more speech detected)
+  # 3 = most aggressive (less speech detected)
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# State Machine Configuration
+state:
+  timeout_listening: 10  # Seconds to wait in LISTENING before timeout
+  timeout_processing: 30  # Seconds to wait in PROCESSING before timeout
+
