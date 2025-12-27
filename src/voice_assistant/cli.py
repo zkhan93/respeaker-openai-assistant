@@ -15,7 +15,7 @@ Examples:
   voice-assistant verify                 # Verify installation
   voice-assistant download-models        # Download hotword models
   voice-assistant test-events            # Monitor all events (hotword + VAD)
-  voice-assistant test-hotword --debug   # Test hotword with debug output
+  voice-assistant test-realtime          # Test OpenAI Realtime API (voice conversation)
   voice-assistant test-stt               # Test speech-to-text consumer
         """,
     )
@@ -84,6 +84,12 @@ Examples:
         help="Test speech-to-text consumer with event-driven architecture"
     )
     
+    # Test Realtime API consumer
+    subparsers.add_parser(
+        "test-realtime",
+        help="Test OpenAI Realtime API with bidirectional voice conversation"
+    )
+    
     # Test events command
     subparsers.add_parser(
         "test-events",
@@ -130,6 +136,10 @@ Examples:
         
         elif args.command == "test-stt":
             from voice_assistant.commands.test_stt import main
+            sys.exit(0 if main() else 1)
+        
+        elif args.command == "test-realtime":
+            from voice_assistant.commands.test_realtime import main
             sys.exit(0 if main() else 1)
         
         elif args.command == "test-events":

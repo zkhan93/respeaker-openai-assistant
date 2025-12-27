@@ -5,7 +5,7 @@ Wants=sound.target
 
 [Service]
 Type=simple
-ExecStart=/home/pi/.local/bin/uv run voice-assistant run
+ExecStart=/home/pi/.local/bin/uv run voice-assistant test-realtime
 WorkingDirectory=/home/pi/llm-assistant/voice-assistant
 StandardOutput=journal
 StandardError=journal

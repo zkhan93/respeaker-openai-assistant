@@ -56,16 +56,18 @@ def main(log_level: str = "INFO") -> bool:
     hotword_detector = HotwordDetector()
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
     
-    # TODO: Create and register consumers here
-    # Example:
-    #   realtime_consumer = RealtimeConsumer(event_bus, audio_handler, config.openai_api_key)
-    #   recording_consumer = RecordingConsumer(event_bus, audio_handler)
-    # They will automatically subscribe to events
+    # Create and register Realtime consumer
+    from voice_assistant.consumers import RealtimeConsumer
     
-    logger.info("NOTE: Consumer registration not yet implemented")
-    logger.info("For now, use: voice-assistant test-stt")
-    print("⚠️  NOTE: Full Realtime API consumer not yet implemented")
-    print("   Use 'voice-assistant test-stt' for speech-to-text demo")
+    realtime_consumer = RealtimeConsumer(
+        event_bus=event_bus,
+        audio_handler=audio_handler,
+        openai_api_key=config.openai_api_key,
+    )
+    realtime_consumer.start()
+    
+    logger.info("Realtime consumer initialized and started")
+    print("✓ OpenAI Realtime API consumer ready")
     print()
     
     # Start audio stream
@@ -86,6 +88,7 @@ def main(log_level: str = "INFO") -> bool:
     finally:
         # Cleanup
         logger.info("Cleaning up...")
+        realtime_consumer.cleanup()
         audio_handler.stop_stream()
         audio_handler.cleanup()
         logger.info("Cleanup complete")

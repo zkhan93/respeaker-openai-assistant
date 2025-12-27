@@ -108,6 +108,9 @@ uv run voice-assistant test-events
 # Test speech-to-text (event-driven demo)
 uv run voice-assistant test-stt
 
+# Test OpenAI Realtime API (full voice conversation)
+uv run voice-assistant test-realtime
+
 # Test hotword detection (records 5s after "alexa")
 uv run voice-assistant test-hotword [--debug]
 
@@ -137,6 +140,20 @@ uv run voice-assistant test-audio
    - **Important:** Only speech after "alexa" is transcribed
    - If you speak without saying "alexa", it's ignored (by design)
    - **Multiple hotwords:** If you say "alexa" again before stopping, the recording restarts (allows correction/new command)
+
+3. **`test-realtime`** - Test OpenAI Realtime API (requires API key)
+   - Full bidirectional voice conversation with AI
+   - **How it works:**
+     - Say "alexa" → Connects to OpenAI Realtime API
+     - Speak your question/command → Streams audio to OpenAI
+     - Stop speaking (~1s pause) → AI processes and responds
+     - **AI speaks back!** → Plays audio response through speakers
+   - **Features:**
+     - Real-time audio streaming (no waiting for transcription)
+     - AI responds with voice (not just text)
+     - Natural conversation flow
+     - Say "alexa" again to interrupt/start new command
+   - **Best for:** Interactive conversations, questions that need spoken responses
 
 ## Architecture
 
@@ -394,6 +411,28 @@ vad:
    - Speech without hotword is ignored
    - Multiple "alexa" → uses last one before voice stops
 
+### Realtime API Consumer
+
+1. Subscribes to `hotword_detected` and `voice_activity_stopped` events
+2. When hotword detected:
+   - Connects to OpenAI Realtime API via WebSocket
+   - Starts streaming audio from `audio_queue` in real-time
+   - If another hotword detected: cancels current response, restarts
+3. When voice activity stops:
+   - Commits audio buffer and requests AI response
+   - Receives audio response from OpenAI
+   - Plays audio back through speakers
+4. Features:
+   - Bidirectional audio streaming (send + receive)
+   - Low latency (real-time processing)
+   - AI speaks back with voice
+   - Interruption support (say "alexa" to cancel/restart)
+5. Architecture:
+   - Runs async event loop in background thread
+   - Audio streaming in separate thread
+   - Audio playback in separate thread
+   - All synchronized via event bus
+
 ### Adding Custom Consumers
 
 ```python
@@ -494,6 +533,30 @@ Voice Activity Stopped! 🔇
 
 ## Troubleshooting
 
+### Realtime API Errors
+
+**Error: "Unknown parameter: 'session.modalities'"**
+
+This error occurred in older versions. The fix:
+- Removed `modalities` from session configuration
+- The API now infers modalities from context
+- **Already fixed** in current version
+
+**Error: "Invalid authentication" or "401 Unauthorized"**
+- Check your OpenAI API key in `config/config.yaml`
+- Ensure you have access to the Realtime API (requires payment method)
+- The model name should be `gpt-4o-realtime-preview-2024-12-17`
+
+**No audio playback from AI:**
+- Check speaker volume and connections
+- Verify ALSA playback device is working: `speaker-test -t wav -c 2`
+- OpenAI outputs 24kHz audio - ensure your speakers support it
+
+**High latency or delays:**
+- Check internet connection speed
+- Realtime API requires stable, low-latency connection
+- Consider using Ethernet instead of WiFi
+
 ### Hotword Not Detecting
 
 **Check scores**:
@@ -562,6 +625,52 @@ audio_queue: 10-50 frames (good - buffering)
 ```
 
 If audio_queue grows >80 frames, system may be falling behind.
+
+### Audio Playback Issues
+
+**Test speaker first:**
+```bash
+# Quick speaker test (plays a 440Hz beep)
+uv run python test_speaker.py
+
+# Or use system tools
+speaker-test -t sine -f 440 -l 1
+```
+
+**No audio from AI response:**
+1. Check if audio chunks are being received:
+   - Look for `"Received audio delta"` in logs
+   - Should see `"🔊 AI is responding..."` message
+
+2. Verify default output device:
+   ```bash
+   aplay -l  # List playback devices
+   ```
+
+3. Check ALSA mixer:
+   ```bash
+   alsamixer
+   # Press F6 to select sound card
+   # Adjust "Master" or "PCM" volume
+   ```
+
+4. Test with different output device:
+   ```python
+   # In realtime_consumer.py, specify device index
+   self.playback_stream = self.audio.open(
+       ...
+       output_device_index=0,  # Try different indices
+   )
+   ```
+
+5. Check logs for OpenAI events:
+   - `response.audio.delta` - Audio chunks received
+   - `response.audio.done` - Audio response complete
+   - `Event: response.content_part.added` - Response structure
+
+**Audio choppy or distorted:**
+- Increase `frames_per_buffer` in playback stream (try 2048 or 4096)
+- Check system load: `top` or `htop`
 
 ## Running as Service (Future)
 
