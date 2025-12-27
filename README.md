@@ -129,6 +129,14 @@ uv run voice-assistant test-audio
 2. **`test-stt`** - Test full STT pipeline (requires API key)
    - Verifies OpenAI integration
    - Tests complete event-driven flow
+   - **How it works:**
+     - Say "alexa" → System starts recording
+     - Continue speaking → Audio captured
+     - Stop speaking (~1s pause) → Transcription sent to OpenAI
+     - Wait 1-3 seconds → Transcription displayed
+   - **Important:** Only speech after "alexa" is transcribed
+   - If you speak without saying "alexa", it's ignored (by design)
+   - **Multiple hotwords:** If you say "alexa" again before stopping, the recording restarts (allows correction/new command)
 
 ## Architecture
 
@@ -374,12 +382,17 @@ vad:
 
 ### Speech-to-Text Consumer
 
-1. Subscribes to `hotword_detected` events
-2. When event received:
-   - Records 5 seconds from `audio_queue`
-   - Sends to OpenAI Whisper API
-   - Logs transcription
-3. Runs in separate thread, doesn't block detector
+1. Subscribes to `hotword_detected` and `voice_activity_stopped` events
+2. When hotword detected:
+   - Starts recording from `audio_queue` in background thread
+   - If another hotword detected: restarts recording (allows correction)
+3. When voice activity stops:
+   - Stops recording and sends audio to OpenAI Whisper API
+   - Displays transcription
+4. Behavior:
+   - Only transcribes speech AFTER hotword
+   - Speech without hotword is ignored
+   - Multiple "alexa" → uses last one before voice stops
 
 ### Adding Custom Consumers
 

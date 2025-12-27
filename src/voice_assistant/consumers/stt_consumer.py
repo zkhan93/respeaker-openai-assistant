@@ -54,18 +54,29 @@ class SpeechToTextConsumer:
 
     def on_hotword_detected(self, event: HotwordEvent):
         """Handle hotword detected event - start recording.
-
+        
         Args:
             event: Hotword event with timestamp and details
         """
         if self.recording:
-            logger.warning("Already recording, ignoring hotword")
-            return
+            # Already recording - restart to capture new command
+            logger.info(f"Hotword detected while recording - restarting recording session")
+            print(f"\n🎤 New hotword '{event.hotword}' detected! Restarting recording...")
+            
+            # Stop current recording
+            self.recording = False
+            if self.recording_thread and self.recording_thread.is_alive():
+                self.recording_thread.join(timeout=0.5)
+            
+            # Clear old frames
+            self.recorded_frames = []
 
+        print(f"\n🎤 Hotword '{event.hotword}' detected! Recording your command...")
+        
         logger.info(f"🎤 Hotword detected! Starting recording...")
         logger.info(f"   Hotword: '{event.hotword}' (score: {event.score:.3f})")
         logger.info(f"   Queue size at detection: {event.audio_queue_size} frames")
-
+        
         # Start recording
         self.recording = True
         self.recording_start_time = time.time()
@@ -84,9 +95,12 @@ class SpeechToTextConsumer:
             event: Voice activity event with timestamp and duration
         """
         if not self.recording:
-            # Not recording, ignore
+            # Not recording - voice activity without hotword
+            logger.debug(f"Voice activity stopped (duration: {event.duration:.1f}s) but not recording - no hotword detected")
             return
 
+        print(f"🔇 Voice stopped. Processing {event.duration:.1f}s of audio...")
+        
         logger.info(f"🔇 Voice stopped (duration: {event.duration:.1f}s)")
 
         try:
@@ -103,6 +117,7 @@ class SpeechToTextConsumer:
             recording_duration = time.time() - self.recording_start_time
 
             if not self.recorded_frames:
+                print("❌ No audio recorded")
                 logger.error("No audio recorded")
                 return
 
@@ -116,15 +131,23 @@ class SpeechToTextConsumer:
                 return
 
             # Transcribe using OpenAI Whisper
+            print("\n⏳ Sending audio to OpenAI Whisper API (please wait)...")
             transcript = self._transcribe_audio(audio_data)
-
+            
             if transcript:
+                print("\n" + "=" * 70)
+                print("📝 TRANSCRIPTION")
+                print("=" * 70)
+                print(transcript)
+                print("=" * 70 + "\n")
+                
                 logger.info("=" * 70)
                 logger.info("📝 TRANSCRIPTION")
                 logger.info("=" * 70)
                 logger.info(transcript)
                 logger.info("=" * 70)
             else:
+                print("\n⚠️  No transcription returned from OpenAI\n")
                 logger.warning("No transcription returned")
 
         except Exception as e:
