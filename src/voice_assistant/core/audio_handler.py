@@ -26,9 +26,10 @@ class AudioHandler:
         sample_rate: int = 16000,
         channels: int = 1,  # Mono - AC108 supports it and works better with openWakeWord
         chunk_size: int = 1280,  # 80ms at 16kHz (required by openWakeWord)
-        vad_aggressiveness: int = 2,
+        vad_aggressiveness: int = 3,  # 0-3, higher = more strict (3 = only clear speech)
         event_bus=None,  # Optional EventBus for voice activity events
         silence_threshold: int = 15,  # ~1 second of silence (at 80ms per chunk)
+        speech_threshold: int = 3,  # Consecutive speech frames required to trigger
     ):
         """Initialize audio handler.
 
@@ -37,9 +38,10 @@ class AudioHandler:
             sample_rate: Sample rate in Hz
             channels: Number of input channels
             chunk_size: Number of samples per chunk (must be multiple of 80ms for openWakeWord)
-            vad_aggressiveness: VAD aggressiveness level (0-3)
+            vad_aggressiveness: VAD aggressiveness level (0-3, higher = requires clearer speech)
             event_bus: Optional EventBus to publish voice activity events
             silence_threshold: Number of silent chunks before considering voice stopped
+            speech_threshold: Consecutive speech frames required before considering voice started
         """
         self.device_name = device_name
         self.sample_rate = sample_rate
@@ -56,9 +58,11 @@ class AudioHandler:
         # Voice activity tracking
         self.event_bus = event_bus
         self.silence_threshold = silence_threshold
+        self.speech_threshold = speech_threshold
         self.voice_active = False
         self.voice_start_time = None
         self.silence_frames = 0
+        self.speech_frames = 0  # Count consecutive speech frames
 
         # Multi-consumer queues
         self.consumer_queues: List[queue.Queue] = []
@@ -71,7 +75,8 @@ class AudioHandler:
 
         logger.info(
             f"AudioHandler initialized: {sample_rate}Hz, {channels}ch, "
-            f"chunk_size={chunk_size}, vad={vad_aggressiveness}, "
+            f"chunk_size={chunk_size}, vad_aggressiveness={vad_aggressiveness}, "
+            f"speech_threshold={speech_threshold} frames, "
             f"multi-consumer mode with {len(self.consumer_queues)} queues, "
             f"VAD events={'enabled' if event_bus else 'disabled'}"
         )
@@ -111,10 +116,12 @@ class AudioHandler:
             is_speech = self.is_speech(audio_data)
 
             if is_speech:
+                # Speech detected
+                self.speech_frames += 1
                 self.silence_frames = 0
 
-                # Voice activity started?
-                if not self.voice_active:
+                # Voice activity started? (require speech_threshold consecutive frames)
+                if not self.voice_active and self.speech_frames >= self.speech_threshold:
                     self.voice_active = True
                     self.voice_start_time = datetime.now()
 
@@ -126,10 +133,13 @@ class AudioHandler:
                         activity_type='started'
                     )
 
-                    logger.info("Voice activity started")
+                    logger.info(f"Voice activity started (after {self.speech_frames} speech frames)")
                     self.event_bus.publish("voice_activity_started", event)
             else:
-                # Increment silence counter
+                # No speech detected
+                self.speech_frames = 0  # Reset consecutive speech counter
+                
+                # Increment silence counter if voice is active
                 if self.voice_active:
                     self.silence_frames += 1
 

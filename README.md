@@ -339,11 +339,26 @@ hotword:
 
 ```yaml
 vad:
-  aggressiveness: 2      # 0-3
+  aggressiveness: 3      # 0-3 (recommended: 3)
+  speech_threshold: 3    # Consecutive frames (filters noise)
+  silence_threshold: 15  # Frames before stopping (~1 second)
 ```
 
-- **0**: Least aggressive (detects more speech)
-- **3**: Most aggressive (requires clearer speech)
+**Aggressiveness** (0-3):
+- **0**: Least aggressive - detects any sound (not recommended)
+- **3**: Most aggressive - only clear speech (recommended)
+- Use 3 to avoid false triggers from taps, movements, background noise
+
+**Speech Threshold** (consecutive frames):
+- **3** (default): Requires 3 consecutive speech frames (~240ms)
+- **Higher (5-7)**: Stricter - ignores very brief sounds
+- **Lower (1-2)**: More sensitive - may trigger on brief noises
+- Filters out taps, clicks, and momentary sounds
+
+**Silence Threshold** (frames):
+- **15** (default): ~1 second of silence before stopping
+- **Higher (20-25)**: Waits longer before considering speech ended
+- **Lower (10-12)**: Faster response but may cut off pauses
 
 ## How It Works
 
@@ -385,6 +400,84 @@ class MyConsumer:
     def cleanup(self):
         self.event_bus.unsubscribe("hotword_detected", self.on_hotword)
 ```
+
+## Tuning Voice Activity Detection
+
+### Problem: False Triggers (taps, movements, background noise)
+
+**Symptoms:**
+- Voice activity events when you tap the desk
+- Events triggered by keyboard typing
+- Background sounds causing false starts
+
+**Solutions (in order of effectiveness):**
+
+1. **Increase aggressiveness to 3** (default)
+   ```yaml
+   vad:
+     aggressiveness: 3  # Most strict
+   ```
+
+2. **Increase speech threshold**
+   ```yaml
+   vad:
+     speech_threshold: 5  # Require 5 consecutive frames (~400ms)
+   ```
+   - Brief sounds (taps, clicks) won't trigger
+   - Real speech sustained longer than 400ms will trigger
+
+3. **Test with `test-events`**
+   ```bash
+   uv run voice-assistant test-events
+   # Tap desk, type, make noise
+   # Should NOT trigger voice activity events
+   # Only speaking should trigger
+   ```
+
+### Problem: Speech Not Detected
+
+**Symptoms:**
+- You speak but no voice activity event
+- Hotword detected but no speech activity
+
+**Solutions:**
+
+1. **Speak louder/clearer**
+   - VAD aggressiveness=3 requires clear speech
+   - Move closer to microphone
+
+2. **Lower speech threshold**
+   ```yaml
+   vad:
+     speech_threshold: 2  # More sensitive
+   ```
+
+3. **Lower aggressiveness (not recommended)**
+   ```yaml
+   vad:
+     aggressiveness: 2  # Less strict (may cause false triggers)
+   ```
+
+### Understanding the Settings
+
+```
+aggressiveness: 3  ← Filters out non-speech sounds
+       ↓
+speech_threshold: 3  ← Requires sustained sound (not brief tap)
+       ↓
+Voice Activity Started! 🗣️
+       ↓
+(user speaks...)
+       ↓
+silence_threshold: 15  ← Waits for pause before stopping
+       ↓
+Voice Activity Stopped! 🔇
+```
+
+**Recommended defaults** (already set):
+- `aggressiveness: 3` - Only clear speech
+- `speech_threshold: 3` - Filters taps/clicks (~240ms)
+- `silence_threshold: 15` - Natural pause (~1 second)
 
 ## Troubleshooting
 

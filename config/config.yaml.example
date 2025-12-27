@@ -22,9 +22,18 @@ hotword:
 
 # Voice Activity Detection (VAD) Configuration
 vad:
-  aggressiveness: 2  # VAD aggressiveness level (0-3)
-  # 0 = least aggressive (more speech detected)
-  # 3 = most aggressive (less speech detected)
+  aggressiveness: 3  # VAD aggressiveness level (0-3)
+  # 0 = least aggressive (detects any sound)
+  # 3 = most aggressive (only clear speech)
+  # Recommended: 3 to avoid false triggers from taps/movements
+  
+  speech_threshold: 3  # Consecutive speech frames required (filters brief noises)
+  # Higher = more strict (ignores short sounds like taps)
+  # Lower = more sensitive (may trigger on brief noises)
+  
+  silence_threshold: 15  # Silent frames before voice considered stopped
+  # ~1 second at 80ms per chunk
+  # Higher = waits longer before stopping
 
 # Logging Configuration
 logging:
