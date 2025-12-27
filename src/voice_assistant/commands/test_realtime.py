@@ -8,6 +8,7 @@ from voice_assistant.core import (
     AudioHandler,
     EventBus,
     HotwordDetector,
+    SpeakerService,
     VoiceDetectionService,
 )
 
@@ -66,14 +67,19 @@ def main() -> bool:
     event_bus = EventBus()
     audio_handler = AudioHandler(event_bus=event_bus)  # VAD events enabled
     hotword_detector = HotwordDetector()
-    detection_service = VoiceDetectionService(
-        audio_handler, event_bus, hotword_detector
+    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+
+    # Create speaker service for audio playback
+    speaker_service = SpeakerService(
+        preferred_device_name=config.audio_output_device,
     )
+    speaker_service.start()
 
     # Create Realtime consumer (it auto-subscribes to events)
     realtime_consumer = RealtimeConsumer(
         event_bus=event_bus,
         audio_handler=audio_handler,
+        speaker_service=speaker_service,
         openai_api_key=config.openai_api_key,
     )
 
@@ -100,6 +106,7 @@ def main() -> bool:
         # Cleanup
         print("\n\nCleaning up...")
         realtime_consumer.cleanup()
+        speaker_service.cleanup()
         audio_handler.stop_stream()
         audio_handler.cleanup()
         print("✓ Cleanup complete")
@@ -109,4 +116,3 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(0 if main() else 1)
-

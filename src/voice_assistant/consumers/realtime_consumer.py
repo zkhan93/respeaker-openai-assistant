@@ -2,15 +2,13 @@
 
 import asyncio
 import logging
-import queue
 import threading
 import time
 from typing import Optional
 
-import pyaudio
-
 from ..core.audio_handler import AudioHandler
 from ..core.event_bus import EventBus, HotwordEvent, VoiceActivityEvent
+from ..core.speaker_service import SpeakerService
 from ..services.openai_client import OpenAIRealtimeClient
 
 logger = logging.getLogger(__name__)
@@ -23,6 +21,7 @@ class RealtimeConsumer:
         self,
         event_bus: EventBus,
         audio_handler: AudioHandler,
+        speaker_service: SpeakerService,
         openai_api_key: str,
         model: str = "gpt-4o-realtime-preview-2024-12-17",
     ):
@@ -31,11 +30,13 @@ class RealtimeConsumer:
         Args:
             event_bus: Event bus to subscribe to
             audio_handler: Audio handler to pull audio from
+            speaker_service: Speaker service for audio playback
             openai_api_key: OpenAI API key
             model: Realtime API model name
         """
         self.event_bus = event_bus
         self.audio_handler = audio_handler
+        self.speaker_service = speaker_service
         self.openai_api_key = openai_api_key
         self.model = model
 
@@ -48,13 +49,6 @@ class RealtimeConsumer:
         self.streaming_audio = False
         self.audio_stream_thread: Optional[threading.Thread] = None
         self.collected_audio = bytearray()  # Collect audio instead of streaming
-
-        # Audio playback
-        self.audio = pyaudio.PyAudio()
-        self.playback_stream: Optional[pyaudio.Stream] = None
-        self.playback_queue = queue.Queue()
-        self.playing = False
-        self.playback_thread: Optional[threading.Thread] = None
 
         # Event loop for async operations
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -98,7 +92,7 @@ class RealtimeConsumer:
         if self.in_conversation:
             # Already in conversation - might be interruption or new command
             logger.info(
-                f"Hotword detected during conversation - treating as interruption/new command"
+                "Hotword detected during conversation - treating as interruption/new command"
             )
             print(f"\n🎤 New hotword '{event.hotword}' - restarting conversation...")
 
@@ -109,7 +103,7 @@ class RealtimeConsumer:
 
         print(f"\n🎤 Hotword '{event.hotword}' detected! Starting conversation...")
 
-        logger.info(f"🎤 Hotword detected! Starting realtime conversation...")
+        logger.info("🎤 Hotword detected! Starting realtime conversation...")
         logger.info(f"   Hotword: '{event.hotword}' (score: {event.score:.3f})")
         logger.info(f"   Queue size at detection: {event.audio_queue_size} frames")
 
@@ -130,7 +124,7 @@ class RealtimeConsumer:
             )
             return
 
-        print(f"🔇 Voice stopped. Getting AI response...")
+        print("🔇 Voice stopped. Getting AI response...")
 
         logger.info(f"🔇 Voice stopped (duration: {event.duration:.1f}s)")
 
@@ -158,11 +152,9 @@ class RealtimeConsumer:
                         pass
                     self.client = None
                     self.listen_task = None
-                
+
                 # Create new client
-                self.client = OpenAIRealtimeClient(
-                    api_key=self.openai_api_key, model=self.model
-                )
+                self.client = OpenAIRealtimeClient(api_key=self.openai_api_key, model=self.model)
 
                 # Setup callbacks
                 self.client.on_audio_delta = self._on_audio_received
@@ -183,17 +175,8 @@ class RealtimeConsumer:
             self.streaming_audio = True
 
             # Start audio streaming thread
-            self.audio_stream_thread = threading.Thread(
-                target=self._stream_audio_loop, daemon=True
-            )
+            self.audio_stream_thread = threading.Thread(target=self._stream_audio_loop, daemon=True)
             self.audio_stream_thread.start()
-
-            # Start playback thread if not already running
-            if not self.playback_thread or not self.playback_thread.is_alive():
-                self.playback_thread = threading.Thread(
-                    target=self._playback_loop, daemon=True
-                )
-                self.playback_thread.start()
 
         except Exception as e:
             logger.error(f"Error starting conversation: {e}", exc_info=True)
@@ -213,16 +196,12 @@ class RealtimeConsumer:
 
             # Stop current audio streaming
             self.streaming_audio = False
-            
+
             # Give threads a moment to stop
             await asyncio.sleep(0.1)
 
             # Clear playback queue
-            while not self.playback_queue.empty():
-                try:
-                    self.playback_queue.get_nowait()
-                except queue.Empty:
-                    break
+            self.speaker_service.clear_queue()
 
             # Clear audio queue and collected audio to start fresh
             self.audio_handler.clear_audio_queue()
@@ -232,9 +211,7 @@ class RealtimeConsumer:
             self.streaming_audio = True
 
             # Start new audio streaming thread
-            self.audio_stream_thread = threading.Thread(
-                target=self._stream_audio_loop, daemon=True
-            )
+            self.audio_stream_thread = threading.Thread(target=self._stream_audio_loop, daemon=True)
             self.audio_stream_thread.start()
 
             logger.info("✓ Conversation restarted - ready for new command")
@@ -252,7 +229,7 @@ class RealtimeConsumer:
 
             print(f"⏳ Processing {len(self.collected_audio)} bytes of audio...")
             logger.info(f"Sending complete audio: {len(self.collected_audio)} bytes")
-            
+
             # Send complete audio (bypasses server VAD!)
             await self.client.send_complete_audio(bytes(self.collected_audio))
 
@@ -263,7 +240,7 @@ class RealtimeConsumer:
     def _stream_audio_loop(self):
         """Collect audio from microphone in background thread."""
         logger.debug("Audio collection thread started")
-        
+
         # Clear collected audio at start
         self.collected_audio.clear()
 
@@ -272,9 +249,14 @@ class RealtimeConsumer:
             if chunk:
                 # Collect audio instead of streaming it
                 self.collected_audio.extend(chunk)
-                logger.debug(f"Collected audio chunk: {len(chunk)} bytes (total: {len(self.collected_audio)})")
+                logger.debug(
+                    f"Collected audio chunk: {len(chunk)}"
+                    f" bytes (total: {len(self.collected_audio)})"
+                )
 
-        logger.debug(f"Audio collection stopped. Total collected: {len(self.collected_audio)} bytes")
+        logger.debug(
+            f"Audio collection stopped. Total collected: {len(self.collected_audio)} bytes"
+        )
 
     def _on_audio_received(self, audio_data: bytes):
         """Callback when audio delta received from OpenAI.
@@ -283,59 +265,12 @@ class RealtimeConsumer:
             audio_data: PCM16 audio data to play
         """
         logger.debug(f"Received audio chunk: {len(audio_data)} bytes")
-        
-        # Queue audio for playback
-        self.playback_queue.put(audio_data)
 
-        # Start playing if not already
-        if not self.playing:
-            self.playing = True
+        # Send audio to speaker service for playback
+        if not self.speaker_service.is_playing():
             print("🔊 AI is responding...")
-            if not self.playback_stream:
-                self._start_playback()
 
-    def _start_playback(self):
-        """Start audio playback stream."""
-        try:
-            # Get default output device info
-            default_output = self.audio.get_default_output_device_info()
-            logger.info(f"Using output device: {default_output['name']}")
-            
-            self.playback_stream = self.audio.open(
-                format=pyaudio.paInt16,
-                channels=1,  # Mono
-                rate=24000,  # OpenAI outputs 24kHz
-                output=True,
-                frames_per_buffer=1024,
-            )
-            logger.info("Playback stream started (24kHz, mono, PCM16)")
-            print("🔊 Playback stream ready")
-        except Exception as e:
-            logger.error(f"Error starting playback: {e}", exc_info=True)
-            print(f"❌ Playback error: {e}")
-
-    def _playback_loop(self):
-        """Playback audio from queue in background thread."""
-        logger.debug("Playback thread started")
-        chunks_played = 0
-
-        while True:
-            try:
-                # Get audio from queue (blocking with timeout)
-                audio_data = self.playback_queue.get(timeout=1.0)
-                chunks_played += 1
-                logger.debug(f"Playing audio chunk {chunks_played}: {len(audio_data)} bytes")
-
-                # Play audio
-                if self.playback_stream:
-                    self.playback_stream.write(audio_data)
-
-            except queue.Empty:
-                # No audio to play, continue waiting
-                continue
-            except Exception as e:
-                logger.error(f"Error in playback loop: {e}")
-                time.sleep(0.1)
+        self.speaker_service.play_audio(audio_data)
 
     def _on_response_done(self):
         """Callback when response is complete."""
@@ -344,19 +279,19 @@ class RealtimeConsumer:
 
         # End conversation (order matters!)
         self.streaming_audio = False  # Stop streaming first
-        self.playing = False
-        
+        self.speaker_service.set_playing(False)
+
         # Wait a moment for threads to finish
         time.sleep(0.2)
-        
+
         # DON'T disconnect - keep connection alive for next conversation!
         # Just clear the audio buffer for fresh start
         if self.loop and self.client:
             asyncio.run_coroutine_threadsafe(self.client.clear_audio_buffer(), self.loop)
-        
+
         # Mark as ready for next conversation
         self.in_conversation = False
-        
+
         logger.info("Ready for next conversation (connection kept alive)")
 
     def _on_error(self, error_msg: str):
@@ -370,13 +305,13 @@ class RealtimeConsumer:
             "no active response",
             "Cancellation failed",
         ]
-        
+
         is_critical = not any(err in error_msg for err in non_critical_errors)
-        
+
         if is_critical:
             print(f"\n❌ API Error: {error_msg}\n")
             logger.error(f"Critical API error: {error_msg}")
-            
+
             # End conversation for critical errors
             self.in_conversation = False
             self.streaming_audio = False
@@ -389,28 +324,24 @@ class RealtimeConsumer:
         # Stop conversation
         self.in_conversation = False
         self.streaming_audio = False
-        self.playing = False
+        self.speaker_service.set_playing(False)
 
         # Cancel listen task
         if self.listen_task and not self.listen_task.done():
             self.listen_task.cancel()
             logger.debug("Cancelled listen task")
-        
+
         # Disconnect from OpenAI
         if self.loop and self.client:
             try:
-                asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop).result(timeout=2.0)
+                asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop).result(
+                    timeout=2.0
+                )
             except Exception as e:
                 logger.error(f"Error disconnecting during cleanup: {e}")
             finally:
                 self.client = None
                 self.listen_task = None
-
-        # Cleanup audio
-        if self.playback_stream:
-            self.playback_stream.stop_stream()
-            self.playback_stream.close()
-        self.audio.terminate()
 
         # Stop event loop
         if self.loop:
@@ -421,4 +352,3 @@ class RealtimeConsumer:
         self.event_bus.unsubscribe("voice_activity_stopped", self.on_voice_stopped)
 
         logger.info("RealtimeConsumer cleaned up")
-

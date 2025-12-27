@@ -79,6 +79,11 @@ class Config:
         return self.get("audio.channels", 4)
 
     @property
+    def audio_output_device(self) -> str | None:
+        """Get preferred output device name (None for default)."""
+        return self.get("audio.output_device", None)
+
+    @property
     def hotword_threshold(self) -> float:
         """Get hotword detection threshold."""
         return self.get("hotword.threshold", 0.5)
@@ -91,10 +96,10 @@ class Config:
 
 def load_config(config_path: str = "config/config.yaml") -> Config:
     """Load configuration from file.
-    
+
     Args:
         config_path: Path to configuration file
-        
+
     Returns:
         Config instance
     """

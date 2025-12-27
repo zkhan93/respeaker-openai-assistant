@@ -106,9 +106,9 @@ class AudioHandler:
 
     def _track_voice_activity(self, audio_data: bytes):
         """Track voice activity and emit events when voice starts/stops.
-        
+
         Called from audio callback thread.
-        
+
         Args:
             audio_data: Raw audio data from callback
         """
@@ -129,16 +129,17 @@ class AudioHandler:
                     from .event_bus import VoiceActivityEvent
 
                     event = VoiceActivityEvent(
-                        timestamp=self.voice_start_time,
-                        activity_type='started'
+                        timestamp=self.voice_start_time, activity_type="started"
                     )
 
-                    logger.info(f"Voice activity started (after {self.speech_frames} speech frames)")
+                    logger.info(
+                        f"Voice activity started (after {self.speech_frames} speech frames)"
+                    )
                     self.event_bus.publish("voice_activity_started", event)
             else:
                 # No speech detected
                 self.speech_frames = 0  # Reset consecutive speech counter
-                
+
                 # Increment silence counter if voice is active
                 if self.voice_active:
                     self.silence_frames += 1
@@ -153,9 +154,7 @@ class AudioHandler:
                         from .event_bus import VoiceActivityEvent
 
                         event = VoiceActivityEvent(
-                            timestamp=stop_time,
-                            activity_type='stopped',
-                            duration=duration
+                            timestamp=stop_time, activity_type="stopped", duration=duration
                         )
 
                         logger.info(f"Voice activity stopped (duration: {duration:.1f}s)")

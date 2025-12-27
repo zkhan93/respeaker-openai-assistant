@@ -54,29 +54,29 @@ class SpeechToTextConsumer:
 
     def on_hotword_detected(self, event: HotwordEvent):
         """Handle hotword detected event - start recording.
-        
+
         Args:
             event: Hotword event with timestamp and details
         """
         if self.recording:
             # Already recording - restart to capture new command
-            logger.info(f"Hotword detected while recording - restarting recording session")
+            logger.info("Hotword detected while recording - restarting recording session")
             print(f"\n🎤 New hotword '{event.hotword}' detected! Restarting recording...")
-            
+
             # Stop current recording
             self.recording = False
             if self.recording_thread and self.recording_thread.is_alive():
                 self.recording_thread.join(timeout=0.5)
-            
+
             # Clear old frames
             self.recorded_frames = []
 
         print(f"\n🎤 Hotword '{event.hotword}' detected! Recording your command...")
-        
-        logger.info(f"🎤 Hotword detected! Starting recording...")
+
+        logger.info("🎤 Hotword detected! Starting recording...")
         logger.info(f"   Hotword: '{event.hotword}' (score: {event.score:.3f})")
         logger.info(f"   Queue size at detection: {event.audio_queue_size} frames")
-        
+
         # Start recording
         self.recording = True
         self.recording_start_time = time.time()
@@ -96,24 +96,27 @@ class SpeechToTextConsumer:
         """
         if not self.recording:
             # Not recording - voice activity without hotword
-            logger.debug(f"Voice activity stopped (duration: {event.duration:.1f}s) but not recording - no hotword detected")
+            logger.debug(
+                f"Voice activity stopped (duration: {event.duration:.1f}s)"
+                " but not recording - no hotword detected"
+            )
             return
 
         print(f"🔇 Voice stopped. Processing {event.duration:.1f}s of audio...")
-        
+
         logger.info(f"🔇 Voice stopped (duration: {event.duration:.1f}s)")
 
         try:
             # Stop recording (this will stop the background thread)
             self.recording = False
-            
+
             # Wait for recording thread to finish
             if self.recording_thread and self.recording_thread.is_alive():
                 self.recording_thread.join(timeout=1.0)
-            
+
             # Collect any remaining audio chunks
             self._collect_remaining_audio()
-            
+
             recording_duration = time.time() - self.recording_start_time
 
             if not self.recorded_frames:
@@ -121,7 +124,10 @@ class SpeechToTextConsumer:
                 logger.error("No audio recorded")
                 return
 
-            logger.info(f"✓ Recording complete ({recording_duration:.1f}s, {len(self.recorded_frames)} frames)")
+            logger.info(
+                f"✓ Recording complete ({recording_duration:.1f}s,"
+                f" {len(self.recorded_frames)} frames)"
+            )
 
             # Convert frames to WAV
             audio_data = self._frames_to_wav(self.recorded_frames)
@@ -133,14 +139,14 @@ class SpeechToTextConsumer:
             # Transcribe using OpenAI Whisper
             print("\n⏳ Sending audio to OpenAI Whisper API (please wait)...")
             transcript = self._transcribe_audio(audio_data)
-            
+
             if transcript:
                 print("\n" + "=" * 70)
                 print("📝 TRANSCRIPTION")
                 print("=" * 70)
                 print(transcript)
                 print("=" * 70 + "\n")
-                
+
                 logger.info("=" * 70)
                 logger.info("📝 TRANSCRIPTION")
                 logger.info("=" * 70)
@@ -161,26 +167,28 @@ class SpeechToTextConsumer:
     def _audio_collection_loop(self):
         """Background thread to continuously collect audio while recording."""
         logger.debug("Audio collection thread started")
-        
+
         while self.recording:
             chunk = self.audio_handler.read_audio_chunk(timeout=0.1)
             if chunk:
                 self.recorded_frames.append(chunk)
-            
+
             # Safety check - don't exceed max duration
             if self.recording_start_time:
                 elapsed = time.time() - self.recording_start_time
                 if elapsed >= self.max_recording_duration:
-                    logger.warning(f"Max recording duration ({self.max_recording_duration}s) reached")
+                    logger.warning(
+                        f"Max recording duration ({self.max_recording_duration}s) reached"
+                    )
                     self.recording = False
                     break
-        
+
         logger.debug("Audio collection thread stopped")
 
     def _collect_remaining_audio(self):
         """Collect any remaining audio chunks from the queue (non-blocking)."""
         timeout = 0.05  # 50ms timeout per chunk
-        
+
         while True:
             chunk = self.audio_handler.read_audio_chunk(timeout=timeout)
             if chunk:

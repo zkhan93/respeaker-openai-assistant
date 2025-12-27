@@ -12,6 +12,10 @@ audio:
   sample_rate: 16000  # Hz
   channels: 1  # Use mono (AC108 supports this and works perfectly with openWakeWord)
   chunk_size: 1280  # Samples per chunk (80ms at 16kHz - required by openWakeWord)
+  output_device: null  # Preferred output device name (partial match, case-insensitive)
+                       # Examples: "JBL", "Bluetooth", "Speaker", "Headphones"
+                       # If null or not found, falls back to system default
+                       # Use `python -m voice_assistant.commands.list_audio_devices` to see available devices
 
 # Hotword Detection Configuration
 hotword:

@@ -4,17 +4,17 @@
 # But we expose them for convenience
 
 from voice_assistant.commands import (
-    run,
-    verify,
     download_models,
+    run,
     show_config,
+    simple_record,
     test_audio,
-    test_stt,
-    test_realtime,
     test_events,
     test_hotword_native,
-    simple_record,
     test_mode,
+    test_realtime,
+    test_stt,
+    verify,
 )
 
 __all__ = [

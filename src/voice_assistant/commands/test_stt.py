@@ -2,14 +2,15 @@
 
 import logging
 
-from voice_assistant.core import AudioHandler, HotwordDetector, EventBus, VoiceDetectionService
-from voice_assistant.consumers import SpeechToTextConsumer
 from voice_assistant.config import load_config
+from voice_assistant.consumers import SpeechToTextConsumer
+from voice_assistant.core import AudioHandler, EventBus, HotwordDetector, VoiceDetectionService
 
+logger = logging.getLogger(__name__)
 
 def main() -> bool:
     """Test STT consumer with event-driven architecture.
-    
+
     Returns:
         True if successful, False otherwise
     """
@@ -19,16 +20,16 @@ def main() -> bool:
     except Exception as e:
         print(f"Error loading config: {e}")
         return False
-    
+
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    
-    print("="*70)
+
+    print("=" * 70)
     print("🎤 EVENT-DRIVEN SPEECH-TO-TEXT DEMO")
-    print("="*70)
+    print("=" * 70)
     print()
     print("Architecture:")
     print("  Audio Stream → Hotword + Voice Activity Detection")
@@ -48,15 +49,15 @@ def main() -> bool:
     print("Transcription happens automatically when voice activity stops!")
     print()
     print("Press Ctrl+C to stop")
-    print("="*70)
+    print("=" * 70)
     print()
-    
+
     # Create core components
     event_bus = EventBus()
     audio_handler = AudioHandler(event_bus=event_bus)  # Pass event bus for VAD events
     hotword_detector = HotwordDetector()
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
-    
+
     # Create STT consumer (it auto-subscribes to events)
     stt_consumer = SpeechToTextConsumer(
         event_bus=event_bus,
@@ -64,7 +65,7 @@ def main() -> bool:
         openai_api_key=config.openai_api_key,
         max_recording_duration=30.0,  # Safety limit
     )
-    
+
     # Start audio stream
     audio_handler.start_stream()
     print("✓ Audio stream started (callback mode with VAD events)")
@@ -73,7 +74,7 @@ def main() -> bool:
     print()
     print("Listening for 'alexa' and voice activity...")
     print()
-    
+
     # Run detection service (blocks until stopped)
     try:
         detection_service.start()
@@ -88,4 +89,3 @@ def main() -> bool:
         audio_handler.stop_stream()
         audio_handler.cleanup()
         print("✓ Cleanup complete")
-
