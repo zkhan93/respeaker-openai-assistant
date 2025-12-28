@@ -143,7 +143,7 @@ class SpeakerService:
         """Monitor stream activity to detect when playback completes.
         
         Watches stream.is_active() and raises speaking_finished event when
-        stream becomes inactive AND content_done is True.
+        stream becomes inactive AND content_done is True AND queue is empty.
         """
         logger.debug("Stream monitor thread started")
         was_active = False
@@ -152,15 +152,23 @@ class SpeakerService:
             try:
                 if self.playback_stream:
                     is_active = self.playback_stream.is_active()
+                    queue_size = self.audio_queue.qsize()
                     
                     # Stream transitioned from active to inactive
                     if was_active and not is_active:
                         with self._content_done_lock:
-                            if self.content_done:
+                            # Only trigger if content is done AND queue is empty
+                            # PyAudio's is_active() can be False between writes even when
+                            # there's still audio in the queue waiting to be written
+                            if self.content_done and queue_size == 0:
                                 # Playback truly complete!
-                                logger.debug("Stream inactive and content done - playback finished")
+                                logger.debug("Stream inactive, content done, and queue empty - playback finished")
                                 self._raise_speaking_finished_event()
                                 self.content_done = False
+                            elif self.content_done and queue_size > 0:
+                                logger.debug(
+                                    f"Stream inactive and content done, but {queue_size} chunks still in queue - waiting"
+                                )
                     
                     was_active = is_active
                 else:
