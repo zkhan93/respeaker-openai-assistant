@@ -93,6 +93,16 @@ class Config:
         """Get VAD aggressiveness level (0-3)."""
         return self.get("vad.aggressiveness", 2)
 
+    @property
+    def logging_level(self) -> str:
+        """Get logging level."""
+        return self.get("logging.level", "INFO")
+
+    @property
+    def logging_format(self) -> str:
+        """Get logging format."""
+        return self.get("logging.format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
 
 def load_config(config_path: str = "config/config.yaml") -> Config:
     """Load configuration from file.

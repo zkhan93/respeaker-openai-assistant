@@ -34,9 +34,9 @@ Examples:
     run_parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
+        default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)",
+        help="Logging level (overrides config.yaml setting)",
     )
 
     # Verify command

@@ -54,6 +54,7 @@ class SpeakerService:
         # Playback state
         self.playing = False
         self.playback_thread: Optional[threading.Thread] = None
+        self._monitor_thread: Optional[threading.Thread] = None
         self.running = False
 
         # Content completion tracking
@@ -138,11 +139,46 @@ class SpeakerService:
             finally:
                 self.playback_stream = None
 
+    def _monitor_stream_activity(self):
+        """Monitor stream activity to detect when playback completes.
+        
+        Watches stream.is_active() and raises speaking_finished event when
+        stream becomes inactive AND content_done is True.
+        """
+        logger.debug("Stream monitor thread started")
+        was_active = False
+        
+        while self.running:
+            try:
+                if self.playback_stream:
+                    is_active = self.playback_stream.is_active()
+                    
+                    # Stream transitioned from active to inactive
+                    if was_active and not is_active:
+                        with self._content_done_lock:
+                            if self.content_done:
+                                # Playback truly complete!
+                                logger.debug("Stream inactive and content done - playback finished")
+                                self._raise_speaking_finished_event()
+                                self.content_done = False
+                    
+                    was_active = is_active
+                else:
+                    # Stream not started yet, reset state
+                    was_active = False
+                
+                time.sleep(0.1)  # Check every 100ms
+                
+            except Exception as e:
+                logger.error(f"Error in stream monitor: {e}", exc_info=True)
+                time.sleep(0.1)
+        
+        logger.debug("Stream monitor thread stopped")
+
     def _playback_loop(self):
         """Playback audio from queue in background thread."""
         logger.debug("Playback thread started")
         chunks_played = 0
-        empty_queue_timeout = 0.0  # Track how long queue has been empty
 
         while self.running:
             try:
@@ -150,14 +186,6 @@ class SpeakerService:
                 audio_data = self.audio_queue.get(timeout=1.0)
                 chunks_played += 1
                 logger.debug(f"Playing audio chunk {chunks_played}: {len(audio_data)} bytes")
-
-                # Set playing flag when first chunk is played
-                if not self.playing:
-                    self.playing = True
-                    logger.debug("Audio playback started (first chunk)")
-
-                # Reset empty timeout since we got audio
-                empty_queue_timeout = 0.0
 
                 # Start stream if not already started
                 if not self.playback_stream:
@@ -168,26 +196,7 @@ class SpeakerService:
                     self.playback_stream.write(audio_data)
 
             except queue.Empty:
-                # No audio to play
-                with self._content_done_lock:
-                    content_done = self.content_done
-
-                # Check if content is done and queue is empty
-                if content_done and self.audio_queue.empty():
-                    # Queue is empty and content is marked as done
-                    # Wait a bit to ensure stream has finished writing
-                    empty_queue_timeout += 1.0  # timeout is 1.0 seconds per iteration
-
-                    # After 0.4 seconds of empty queue + content done, raise event
-                    if empty_queue_timeout >= 2:
-                        self._raise_speaking_finished_event()
-                        # Reset state for next session
-                        with self._content_done_lock:
-                            self.content_done = False
-                        empty_queue_timeout = 0.0
-                else:
-                    # Queue is empty but content not done yet, or new content arrived
-                    empty_queue_timeout = 0.0
+                # No audio to play, continue waiting
                 continue
             except Exception as e:
                 logger.error(f"Error in playback loop: {e}", exc_info=True)
@@ -198,7 +207,7 @@ class SpeakerService:
         logger.debug("Playback thread stopped")
 
     def start(self):
-        """Start the speaker service (starts playback thread)."""
+        """Start the speaker service (starts playback and monitor threads)."""
         if self.running:
             logger.warning("Speaker service already started")
             return
@@ -206,18 +215,23 @@ class SpeakerService:
         self.running = True
         self.playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
         self.playback_thread.start()
+        self._monitor_thread = threading.Thread(target=self._monitor_stream_activity, daemon=True)
+        self._monitor_thread.start()
         logger.info("Speaker service started")
 
     def stop(self):
-        """Stop the speaker service (stops playback thread)."""
+        """Stop the speaker service (stops playback and monitor threads)."""
         if not self.running:
             return
 
         self.running = False
 
-        # Wait for thread to finish
+        # Wait for threads to finish
         if self.playback_thread and self.playback_thread.is_alive():
             self.playback_thread.join(timeout=2.0)
+        
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2.0)
 
         self._stop_playback_stream()
         logger.info("Speaker service stopped")
@@ -240,11 +254,6 @@ class SpeakerService:
                 self.content_done = False
 
         self.audio_queue.put(audio_data)
-
-        # Mark as playing if not already
-        if not self.playing:
-            self.playing = True
-            logger.debug("Audio playback started")
 
     def clear_queue(self):
         """Clear the audio playback queue."""
@@ -295,8 +304,6 @@ class SpeakerService:
 
     def _raise_speaking_finished_event(self):
         """Raise speaking_finished event when playback is complete."""
-        # Set playing flag to False when playback completes
-        self.playing = False
         logger.debug("Audio playback finished")
 
         if not self.event_bus:

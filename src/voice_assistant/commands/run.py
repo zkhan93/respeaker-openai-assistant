@@ -14,29 +14,39 @@ from voice_assistant.core import (
 logger = logging.getLogger(__name__)
 
 
-def main(log_level: str = "INFO") -> bool:
+def main(log_level: str | None = None) -> bool:
     """Run the voice assistant service.
 
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR). If None, reads from config.
 
     Returns:
         True if successful, False otherwise
     """
-    # Configure logging
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-
-    logger.info("Starting Voice Assistant service...")
-
-    # Load configuration
+    # Load configuration first to get logging settings
     try:
         config = load_config("config/config.yaml")
     except Exception as e:
+        # If config fails to load, use defaults
+        print(f"Warning: Failed to load configuration: {e}")
+        print("Using default logging configuration...")
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
         logger.error(f"Failed to load configuration: {e}")
         return False
+
+    # Use CLI argument if provided, otherwise use config value
+    effective_log_level = log_level if log_level is not None else config.logging_level
+
+    # Configure logging with the effective level
+    logging.basicConfig(
+        level=getattr(logging, effective_log_level.upper()),
+        format=config.logging_format,
+    )
+
+    logger.info("Starting Voice Assistant service...")
 
     print("=" * 70)
     print("🎤 VOICE ASSISTANT SERVICE")
