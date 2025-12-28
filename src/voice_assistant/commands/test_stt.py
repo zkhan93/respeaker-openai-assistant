@@ -8,6 +8,7 @@ from voice_assistant.core import AudioHandler, EventBus, HotwordDetector, VoiceD
 
 logger = logging.getLogger(__name__)
 
+
 def main() -> bool:
     """Test STT consumer with event-driven architecture.
 

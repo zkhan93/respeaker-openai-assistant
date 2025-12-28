@@ -4,8 +4,8 @@ import logging
 import signal
 import time
 
-from voice_assistant.core import EventBus
 from voice_assistant.consumers.led import LedConsumer
+from voice_assistant.core import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class LedTester:
         print("💡 BASIC LED HARDWARE TEST")
         print("=" * 70)
         print()
-        
+
         # Check hardware status
         print("Hardware Status:")
         print(f"  Enabled: {self.led_consumer.enabled}")
@@ -47,14 +47,14 @@ class LedTester:
         print(f"  Power LED initialized: {self.led_consumer.power is not None}")
         print(f"  Pattern initialized: {self.led_consumer.pattern is not None}")
         print()
-        
+
         if not self.led_consumer.dev:
             print("❌ APA102 device not initialized!")
             return False
-        
+
         print("Testing direct LED control...")
         print()
-        
+
         try:
             # Test 1: Turn on all LEDs to red
             print("Test 1: All LEDs RED (brightness 100%)")
@@ -62,21 +62,21 @@ class LedTester:
                 self.led_consumer.dev.set_pixel(i, 255, 0, 0, bright_percent=100)  # Red
             self.led_consumer.dev.show()
             time.sleep(2)
-            
+
             # Test 2: Turn on all LEDs to green
             print("Test 2: All LEDs GREEN (brightness 100%)")
             for i in range(self.led_consumer.PIXELS_N):
                 self.led_consumer.dev.set_pixel(i, 0, 255, 0, bright_percent=100)  # Green
             self.led_consumer.dev.show()
             time.sleep(2)
-            
+
             # Test 3: Turn on all LEDs to blue
             print("Test 3: All LEDs BLUE (brightness 100%)")
             for i in range(self.led_consumer.PIXELS_N):
                 self.led_consumer.dev.set_pixel(i, 0, 0, 255, bright_percent=100)  # Blue
             self.led_consumer.dev.show()
             time.sleep(2)
-            
+
             # Test 4: Turn on one LED at a time
             print("Test 4: One LED at a time (white)")
             for i in range(self.led_consumer.PIXELS_N):
@@ -88,20 +88,21 @@ class LedTester:
                 self.led_consumer.dev.show()
                 print(f"  LED {i} on")
                 time.sleep(0.5)
-            
+
             # Test 5: Turn off all
             print("Test 5: All LEDs OFF")
             self.led_consumer.dev.clear_strip()
             time.sleep(1)
-            
+
             print()
             print("✓ Basic hardware test complete")
             print()
             return True
-            
+
         except Exception as e:
             print(f"❌ Error during basic test: {e}")
             import traceback
+
             traceback.print_exc()
             return False
 
@@ -146,12 +147,12 @@ class LedTester:
                         break
 
                     print(f"▶️  Testing: {name} pattern ({duration}s)")
-                    
+
                     # Stop any running pattern first
                     if self.led_consumer.pattern:
                         self.led_consumer.pattern.stop = True
                         time.sleep(0.1)  # Give it time to stop
-                    
+
                     # Start new pattern
                     if arg is not None:
                         pattern_func(arg)
@@ -160,7 +161,7 @@ class LedTester:
 
                     # Wait for pattern to display
                     time.sleep(duration)
-                    
+
                     # Stop the pattern before moving to next
                     if self.led_consumer.pattern:
                         self.led_consumer.pattern.stop = True
@@ -298,4 +299,3 @@ if __name__ == "__main__":
 
     manual_mode = "--manual" in sys.argv or "-m" in sys.argv
     sys.exit(0 if main(manual=manual_mode) else 1)
-

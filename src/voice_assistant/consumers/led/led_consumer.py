@@ -7,6 +7,7 @@ from typing import Optional
 
 try:
     from gpiozero import LED
+
     HARDWARE_AVAILABLE = True
 except ImportError:
     HARDWARE_AVAILABLE = False
@@ -124,7 +125,7 @@ class LedConsumer:
         if not self.enabled:
             return
 
-        logger.debug(f"Hotword detected - showing thinking pattern")
+        logger.debug("Hotword detected - showing thinking pattern")
         self.in_conversation = True  # Mark that we're in an active conversation
         self.current_state = "think"
         self._think()
@@ -140,10 +141,10 @@ class LedConsumer:
 
         # Only show thinking pattern if we're in an active conversation (hotword was detected)
         if not self.in_conversation:
-            logger.debug(f"Voice stopped but no hotword detected - keeping LEDs off")
+            logger.debug("Voice stopped but no hotword detected - keeping LEDs off")
             return
 
-        logger.debug(f"Voice stopped - keeping thinking pattern (waiting for response)")
+        logger.debug("Voice stopped - keeping thinking pattern (waiting for response)")
         # Keep showing think pattern if not already speaking
         # This means we're waiting for the AI to respond
         if self.current_state != "speak":
@@ -243,8 +244,10 @@ class LedConsumer:
             return
 
         if self.last_direction is not None:
+
             def f():
                 self.pattern.wakeup(self.last_direction)
+
             self._put(f)
         else:
             self._put(self.pattern.listen)
@@ -352,4 +355,3 @@ class LedConsumer:
         self.event_bus.unsubscribe("speaking_finished", self.on_speaking_finished)
 
         logger.info("LedConsumer cleaned up")
-

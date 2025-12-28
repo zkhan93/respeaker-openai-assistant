@@ -17,8 +17,10 @@ class AlexaLedPattern:
         self.pixels = [0] * 4 * number
 
         if not show or not callable(show):
+
             def dummy(data):
                 pass
+
             show = dummy
 
         self.show = show
@@ -71,4 +73,3 @@ class AlexaLedPattern:
     def off(self):
         """Turn off all LEDs."""
         self.show([0] * 4 * self.pixels_number)
-

@@ -177,7 +177,7 @@ class SpeakerService:
                     # Queue is empty and content is marked as done
                     # Wait a bit to ensure stream has finished writing
                     empty_queue_timeout += 1.0  # timeout is 1.0 seconds per iteration
-                    
+
                     # After 0.4 seconds of empty queue + content done, raise event
                     if empty_queue_timeout >= 2:
                         self._raise_speaking_finished_event()
@@ -283,13 +283,15 @@ class SpeakerService:
 
     def mark_content_done(self):
         """Mark that all audio content has been added to the queue.
-        
+
         After this is called and the queue becomes empty, a speaking_finished
         event will be raised once playback completes.
         """
         with self._content_done_lock:
             self.content_done = True
-        logger.debug("Content marked as done - will raise speaking_finished event when playback completes")
+        logger.debug(
+            "Content marked as done - will raise speaking_finished event when playback completes"
+        )
 
     def _raise_speaking_finished_event(self):
         """Raise speaking_finished event when playback is complete."""

@@ -70,8 +70,8 @@ def main(log_level: str = "INFO") -> bool:
     speaker_service.start()
 
     # Create and register consumers
-    from voice_assistant.consumers.led import LedConsumer
     from voice_assistant.consumers import RealtimeConsumer
+    from voice_assistant.consumers.led import LedConsumer
 
     # Create LED consumer (with speaker service for auto speak detection)
     led_consumer = LedConsumer(
