@@ -28,6 +28,13 @@ class VoiceActivityEvent:
     duration: float = 0.0  # Duration in seconds (only for 'stopped')
 
 
+@dataclass
+class SpeakingFinishedEvent:
+    """Event emitted when speaker has finished playing all audio."""
+
+    timestamp: datetime
+
+
 class EventBus:
     """Simple event bus for pub-sub communication between components."""
 

@@ -12,7 +12,7 @@ except ImportError:
     HARDWARE_AVAILABLE = False
     logging.warning("LED hardware libraries not available (gpiozero)")
 
-from ...core.event_bus import EventBus, HotwordEvent, VoiceActivityEvent
+from ...core.event_bus import EventBus, HotwordEvent, SpeakingFinishedEvent, VoiceActivityEvent
 
 # Import speaker service for type hints and runtime use
 try:
@@ -107,6 +107,7 @@ class LedConsumer:
         # Subscribe to events
         self.event_bus.subscribe("hotword_detected", self.on_hotword_detected)
         self.event_bus.subscribe("voice_activity_stopped", self.on_voice_stopped)
+        self.event_bus.subscribe("speaking_finished", self.on_speaking_finished)
 
         # Start monitoring speaker service if provided
         if self.enabled and self.speaker_service:
@@ -148,6 +149,20 @@ class LedConsumer:
         if self.current_state != "speak":
             self.current_state = "think"
             self._think()
+
+    def on_speaking_finished(self, event: SpeakingFinishedEvent):
+        """Handle speaking finished event - turn off LEDs.
+
+        Args:
+            event: Speaking finished event with timestamp
+        """
+        if not self.enabled:
+            return
+
+        logger.debug("Speaking finished - turning off LEDs")
+        self.in_conversation = False  # Conversation ended
+        self.current_state = "off"
+        self._off()
 
     def set_speaking(self, speaking: bool = True):
         """Set speaking state (call this when AI is speaking).
@@ -334,6 +349,7 @@ class LedConsumer:
         # Unsubscribe from events
         self.event_bus.unsubscribe("hotword_detected", self.on_hotword_detected)
         self.event_bus.unsubscribe("voice_activity_stopped", self.on_voice_stopped)
+        self.event_bus.unsubscribe("speaking_finished", self.on_speaking_finished)
 
         logger.info("LedConsumer cleaned up")
 

@@ -65,6 +65,7 @@ def main(log_level: str = "INFO") -> bool:
     # Create speaker service for audio playback
     speaker_service = SpeakerService(
         preferred_device_name=config.audio_output_device,
+        event_bus=event_bus,
     )
     speaker_service.start()
 

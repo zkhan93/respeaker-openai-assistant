@@ -279,7 +279,10 @@ class RealtimeConsumer:
 
         # End conversation (order matters!)
         self.streaming_audio = False  # Stop streaming first
-        self.speaker_service.set_playing(False)
+        
+        # Signal that all audio content has been added
+        # This will trigger speaking_finished event when playback completes
+        self.speaker_service.mark_content_done()
 
         # Wait a moment for threads to finish
         time.sleep(0.2)
