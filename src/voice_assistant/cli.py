@@ -17,6 +17,8 @@ Examples:
   voice-assistant test-events            # Monitor all events (hotword + VAD)
   voice-assistant test-realtime          # Test OpenAI Realtime API (voice conversation)
   voice-assistant test-stt               # Test speech-to-text consumer
+  voice-assistant test-led               # Test LED ring patterns
+  voice-assistant test-led --manual      # Test LED ring with manual control
         """,
     )
 
@@ -89,6 +91,21 @@ Examples:
     # Test events command
     subparsers.add_parser("test-events", help="Monitor all voice detection events in real-time")
 
+    # Test LED command
+    led_parser = subparsers.add_parser("test-led", help="Test LED ring patterns")
+    led_parser.add_argument(
+        "--manual",
+        "-m",
+        action="store_true",
+        help="Use manual mode (keyboard input) instead of auto-cycling",
+    )
+    led_parser.add_argument(
+        "--basic",
+        "-b",
+        action="store_true",
+        help="Run basic hardware test first (direct LED control)",
+    )
+
     # List audio devices command
     subparsers.add_parser("list-audio-devices", help="List all available audio devices")
 
@@ -152,6 +169,11 @@ Examples:
             from voice_assistant.commands.test_events import main
 
             sys.exit(0 if main() else 1)
+
+        elif args.command == "test-led":
+            from voice_assistant.commands.test_led import main
+
+            sys.exit(0 if main(manual=args.manual, basic=args.basic) else 1)
 
         elif args.command == "list-audio-devices":
             from voice_assistant.commands.list_audio_devices import main

@@ -68,9 +68,18 @@ def main(log_level: str = "INFO") -> bool:
     )
     speaker_service.start()
 
-    # Create and register Realtime consumer
+    # Create and register consumers
+    from voice_assistant.consumers.led import LedConsumer
     from voice_assistant.consumers import RealtimeConsumer
 
+    # Create LED consumer (with speaker service for auto speak detection)
+    led_consumer = LedConsumer(
+        event_bus=event_bus,
+        enabled=True,
+        speaker_service=speaker_service,
+    )
+
+    # Create Realtime consumer
     realtime_consumer = RealtimeConsumer(
         event_bus=event_bus,
         audio_handler=audio_handler,
@@ -79,7 +88,8 @@ def main(log_level: str = "INFO") -> bool:
     )
     realtime_consumer.start()
 
-    logger.info("Realtime consumer initialized and started")
+    logger.info("Consumers initialized and started")
+    print("✓ LED consumer ready")
     print("✓ OpenAI Realtime API consumer ready")
     print()
 
@@ -102,6 +112,7 @@ def main(log_level: str = "INFO") -> bool:
         # Cleanup
         logger.info("Cleaning up...")
         realtime_consumer.cleanup()
+        led_consumer.cleanup()
         speaker_service.cleanup()
         audio_handler.stop_stream()
         audio_handler.cleanup()

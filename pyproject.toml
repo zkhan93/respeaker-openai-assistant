@@ -5,15 +5,18 @@ description = "ReSpeaker 4-Mic Array Voice Assistant with OpenAI Realtime API"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "gpiozero>=2.0.1",
     "numpy>=1.24.0,<2.0.0",
     "openai>=2.14.0",
     "openwakeword>=0.6.0",
     "pyaudio>=0.2.14",
     "pygame>=2.6.1",
     "pyyaml>=6.0.3",
+    "rpi-gpio>=0.7.1",
     "scipy>=1.13.1",
     "setuptools>=80.9.0",
     "soxr>=1.0.0",
+    "spidev>=3.8",
     "webrtcvad>=2.0.10",
     "websockets>=15.0.1",
 ]

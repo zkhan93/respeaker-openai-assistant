@@ -16,6 +16,9 @@ User=pi
 # Environment variables
 Environment="PYTHONUNBUFFERED=1"
 Environment="PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# PulseAudio access - connect to user's PulseAudio session
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
 
 [Install]
 WantedBy=multi-user.target
