@@ -97,6 +97,12 @@ class LedConsumer:
         self.current_state = "off"  # off, wakeup, listen, think, speak
         self.monitoring_speaker = False
         self.speaker_monitor_thread: Optional[threading.Thread] = None
+        self.in_conversation = False  # Track if hotword was detected (active conversation)
+
+        # Initialize LEDs to off state
+        if self.enabled:
+            # Turn off LEDs by default
+            self._off()
 
         # Subscribe to events
         self.event_bus.subscribe("hotword_detected", self.on_hotword_detected)
@@ -109,7 +115,7 @@ class LedConsumer:
         logger.info(f"LedConsumer initialized (enabled={self.enabled})")
 
     def on_hotword_detected(self, event: HotwordEvent):
-        """Handle hotword detected event - show wakeup/listen pattern.
+        """Handle hotword detected event - show thinking pattern (waiting for response).
 
         Args:
             event: Hotword event with timestamp and details
@@ -117,13 +123,13 @@ class LedConsumer:
         if not self.enabled:
             return
 
-        logger.debug(f"Hotword detected - showing wakeup pattern")
-        self.last_direction = 0  # Could extract direction from event if available
-        self.current_state = "wakeup"
-        self._wakeup(self.last_direction)
+        logger.debug(f"Hotword detected - showing thinking pattern")
+        self.in_conversation = True  # Mark that we're in an active conversation
+        self.current_state = "think"
+        self._think()
 
     def on_voice_stopped(self, event: VoiceActivityEvent):
-        """Handle voice activity stopped event - show thinking pattern.
+        """Handle voice activity stopped event - keep showing thinking pattern.
 
         Args:
             event: Voice activity event with timestamp and duration
@@ -131,8 +137,14 @@ class LedConsumer:
         if not self.enabled:
             return
 
-        logger.debug(f"Voice stopped - showing thinking pattern")
-        # Only show think pattern if not already speaking
+        # Only show thinking pattern if we're in an active conversation (hotword was detected)
+        if not self.in_conversation:
+            logger.debug(f"Voice stopped but no hotword detected - keeping LEDs off")
+            return
+
+        logger.debug(f"Voice stopped - keeping thinking pattern (waiting for response)")
+        # Keep showing think pattern if not already speaking
+        # This means we're waiting for the AI to respond
         if self.current_state != "speak":
             self.current_state = "think"
             self._think()
@@ -185,6 +197,7 @@ class LedConsumer:
                 # State changed: stopped playing
                 elif not is_playing and was_playing:
                     logger.debug("Speaker stopped playing - turning off LEDs")
+                    self.in_conversation = False  # Conversation ended
                     self.current_state = "off"
                     self._off()
 
