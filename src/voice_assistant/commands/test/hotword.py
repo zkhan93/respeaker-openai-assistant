@@ -4,8 +4,8 @@ import logging
 import signal
 from pathlib import Path
 
-from ..config import Config
-from ..core import AudioHandler, HotwordDetector
+from ...config import Config
+from ...core import AudioHandler, HotwordDetector
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class TestMode:
             sample_rate=self.config.audio_sample_rate if self.config else 16000,
         )
 
+        self.reader = self.audio_handler.create_reader()
         self.running = False
         self.recording_active = False
         self.recorded_frames = []
@@ -79,7 +80,7 @@ class TestMode:
         try:
             while self.running:
                 # Read audio chunk
-                audio_data = self.audio_handler.read_chunk()
+                audio_data = self.reader.read(timeout=0.2)
                 if not audio_data:
                     continue
 

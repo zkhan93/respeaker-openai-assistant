@@ -16,7 +16,6 @@ class HotwordEvent:
     timestamp: datetime
     hotword: str
     score: float
-    audio_queue_size: int  # How many frames are in queue at detection time
 
 
 @dataclass

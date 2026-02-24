@@ -12,11 +12,13 @@ dependencies = [
     "pyaudio>=0.2.14",
     "pygame>=2.6.1",
     "pyyaml>=6.0.3",
+    "pyzmq>=26.0.0",
     "rpi-gpio>=0.7.1",
     "scipy>=1.13.1",
     "setuptools>=80.9.0",
     "soxr>=1.0.0",
     "spidev>=3.8",
+    "typer[all]>=0.15.0",
     "webrtcvad>=2.0.10",
     "websockets>=15.0.1",
 ]

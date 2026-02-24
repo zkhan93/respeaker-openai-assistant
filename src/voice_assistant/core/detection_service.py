@@ -17,7 +17,7 @@ class VoiceDetectionService:
     """Orchestrates hotword detection and voice activity tracking.
 
     This is the core loop that:
-    1. Reads audio from AudioHandler (hotword queue)
+    1. Reads audio via its own AudioBusReader (skip-ahead for low latency)
     2. Runs hotword detection with debouncing
     3. Publishes hotword events (max once per cooldown period)
 
@@ -47,6 +47,9 @@ class VoiceDetectionService:
         self.hotword_detector = hotword_detector
         self.hotword_cooldown = hotword_cooldown
         self.running = False
+
+        # Own reader into the shared audio bus (skip-ahead for low-latency hotword detection)
+        self.reader = audio_handler.create_reader()
 
         # Track last detection time for each hotword model (debouncing)
         self.last_detection_time: Dict[str, float] = {}
@@ -78,8 +81,9 @@ class VoiceDetectionService:
 
         try:
             while self.running:
-                # Get latest audio for hotword detection (skip-ahead queue)
-                audio_data = self.audio_handler.read_hotword_chunk()
+                # Skip ahead to latest frame for low-latency hotword detection
+                self.reader.skip_to_latest()
+                audio_data = self.reader.read(timeout=0.2)
 
                 if audio_data:
                     # Check for hotword
@@ -104,13 +108,11 @@ class VoiceDetectionService:
 
                             # Cooldown passed - publish event!
                             self.last_detection_time[model_name] = current_time
-                            queue_status = self.audio_handler.get_queue_status()
 
                             event = HotwordEvent(
                                 timestamp=datetime.now(),
                                 hotword=model_name,
                                 score=score,
-                                audio_queue_size=queue_status["audio_queue"],
                             )
 
                             logger.info(f"Hotword '{model_name}' detected! Score: {score:.3f}")

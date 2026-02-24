@@ -7,7 +7,7 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
-from ..core.audio_handler import AudioHandler
+from ...core.audio_handler import AudioHandler
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ class SimpleRecorder:
 
         # Start audio stream
         self.audio_handler.start_stream()
+        self.reader = self.audio_handler.create_reader()
         logger.info("✓ Audio stream started")
 
         # Calculate how many frames we need
@@ -74,7 +75,7 @@ class SimpleRecorder:
         try:
             while self.running and frame_count < total_frames:
                 # Read raw audio chunk
-                audio_data = self.audio_handler.read_chunk()
+                audio_data = self.reader.read(timeout=0.2)
                 if not audio_data:
                     continue
 

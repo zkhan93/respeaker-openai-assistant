@@ -80,8 +80,8 @@ def main() -> bool:
         print()
         print("Next steps:")
         print("  voice-assistant test-hotword    # Test hotword detection")
-        print("  voice-assistant test-stt        # Test speech-to-text")
-        print("  voice-assistant run             # Run the service")
+        print("  voice-assistant test-events     # Monitor detection events")
+        print("  voice-assistant run             # Run the core service")
     else:
         print("✗ Some checks failed. Please fix the issues above.")
     print("=" * 60)

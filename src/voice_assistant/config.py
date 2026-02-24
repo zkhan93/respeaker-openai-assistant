@@ -94,6 +94,26 @@ class Config:
         return self.get("vad.aggressiveness", 2)
 
     @property
+    def broadcaster_enabled(self) -> bool:
+        """Get whether ZMQ audio broadcasting is enabled."""
+        return self.get("broadcaster.enabled", True)
+
+    @property
+    def broadcaster_pub_endpoint(self) -> str:
+        """Get ZMQ PUB endpoint for outgoing audio + events."""
+        return self.get("broadcaster.pub_endpoint", "tcp://*:5555")
+
+    @property
+    def broadcaster_pull_endpoint(self) -> str:
+        """Get ZMQ PULL endpoint for incoming commands."""
+        return self.get("broadcaster.pull_endpoint", "tcp://*:5556")
+
+    @property
+    def broadcaster_meta_interval(self) -> float:
+        """Get interval between meta messages in seconds."""
+        return self.get("broadcaster.meta_interval", 30.0)
+
+    @property
     def logging_level(self) -> str:
         """Get logging level."""
         return self.get("logging.level", "INFO")

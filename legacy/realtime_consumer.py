@@ -54,6 +54,9 @@ class RealtimeConsumer:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.loop_thread: Optional[threading.Thread] = None
 
+        # Own reader into the shared audio bus (sequential reads for complete capture)
+        self.reader = audio_handler.create_reader()
+
         # Subscribe to events
         self.event_bus.subscribe("hotword_detected", self.on_hotword_detected)
         self.event_bus.subscribe("voice_activity_stopped", self.on_voice_stopped)
@@ -105,8 +108,6 @@ class RealtimeConsumer:
 
         logger.info("🎤 Hotword detected! Starting realtime conversation...")
         logger.info(f"   Hotword: '{event.hotword}' (score: {event.score:.3f})")
-        logger.info(f"   Queue size at detection: {event.audio_queue_size} frames")
-
         # Start conversation
         if self.loop:
             asyncio.run_coroutine_threadsafe(self._start_conversation(), self.loop)
@@ -203,8 +204,8 @@ class RealtimeConsumer:
             # Clear playback queue
             self.speaker_service.clear_queue()
 
-            # Clear audio queue and collected audio to start fresh
-            self.audio_handler.clear_audio_queue()
+            # Skip reader to latest and clear collected audio to start fresh
+            self.reader.skip_to_latest()
             self.collected_audio.clear()
 
             # Restart collecting
@@ -245,7 +246,7 @@ class RealtimeConsumer:
         self.collected_audio.clear()
 
         while self.streaming_audio and self.in_conversation:
-            chunk = self.audio_handler.read_audio_chunk(timeout=0.1)
+            chunk = self.reader.read(timeout=0.1)
             if chunk:
                 # Collect audio instead of streaming it
                 self.collected_audio.extend(chunk)

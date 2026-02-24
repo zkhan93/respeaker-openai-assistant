@@ -1,12 +1,13 @@
 """Audio I/O and processing for ReSpeaker 4-Mic Array."""
 
 import logging
-import queue
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
 import pyaudio
 import webrtcvad
+
+from .audio_bus import AudioBus, AudioBusReader
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +15,8 @@ logger = logging.getLogger(__name__)
 class AudioHandler:
     """Handles audio capture from AC108 device with multi-consumer support.
 
-    Uses callback-based audio capture with separate queues for different consumers:
-    - Hotword queue (small, can skip frames for responsiveness)
-    - Audio queue (large, buffers all raw audio frames for complete capture)
-    - Additional queues can be registered as needed
+    Uses callback-based audio capture with a shared ring buffer (AudioBus).
+    Consumers get independent readers via create_reader() and read at their own pace.
     """
 
     def __init__(
@@ -64,39 +63,27 @@ class AudioHandler:
         self.silence_frames = 0
         self.speech_frames = 0  # Count consecutive speech frames
 
-        # Multi-consumer queues
-        self.consumer_queues: List[queue.Queue] = []
-        self.hotword_queue = queue.Queue(maxsize=3)  # Small queue, can skip frames
-        self.audio_queue = queue.Queue(maxsize=100)  # Large queue, buffer all raw audio
-
-        # Register default consumers
-        self.consumer_queues.append(self.hotword_queue)
-        self.consumer_queues.append(self.audio_queue)
+        # Shared ring buffer for multi-consumer audio distribution
+        self.audio_bus = AudioBus(capacity=500)
 
         logger.info(
             f"AudioHandler initialized: {sample_rate}Hz, {channels}ch, "
             f"chunk_size={chunk_size}, vad_aggressiveness={vad_aggressiveness}, "
             f"speech_threshold={speech_threshold} frames, "
-            f"multi-consumer mode with {len(self.consumer_queues)} queues, "
+            f"AudioBus capacity={self.audio_bus.capacity}, "
             f"VAD events={'enabled' if event_bus else 'disabled'}"
         )
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         """Audio callback - called by PyAudio in background thread.
 
-        Broadcasts audio to all registered consumer queues and tracks voice activity.
+        Publishes audio to shared ring buffer and tracks voice activity.
         """
         if status:
             logger.warning(f"Audio callback status: {status}")
 
-        # Broadcast to all consumer queues
-        for q in self.consumer_queues:
-            try:
-                q.put_nowait(in_data)
-            except queue.Full:
-                # Queue full - this is expected for small queues (hotword)
-                # that want to skip-ahead to latest frame
-                pass
+        # Publish to shared ring buffer (all readers see it)
+        self.audio_bus.publish(in_data)
 
         # Track voice activity if event bus is configured
         if self.event_bus:
@@ -198,83 +185,17 @@ class AudioHandler:
             self.stream = None
             logger.info("Audio stream stopped")
 
-    def read_hotword_chunk(self) -> Optional[bytes]:
-        """Read audio chunk for hotword detection (skip-ahead behavior).
+    def create_reader(self) -> AudioBusReader:
+        """Create an independent reader for the audio bus.
 
-        If multiple frames are queued, skips to the most recent one to stay current.
-        This is appropriate for hotword detection where we want minimal latency.
-
-        Returns:
-            Raw audio data as bytes (PCM16 mono format), or None if timeout
-        """
-        if self.stream is None:
-            logger.error("Audio stream not started")
-            return None
-
-        try:
-            # Skip ahead to latest frame if we're falling behind
-            while self.hotword_queue.qsize() > 1:
-                self.hotword_queue.get_nowait()  # Discard old frame
-
-            # Get the most recent frame (wait up to 0.2s)
-            return self.hotword_queue.get(timeout=0.2)
-        except queue.Empty:
-            return None
-        except Exception as e:
-            logger.error(f"Error reading hotword chunk: {e}")
-            return None
-
-    def read_audio_chunk(self, timeout: float = 0.2) -> Optional[bytes]:
-        """Read audio chunk from buffered queue (complete audio capture).
-
-        Reads frames in order without skipping. Use this when you need
-        complete audio for streaming, transcription, or recording.
-
-        Args:
-            timeout: Maximum time to wait for a frame in seconds
+        Each consumer should call this to get its own read cursor
+        into the shared audio stream. Readers are independent — one
+        consumer's reads never affect another.
 
         Returns:
-            Raw audio data as bytes (PCM16 mono format), or None if timeout
+            A new AudioBusReader starting from the current write position.
         """
-        if self.stream is None:
-            logger.error("Audio stream not started")
-            return None
-
-        try:
-            return self.audio_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
-        except Exception as e:
-            logger.error(f"Error reading audio chunk: {e}")
-            return None
-
-    def read_chunk(self) -> Optional[bytes]:
-        """Read audio chunk (backward compatible - uses hotword queue).
-
-        For new code, prefer read_hotword_chunk() or read_audio_chunk().
-
-        Returns:
-            Raw audio data as bytes (PCM16 mono format), or None if error
-        """
-        return self.read_hotword_chunk()
-
-    def clear_audio_queue(self):
-        """Clear the audio queue (e.g., when starting new capture session)."""
-        while not self.audio_queue.empty():
-            try:
-                self.audio_queue.get_nowait()
-            except queue.Empty:
-                break
-        logger.debug("Audio queue cleared")
-
-    def register_queue(self, consumer_queue: queue.Queue):
-        """Register an additional consumer queue for audio broadcast.
-
-        Args:
-            consumer_queue: Queue to receive audio frames
-        """
-        self.consumer_queues.append(consumer_queue)
-        logger.info(f"Registered new consumer queue (total: {len(self.consumer_queues)})")
+        return self.audio_bus.create_reader()
 
     def convert_to_pcm16_mono(self, data: bytes) -> bytes:
         """Convert audio data to PCM16 mono format.
@@ -321,16 +242,15 @@ class AudioHandler:
             logger.error(f"VAD error: {e}")
             return False
 
-    def get_queue_status(self) -> dict:
-        """Get status of all consumer queues (for debugging/monitoring).
+    def get_bus_status(self) -> dict:
+        """Get status of audio bus (for debugging/monitoring).
 
         Returns:
-            Dictionary with queue sizes
+            Dictionary with bus stats
         """
         return {
-            "hotword_queue": self.hotword_queue.qsize(),
-            "audio_queue": self.audio_queue.qsize(),
-            "total_consumers": len(self.consumer_queues),
+            "bus_write_pos": self.audio_bus.write_pos,
+            "bus_capacity": self.audio_bus.capacity,
         }
 
     def _find_device_index(self) -> int:

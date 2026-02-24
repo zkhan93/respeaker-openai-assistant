@@ -4,96 +4,90 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A voice assistant for the ReSpeaker 4-Mic Array on Raspberry Pi, using OpenAI's Realtime API for bidirectional audio conversations. Built with an event-driven pub-sub architecture. Python 3.11+, managed with `uv`.
+An audio broadcasting service for the ReSpeaker 4-Mic Array on Raspberry Pi. Captures audio, detects hotwords/VAD, and broadcasts via ZeroMQ. External consumers (OpenAI Realtime, STT, recorders) connect over ZMQ from any machine. LED hardware is controlled via ZMQ commands. Python 3.11+, managed with `uv`.
 
 ## Common Commands
 
 ```bash
-# Run the assistant
+# Core service
 uv run voice-assistant run [--log-level DEBUG]
 
-# Verify installation
+# Setup
 uv run voice-assistant verify
-
-# Download hotword models
 uv run voice-assistant download-models
+uv run voice-assistant config
+uv run voice-assistant list-audio-devices
+
+# Test commands (hardware validation)
+uv run voice-assistant test audio             # 3-second audio capture test
+uv run voice-assistant test record            # Record and playback [--duration 15]
+uv run voice-assistant test hotword           # Hotword detection [--debug]
+uv run voice-assistant test hotword-native    # Native paInt16 hotword test
+uv run voice-assistant test events            # Real-time event monitor
+uv run voice-assistant test led               # LED patterns [--manual] [--basic]
 
 # Lint and format
-uv run ruff check src/
-uv run ruff format src/
-
-# Test commands (hardware-dependent, no pytest suite)
-uv run voice-assistant test-events      # Monitor hotword + VAD events (no API key needed)
-uv run voice-assistant test-hotword     # Test hotword detection [--debug for scores]
-uv run voice-assistant test-stt         # Test speech-to-text (requires API key)
-uv run voice-assistant test-realtime    # Full Realtime API conversation (requires API key)
-uv run voice-assistant test-led         # Test LED patterns [--manual] [--basic]
-uv run voice-assistant test-audio       # Basic audio capture test
-uv run voice-assistant record           # Record and playback [--duration 15]
-uv run voice-assistant list-audio-devices
+uvx ruff check src/
+uvx ruff format src/
 ```
 
 ## Architecture
 
-### Event-Driven Pub-Sub Flow
-
 ```
-AudioHandler (callback thread, 80ms chunks)
-    ├── hotword_queue (size=3, skip-ahead for low latency)
-    ├── audio_queue (size=100, buffered for complete capture)
-    └── EventBus ──→ VoiceActivityEvents
-            │
-VoiceDetectionService (reads hotword_queue)
-    └── EventBus ──→ HotwordEvent
-            │
-    ┌───────┴──────────┐
-    │   Consumers       │
-    ├── RealtimeConsumer (bidirectional OpenAI Realtime API via WebSocket)
-    ├── SpeechToTextConsumer (OpenAI Whisper)
-    └── LedConsumer (APA102 LED ring via SPI)
+Core Service (Raspberry Pi)
+  AudioHandler (capture 16kHz PCM16 @ 80ms)
+    → AudioBus (ring buffer, multi-reader)
+    → VAD → EventBus → detection events
+
+  AudioBroadcaster
+    zmq PUB  → audio frames + events (outgoing)
+    zmq PULL ← LED commands from consumers (incoming)
+      → LedConsumer (APA102 hardware driver)
+
+External Consumers (any machine, via ZMQ)
+  zmq SUB  ← subscribe to audio + events
+  zmq PUSH → send LED commands back to core
 ```
 
 ### Key Components
 
-- **AudioHandler** (`core/audio_handler.py`): Callback-based audio capture from AC108 device. 16-bit PCM mono @ 16kHz, 1280-sample chunks (80ms, required by openWakeWord). Built-in VAD via webrtcvad.
-- **EventBus** (`core/event_bus.py`): Thread-safe pub-sub hub. Publishes events asynchronously in background threads. Event types: `HotwordEvent`, `VoiceActivityEvent`, `SpeakingFinishedEvent`.
-- **HotwordDetector** (`core/hotword_detector.py`): openWakeWord wrapper. Requires int16 numpy arrays (not float32).
-- **VoiceDetectionService** (`core/detection_service.py`): Main detection loop with skip-ahead queue reading and debouncing (2s cooldown).
-- **SpeakerService** (`core/speaker_service.py`): Audio playback at 24kHz (OpenAI output format). Tracks playback completion, publishes `SpeakingFinishedEvent`.
-- **RealtimeConsumer** (`consumers/realtime_consumer.py`): Subscribes to hotword/VAD events, manages async WebSocket session with OpenAI Realtime API. Runs async event loop in background thread.
-- **LedConsumer** (`consumers/led/led_consumer.py`): Event-driven LED control for ReSpeaker's 12 APA102 pixels via SPI.
-- **StateMachine** (`services/state_machine.py`): Thread-safe state management (IDLE → LISTENING → PROCESSING → INTERRUPTED).
-- **OpenAIRealtimeClient** (`services/openai_client.py`): WebSocket client with auto-reconnect.
+- **AudioHandler** (`core/audio_handler.py`): Callback-based capture from AC108. 16-bit PCM mono @ 16kHz, 1280-sample chunks (80ms). Built-in VAD via webrtcvad.
+- **AudioBus** (`core/audio_bus.py`): Shared ring buffer. Consumers create independent `AudioBusReader` cursors.
+- **AudioBroadcaster** (`core/audio_broadcaster.py`): ZMQ PUB for audio+events, ZMQ PULL for LED commands. Thread-safe sends.
+- **EventBus** (`core/event_bus.py`): Thread-safe pub-sub hub. Event types: `HotwordEvent`, `VoiceActivityEvent`.
+- **HotwordDetector** (`core/hotword_detector.py`): openWakeWord wrapper. Requires int16 numpy arrays.
+- **VoiceDetectionService** (`core/detection_service.py`): Detection loop with skip-ahead reading and debouncing (2s cooldown).
+- **LedConsumer** (`consumers/led/led_consumer.py`): Pure command-driven LED driver. `set_pattern(pattern, **kwargs)` — no event subscriptions.
 
 ### Threading Model
 
 - Audio capture: PyAudio callback thread
 - EventBus: Spawns background threads per callback
-- RealtimeConsumer: Async event loop in dedicated background thread, separate threads for audio streaming/playback
+- AudioBroadcaster: 3 threads (audio, meta, command)
 - All shared state protected with locks
 
 ### CLI Structure
 
-Entry point: `voice_assistant.cli:main` → routes to command modules in `commands/`. The `run` command wires all components together: config → EventBus → AudioHandler → HotwordDetector → VoiceDetectionService → SpeakerService → Consumers.
+Built with typer. Entry point: `voice_assistant.cli:main`. Top-level commands: `run`, `verify`, `download-models`, `config`, `list-audio-devices`. Test commands grouped under `voice-assistant test <cmd>`. Commands in `commands/` (core) and `commands/test/` (hardware tests).
 
 ## Configuration
 
-Copy `config/config.yaml.example` to `config/config.yaml` and set your OpenAI API key. Key settings:
+Copy `config/config.yaml.example` to `config/config.yaml`. Key settings:
 
 - `audio.chunk_size`: Must be 1280 (80ms at 16kHz, required by openWakeWord)
 - `hotword.threshold`: Detection sensitivity 0.0–1.0
-- `vad.aggressiveness`: 0–3 (3 = strictest, only clear speech)
-- `vad.silence_threshold`: Frames before voice considered stopped (~1s at 15 frames)
+- `vad.aggressiveness`: 0–3 (3 = strictest)
+- `broadcaster.pub_endpoint`: ZMQ PUB bind address (default `tcp://*:5555`)
+- `broadcaster.pull_endpoint`: ZMQ PULL bind address (default `tcp://*:5556`)
 
 ## Code Style
 
 - Ruff for linting/formatting, line-length 100, target Python 3.11
 - Type hints throughout
 - Logging via `logging.getLogger(__name__)`
-- Consumers follow a subscribe-and-react pattern: subscribe to EventBus events, handle them independently
 
 ## Hardware Context
 
 - ReSpeaker 4-Mic Array: AC108 ALSA device (capture), 12 APA102 LEDs (SPI bus 0, device 1), GPIO pin 5 (power)
 - Target platform: Raspberry Pi 4B
-- Audio format: paInt16 mono 16kHz (capture), 24kHz (OpenAI playback)
+- Audio format: paInt16 mono 16kHz (capture)

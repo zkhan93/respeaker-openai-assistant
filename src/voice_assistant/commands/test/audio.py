@@ -37,6 +37,7 @@ def main() -> bool:
 
         # Start stream
         audio_handler.start_stream()
+        reader = audio_handler.create_reader()
         print("✓ Audio stream started")
         print()
 
@@ -48,7 +49,7 @@ def main() -> bool:
 
         start_time = time.time()
         while time.time() - start_time < 3.0:
-            chunk = audio_handler.read_audio_chunk(timeout=0.2)
+            chunk = reader.read(timeout=0.2)
             if chunk:
                 frames.append(chunk)
                 sample_count += len(chunk)

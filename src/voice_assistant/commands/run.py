@@ -1,13 +1,13 @@
-"""Run the main voice assistant service."""
+"""Run the core voice assistant service (audio capture + detection + broadcasting)."""
 
 import logging
 
 from voice_assistant.config import load_config
 from voice_assistant.core import (
+    AudioBroadcaster,
     AudioHandler,
     EventBus,
     HotwordDetector,
-    SpeakerService,
     VoiceDetectionService,
 )
 
@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def main(log_level: str | None = None) -> bool:
-    """Run the voice assistant service.
+    """Run the voice assistant core service.
+
+    Captures audio, detects hotwords/VAD, broadcasts over ZeroMQ,
+    and accepts LED commands from external consumers.
 
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR). If None, reads from config.
@@ -23,13 +26,10 @@ def main(log_level: str | None = None) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    # Load configuration first to get logging settings
     try:
         config = load_config("config/config.yaml")
     except Exception as e:
-        # If config fails to load, use defaults
         print(f"Warning: Failed to load configuration: {e}")
-        print("Using default logging configuration...")
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -37,79 +37,66 @@ def main(log_level: str | None = None) -> bool:
         logger.error(f"Failed to load configuration: {e}")
         return False
 
-    # Use CLI argument if provided, otherwise use config value
     effective_log_level = log_level if log_level is not None else config.logging_level
 
-    # Configure logging with the effective level
     logging.basicConfig(
         level=getattr(logging, effective_log_level.upper()),
         format=config.logging_format,
     )
 
-    logger.info("Starting Voice Assistant service...")
+    logger.info("Starting Voice Assistant core service...")
 
     print("=" * 70)
-    print("🎤 VOICE ASSISTANT SERVICE")
+    print("VOICE ASSISTANT CORE SERVICE")
     print("=" * 70)
     print()
-    print("Event-Driven Architecture:")
-    print("  Audio Stream → Voice Detection Service → EventBus")
-    print("                                              ↓")
-    print("  Events: • hotword_detected")
-    print("          • voice_activity_started")
-    print("          • voice_activity_stopped")
-    print("                                              ↓")
-    print("                                 Consumers (subscribe)")
+    print("Core: Audio Capture + Hotword/VAD Detection + ZMQ Broadcast")
     print()
-    print("Say 'ALEXA' to activate")
+    print("  AudioHandler -> AudioBus -> AudioBroadcaster (zmq PUB)")
+    print("  VAD/Hotword  -> EventBus -> AudioBroadcaster (zmq PUB)")
+    print("  External consumers -> zmq PUSH -> LED commands")
+    print()
+    print("Say 'ALEXA' to trigger hotword event")
     print("Press Ctrl+C to stop")
     print("=" * 70)
     print()
 
     # Create core components
     event_bus = EventBus()
-    audio_handler = AudioHandler(event_bus=event_bus)  # Pass event bus for VAD events
+    audio_handler = AudioHandler(event_bus=event_bus)
     hotword_detector = HotwordDetector()
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
 
-    # Create speaker service for audio playback
-    speaker_service = SpeakerService(
-        preferred_device_name=config.audio_output_device,
-        event_bus=event_bus,
-    )
-    speaker_service.start()
-
-    # Create and register consumers
-    from voice_assistant.consumers import RealtimeConsumer
+    # Create LED consumer (hardware driver, command-driven)
     from voice_assistant.consumers.led import LedConsumer
 
-    # Create LED consumer (with speaker service for auto speak detection)
-    led_consumer = LedConsumer(
-        event_bus=event_bus,
-        enabled=True,
-        speaker_service=speaker_service,
-    )
+    led_consumer = LedConsumer(enabled=True)
+    print("LED consumer ready")
 
-    # Create Realtime consumer
-    realtime_consumer = RealtimeConsumer(
-        event_bus=event_bus,
-        audio_handler=audio_handler,
-        speaker_service=speaker_service,
-        openai_api_key=config.openai_api_key,
-    )
-    realtime_consumer.start()
-
-    logger.info("Consumers initialized and started")
-    print("✓ LED consumer ready")
-    print("✓ OpenAI Realtime API consumer ready")
+    # Create broadcaster (zmq PUB + PULL)
+    broadcaster = None
+    if config.broadcaster_enabled:
+        broadcaster = AudioBroadcaster(
+            audio_handler=audio_handler,
+            event_bus=event_bus,
+            led_consumer=led_consumer,
+            pub_endpoint=config.broadcaster_pub_endpoint,
+            pull_endpoint=config.broadcaster_pull_endpoint,
+            meta_interval=config.broadcaster_meta_interval,
+        )
+        broadcaster.start()
+        print(
+            f"Broadcaster ready (PUB {config.broadcaster_pub_endpoint}, "
+            f"PULL {config.broadcaster_pull_endpoint})"
+        )
     print()
 
     # Start audio stream
     audio_handler.start_stream()
     logger.info("Audio stream started (callback mode with VAD events)")
-    print("✓ Audio stream started")
-    print("✓ Voice detection service ready")
-    print("✓ Listening for 'alexa' and voice activity...")
+    print("Audio stream started")
+    print("Voice detection service ready")
+    print("Listening for 'alexa' and voice activity...")
     print()
 
     # Run detection service (blocks until stopped)
@@ -120,15 +107,14 @@ def main(log_level: str | None = None) -> bool:
         logger.error(f"Error running detection service: {e}", exc_info=True)
         return False
     finally:
-        # Cleanup
         logger.info("Cleaning up...")
-        realtime_consumer.cleanup()
+        if broadcaster:
+            broadcaster.cleanup()
         led_consumer.cleanup()
-        speaker_service.cleanup()
         audio_handler.stop_stream()
         audio_handler.cleanup()
         logger.info("Cleanup complete")
-        print("\n✓ Service stopped")
+        print("\nService stopped")
 
 
 if __name__ == "__main__":

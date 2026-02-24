@@ -1,21 +1,12 @@
 # Voice Assistant Configuration Example
 # Copy this file to config.yaml and fill in your actual values
 
-# OpenAI API Configuration
-openai:
-  api_key: "your-openai-api-key-here"  # Replace with your actual API key
-  model: "gpt-realtime"  # OpenAI Realtime API model
-
 # Audio Configuration
 audio:
   device: "ac108"  # ALSA device name for ReSpeaker 4-Mic Array
   sample_rate: 16000  # Hz
   channels: 1  # Use mono (AC108 supports this and works perfectly with openWakeWord)
   chunk_size: 1280  # Samples per chunk (80ms at 16kHz - required by openWakeWord)
-  output_device: null  # Preferred output device name (partial match, case-insensitive)
-                       # Examples: "JBL", "Bluetooth", "Speaker", "Headphones"
-                       # If null or not found, falls back to system default
-                       # Use `python -m voice_assistant.commands.list_audio_devices` to see available devices
 
 # Hotword Detection Configuration
 hotword:
@@ -30,22 +21,23 @@ vad:
   # 0 = least aggressive (detects any sound)
   # 3 = most aggressive (only clear speech)
   # Recommended: 3 to avoid false triggers from taps/movements
-  
+
   speech_threshold: 3  # Consecutive speech frames required (filters brief noises)
   # Higher = more strict (ignores short sounds like taps)
   # Lower = more sensitive (may trigger on brief noises)
-  
+
   silence_threshold: 15  # Silent frames before voice considered stopped
   # ~1 second at 80ms per chunk
   # Higher = waits longer before stopping
+
+# ZMQ Audio Broadcasting Configuration
+broadcaster:
+  enabled: true  # Broadcast audio + events over ZeroMQ
+  pub_endpoint: "tcp://*:5555"   # Outgoing: audio frames + events
+  pull_endpoint: "tcp://*:5556"  # Incoming: LED commands from external consumers
+  meta_interval: 30  # Seconds between stream metadata messages
 
 # Logging Configuration
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-# State Machine Configuration
-state:
-  timeout_listening: 10  # Seconds to wait in LISTENING before timeout
-  timeout_processing: 30  # Seconds to wait in PROCESSING before timeout
-

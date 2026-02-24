@@ -46,6 +46,9 @@ class SpeechToTextConsumer:
         self.recorded_frames = []
         self.recording_thread = None
 
+        # Own reader into the shared audio bus (sequential reads for complete capture)
+        self.reader = audio_handler.create_reader()
+
         # Subscribe to events
         self.event_bus.subscribe("hotword_detected", self.on_hotword_detected)
         self.event_bus.subscribe("voice_activity_stopped", self.on_voice_stopped)
@@ -75,8 +78,6 @@ class SpeechToTextConsumer:
 
         logger.info("🎤 Hotword detected! Starting recording...")
         logger.info(f"   Hotword: '{event.hotword}' (score: {event.score:.3f})")
-        logger.info(f"   Queue size at detection: {event.audio_queue_size} frames")
-
         # Start recording
         self.recording = True
         self.recording_start_time = time.time()
@@ -169,7 +170,7 @@ class SpeechToTextConsumer:
         logger.debug("Audio collection thread started")
 
         while self.recording:
-            chunk = self.audio_handler.read_audio_chunk(timeout=0.1)
+            chunk = self.reader.read(timeout=0.1)
             if chunk:
                 self.recorded_frames.append(chunk)
 
@@ -190,7 +191,7 @@ class SpeechToTextConsumer:
         timeout = 0.05  # 50ms timeout per chunk
 
         while True:
-            chunk = self.audio_handler.read_audio_chunk(timeout=timeout)
+            chunk = self.reader.read(timeout=timeout)
             if chunk:
                 self.recorded_frames.append(chunk)
             else:

@@ -58,7 +58,6 @@ def main() -> bool:
         print(f"   Hotword: {event.hotword}")
         print(f"   Score: {event.score:.4f}")
         print(f"   Timestamp: {event.timestamp}")
-        print(f"   Audio queue size: {event.audio_queue_size} frames")
         print(f"{'=' * 70}\n")
 
     def on_voice_started(event: VoiceActivityEvent):
