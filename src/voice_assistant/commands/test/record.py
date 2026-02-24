@@ -246,7 +246,7 @@ def main(duration: int = 15, auto_play: bool = True):
         logger.info("")
         logger.info("Next steps:")
         logger.info("  1. If audio quality was good:")
-        logger.info("     → Try: voice-assistant test-hotword")
+        logger.info("     → Try: voice-assistant test hotword")
         logger.info("")
         logger.info("  2. If audio was unclear/noisy:")
         logger.info("     → Adjust microphone position")

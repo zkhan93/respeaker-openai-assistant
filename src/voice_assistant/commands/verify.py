@@ -79,8 +79,8 @@ def main() -> bool:
         print("✓ All checks passed! Ready to use.")
         print()
         print("Next steps:")
-        print("  voice-assistant test-hotword    # Test hotword detection")
-        print("  voice-assistant test-events     # Monitor detection events")
+        print("  voice-assistant test hotword    # Test hotword detection")
+        print("  voice-assistant test events     # Monitor detection events")
         print("  voice-assistant run             # Run the core service")
     else:
         print("✗ Some checks failed. Please fix the issues above.")
