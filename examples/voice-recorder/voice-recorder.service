@@ -1,0 +1,19 @@
+[Unit]
+Description=ZMQ Voice Recorder - records voice segments to WAV files
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/llm-assistant/voice-assistant/examples/record-to-disk/recorder.py --hold 5 --endpoint "tcp://192.168.108.142:5555" --output-dir /tank-hdd/audio-recordings/
+WorkingDirectory=/home/pi/llm-assistant/voice-assistant
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=10
+User=pi
+
+Environment="PYTHONUNBUFFERED=1"
+Environment="PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target
