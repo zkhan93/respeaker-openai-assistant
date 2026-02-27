@@ -11,6 +11,7 @@ Features:
 
 Usage:
     python examples/zmq_recorder.py [--endpoint tcp://localhost:5555] [--output-dir recordings]
+                                     [--pre-buffer 2.0] [--hold 3.0]
 
 Requires: pyzmq (pip install pyzmq)
 """
@@ -26,8 +27,8 @@ from pathlib import Path
 
 import zmq
 
-PRE_BUFFER_SECONDS = 2.0
-HOLD_SECONDS = 3.0
+DEFAULT_PRE_BUFFER_SECONDS = 2.0
+DEFAULT_HOLD_SECONDS = 3.0
 POLL_TIMEOUT_MS = 100
 
 
@@ -49,6 +50,18 @@ def parse_args() -> argparse.Namespace:
         default="recordings",
         help="Output directory for WAV files",
     )
+    parser.add_argument(
+        "--pre-buffer",
+        type=float,
+        default=DEFAULT_PRE_BUFFER_SECONDS,
+        help=f"Seconds of audio to keep before voice activity (default: {DEFAULT_PRE_BUFFER_SECONDS})",
+    )
+    parser.add_argument(
+        "--hold",
+        type=float,
+        default=DEFAULT_HOLD_SECONDS,
+        help=f"Seconds to wait after voice stops before saving (default: {DEFAULT_HOLD_SECONDS})",
+    )
     return parser.parse_args()
 
 
@@ -65,8 +78,8 @@ def create_subscriber(endpoint: str) -> tuple[zmq.Context, zmq.Socket, zmq.Polle
     return ctx, sub, poller
 
 
-def pre_buffer_maxlen(chunk_ms: int) -> int:
-    return max(1, int(PRE_BUFFER_SECONDS * 1000 / chunk_ms))
+def pre_buffer_maxlen(chunk_ms: int, pre_buffer_seconds: float) -> int:
+    return max(1, int(pre_buffer_seconds * 1000 / chunk_ms))
 
 
 def save_wav(
@@ -95,6 +108,7 @@ def handle_meta(
     payload: bytes,
     stream_info: dict,
     pre_buf: deque[bytes],
+    pre_buffer_seconds: float,
 ) -> deque[bytes]:
     meta = json.loads(payload)
     stream_info["sample_rate"] = meta["sample_rate"]
@@ -104,7 +118,7 @@ def handle_meta(
         f"Stream: {meta['sample_rate']}Hz, {meta['channels']}ch, "
         f"{meta['format']}, {meta['chunk_ms']}ms chunks"
     )
-    return deque(pre_buf, maxlen=pre_buffer_maxlen(stream_info["chunk_ms"]))
+    return deque(pre_buf, maxlen=pre_buffer_maxlen(stream_info["chunk_ms"], pre_buffer_seconds))
 
 
 def handle_event(
@@ -112,6 +126,7 @@ def handle_event(
     state: RecorderState,
     frames: list[bytes],
     pre_buf: deque[bytes],
+    hold_seconds: float,
 ) -> tuple[RecorderState, list[bytes], float]:
     """Process an event message. Returns (new_state, frames, hold_start)."""
     event = json.loads(payload)
@@ -132,7 +147,7 @@ def handle_event(
 
     elif event_type == "voice_activity_stopped":
         if state == RecorderState.RECORDING:
-            print(f"[REC] Voice stopped -- holding {HOLD_SECONDS}s...")
+            print(f"[REC] Voice stopped -- holding {hold_seconds}s...")
             return RecorderState.HOLDING, frames, time.monotonic()
 
     elif event_type == "hotword_detected":
@@ -163,15 +178,20 @@ def main():
 
     ctx, sub, poller = create_subscriber(args.endpoint)
 
+    pre_buffer_seconds = args.pre_buffer
+    hold_seconds = args.hold
+
     print(f"Connected to {args.endpoint}")
     print(f"Output: {output_dir}/")
-    print(f"Pre-buffer: {PRE_BUFFER_SECONDS}s | Hold-off: {HOLD_SECONDS}s")
+    print(f"Pre-buffer: {pre_buffer_seconds}s | Hold-off: {hold_seconds}s")
     print("Waiting for stream metadata...\n")
 
     stream_info: dict = {"sample_rate": 16000, "channels": 1, "chunk_ms": 80}
     state = RecorderState.IDLE
     frames: list[bytes] = []
-    pre_buf: deque[bytes] = deque(maxlen=pre_buffer_maxlen(stream_info["chunk_ms"]))
+    pre_buf: deque[bytes] = deque(
+        maxlen=pre_buffer_maxlen(stream_info["chunk_ms"], pre_buffer_seconds)
+    )
     hold_start = 0.0
 
     try:
@@ -183,11 +203,11 @@ def main():
                 topic = parts[0]
 
                 if topic == b"meta":
-                    pre_buf = handle_meta(parts[1], stream_info, pre_buf)
+                    pre_buf = handle_meta(parts[1], stream_info, pre_buf, pre_buffer_seconds)
 
                 elif topic == b"event":
                     state, frames, hold_start = handle_event(
-                        parts[1], state, frames, pre_buf
+                        parts[1], state, frames, pre_buf, hold_seconds
                     )
 
                 elif topic == b"audio":
@@ -195,7 +215,7 @@ def main():
 
             if (
                 state == RecorderState.HOLDING
-                and (time.monotonic() - hold_start) >= HOLD_SECONDS
+                and (time.monotonic() - hold_start) >= hold_seconds
             ):
                 print("[REC] Hold expired -- saving")
                 save_wav(
