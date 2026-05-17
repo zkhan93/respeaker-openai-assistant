@@ -1,0 +1,62 @@
+# alt-alexa-music-mcp config
+#
+# Every value below can also be overridden via environment variables,
+# prefixed with MUSIC_MCP_ and using __ for nested keys, e.g.:
+#   MUSIC_MCP_NAVIDROME__BASE_URL=https://music.navidrome.com
+#   MUSIC_MCP_LIBRARY__PATH=/library
+#   MUSIC_MCP_PLAYER__MPV_SOCKET=/run/mpv/mpv.sock
+#
+# Env vars win over file values. The Docker deployment relies on env
+# vars exclusively; this file is for bare-metal / dev runs.
+
+[navidrome]
+base_url = "https://music.navidrome.com"
+username = "CHANGE_ME"
+password = "CHANGE_ME"
+# Subsonic API version we advertise. 1.16.1 covers everything we use.
+api_version = "1.16.1"
+
+[library]
+# Where yt-dlp writes new downloads. Must be inside Navidrome's scan
+# path so a startScan picks them up. Inside Docker this is typically
+# a bind-mounted volume.
+path = "/library"
+# Subfolder under `path` for yt-dlp output, keeps fallbacks isolated
+# from your curated library.
+youtube_subdir = "youtube"
+
+[player]
+# Unix domain socket mpv exposes for IPC. Shared with alt-alexa for
+# direct duck/unduck. Parent directory must exist and be writable.
+mpv_socket = "/run/mpv/mpv.sock"
+# Default volume when nothing has set one (0-100).
+default_volume = 80
+# Extra mpv args. --ao=pulse for PulseAudio on the Pi, --ao=pipewire
+# for PipeWire, --audio-device=... to pin a specific output sink
+# (e.g. the bluetooth sink connecting to the Alexa Echo).
+extra_args = ["--ao=pulse"]
+
+[search]
+# rapidfuzz score (0-100) required to accept a Navidrome match instead
+# of falling back to YouTube. Lower = more lenient, more false hits.
+fuzzy_threshold = 60
+# Max Navidrome candidates to fetch per query before scoring.
+candidate_limit = 20
+
+[youtube]
+# yt-dlp format selector. Audio-only.
+format = "bestaudio/best"
+# Hard cap on download duration; rejects podcasts/live streams.
+max_duration_seconds = 900
+# Audio codec to extract to. mp3/m4a/opus all work with Navidrome.
+audio_codec = "mp3"
+audio_quality = "192"
+
+[server]
+host = "0.0.0.0"
+port = 7801
+# FastMCP transport: "http" (streamable HTTP, recommended) or "sse".
+transport = "http"
+
+[logging]
+level = "INFO"

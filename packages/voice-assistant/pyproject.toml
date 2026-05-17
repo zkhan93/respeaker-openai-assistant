@@ -9,18 +9,22 @@ dependencies = [
     "numpy>=1.24.0,<2.0.0",
     "openai>=2.14.0",
     "openwakeword>=0.6.0",
-    "pyaudio>=0.2.14",
     "pygame>=2.6.1",
     "pyyaml>=6.0.3",
     "pyzmq>=26.0.0",
-    "rpi-gpio>=0.7.1",
     "scipy>=1.13.1",
     "setuptools>=80.9.0",
     "soxr>=1.0.0",
-    "spidev>=3.8",
-    "typer[all]>=0.15.0",
+    "typer>=0.15.0",
     "webrtcvad>=2.0.10",
     "websockets>=15.0.1",
+    # Pi-only deps. PEP 508 markers keep `uv sync` working on macOS / WSL
+    # dev boxes; on Linux/Pi they install normally. `pyaudio` needs the
+    # portaudio system lib (no prebuilt wheels on macOS arm64), and
+    # `rpi-gpio` / `spidev` only build against Linux kernel headers.
+    "pyaudio>=0.2.14 ; sys_platform == 'linux'",
+    "rpi-gpio>=0.7.1 ; sys_platform == 'linux'",
+    "spidev>=3.8 ; sys_platform == 'linux'",
 ]
 
 [project.scripts]
