@@ -6,7 +6,7 @@ Wants=sound.target
 [Service]
 Type=simple
 ExecStart=/home/pi/.local/bin/uv run voice-assistant run
-WorkingDirectory=/home/pi/llm-assistant/voice-assistant
+WorkingDirectory=/home/pi/llm-assistant/respeaker-openai-assistant/packages/voice-assistant
 StandardOutput=journal
 StandardError=journal
 Restart=always
