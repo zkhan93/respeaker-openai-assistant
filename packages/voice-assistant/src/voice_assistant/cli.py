@@ -48,11 +48,21 @@ def _bootstrap(
 
 
 @app.command()
-def run() -> None:
+def run(
+    hotword: Optional[str] = typer.Option(
+        None,
+        "--hotword",
+        "-w",
+        help=(
+            "Wake word to listen for. Overrides config 'hotword.model'. "
+            "Examples: alexa, hey_jarvis, hey_mycroft, hey_rhasspy, timer, weather."
+        ),
+    ),
+) -> None:
     """Run the voice assistant core service."""
     from voice_assistant.commands.run import main as run_main
 
-    raise typer.Exit(0 if run_main() else 1)
+    raise typer.Exit(0 if run_main(hotword=hotword) else 1)
 
 
 @app.command()

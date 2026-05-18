@@ -18,12 +18,10 @@ from voice_assistant.core import (
 from voice_assistant.systemd_notify import notify as sd_notify
 from voice_assistant.systemd_notify import start_watchdog_thread
 
-HOTWORD_MODEL_NAME = "alexa"
-
 logger = logging.getLogger(__name__)
 
 
-def main() -> bool:
+def main(hotword: str | None = None) -> bool:
     """Run the voice assistant core service.
 
     Captures audio, detects hotwords/VAD, broadcasts over ZeroMQ, and accepts
@@ -35,6 +33,11 @@ def main() -> bool:
     audio stream and broadcaster are live, runs a watchdog heartbeat thread,
     and signals ``STOPPING=1`` during teardown.
 
+    Args:
+        hotword: Wake word to listen for. Overrides ``hotword.model`` from
+            config when provided. Falls back to the config value (default
+            ``"alexa"``) when ``None``.
+
     Returns:
         ``True`` on a clean shutdown, ``False`` if startup or the detection
         loop raised.
@@ -45,16 +48,18 @@ def main() -> bool:
         logger.error("Failed to load configuration: %s", exc, exc_info=True)
         return False
 
-    logger.info("voice-assistant starting (hotword=%s)", HOTWORD_MODEL_NAME)
+    hotword_name = hotword or config.hotword_model
+    logger.info("voice-assistant starting (hotword=%s)", hotword_name)
 
-    hotword_available, hotword_path = ensure_model(HOTWORD_MODEL_NAME)
+    hotword_available, hotword_path = ensure_model(hotword_name)
     if not hotword_available:
         logger.warning(
             "hotword model %r unavailable at %s — hotword detection disabled, "
             "voice activity detection will continue. "
-            "Run `voice-assistant download-models` once online to enable hotwords.",
-            HOTWORD_MODEL_NAME,
+            "Run `voice-assistant download-models -w %s` once online to enable hotwords.",
+            hotword_name,
             hotword_path or "<unknown>",
+            hotword_name,
         )
 
     event_bus = EventBus()
@@ -62,7 +67,10 @@ def main() -> bool:
 
     hotword_detector: HotwordDetector | None = None
     if hotword_available:
-        hotword_detector = HotwordDetector(threshold=config.hotword_threshold)
+        hotword_detector = HotwordDetector(
+            model_name=hotword_name,
+            threshold=config.hotword_threshold,
+        )
 
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
     led_consumer = LedConsumer(enabled=True)
@@ -87,7 +95,7 @@ def main() -> bool:
     audio_handler.start_stream()
     logger.info("audio stream started (16kHz PCM16, callback mode)")
     if hotword_available:
-        logger.info("listening for %r and voice activity", HOTWORD_MODEL_NAME)
+        logger.info("listening for %r and voice activity", hotword_name)
     else:
         logger.info("listening for voice activity only (hotword disabled)")
 

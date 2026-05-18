@@ -84,6 +84,11 @@ class Config:
         return self.get("audio.output_device", None)
 
     @property
+    def hotword_model(self) -> str:
+        """Get configured wake word model name."""
+        return self.get("hotword.model", "alexa")
+
+    @property
     def hotword_threshold(self) -> float:
         """Get hotword detection threshold."""
         return self.get("hotword.threshold", 0.5)
