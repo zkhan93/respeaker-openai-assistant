@@ -9,7 +9,11 @@ from voice_assistant.core import (
     EventBus,
     HotwordDetector,
     VoiceDetectionService,
+    get_model_path,
+    is_model_available,
 )
+
+HOTWORD_MODEL_NAME = "alexa"
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +60,35 @@ def main(log_level: str | None = None) -> bool:
     print("  VAD/Hotword  -> EventBus -> AudioBroadcaster (zmq PUB)")
     print("  External consumers -> zmq PUSH -> LED commands")
     print()
-    print("Say 'ALEXA' to trigger hotword event")
+
+    hotword_available = is_model_available(HOTWORD_MODEL_NAME)
+    if hotword_available:
+        print(f"Say '{HOTWORD_MODEL_NAME.upper()}' to trigger hotword event")
+    else:
+        expected_path = get_model_path(HOTWORD_MODEL_NAME) or "<unknown>"
+        print("!" * 70)
+        print(f"WARNING: hotword model '{HOTWORD_MODEL_NAME}' is NOT installed.")
+        print(f"  Expected at: {expected_path}")
+        print("  Hotword detection will be DISABLED until you run:")
+        print("      uv run voice-assistant download-models")
+        print("!" * 70)
+        logger.warning(
+            "Hotword model '%s' missing at %s — hotword detection disabled. "
+            "Run `uv run voice-assistant download-models`.",
+            HOTWORD_MODEL_NAME,
+            expected_path,
+        )
     print("Press Ctrl+C to stop")
     print("=" * 70)
     print()
 
-    # Create core components
     event_bus = EventBus()
     audio_handler = AudioHandler(event_bus=event_bus)
-    hotword_detector = HotwordDetector()
+
+    hotword_detector: HotwordDetector | None = None
+    if hotword_available:
+        hotword_detector = HotwordDetector(threshold=config.hotword_threshold)
+
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
 
     # Create LED consumer (hardware driver, command-driven)
@@ -96,7 +120,10 @@ def main(log_level: str | None = None) -> bool:
     logger.info("Audio stream started (callback mode with VAD events)")
     print("Audio stream started")
     print("Voice detection service ready")
-    print("Listening for 'alexa' and voice activity...")
+    if hotword_available:
+        print("Listening for 'alexa' and voice activity...")
+    else:
+        print("Listening for voice activity only (hotword disabled)...")
     print()
 
     # Run detection service (blocks until stopped)

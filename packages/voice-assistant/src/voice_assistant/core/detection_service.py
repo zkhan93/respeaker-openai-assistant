@@ -31,7 +31,7 @@ class VoiceDetectionService:
         self,
         audio_handler: AudioHandler,
         event_bus: EventBus,
-        hotword_detector: HotwordDetector,
+        hotword_detector: HotwordDetector | None,
         hotword_cooldown: float = 2.0,  # Seconds to wait before next hotword detection
     ):
         """Initialize detection service.
@@ -39,7 +39,8 @@ class VoiceDetectionService:
         Args:
             audio_handler: Audio handler for reading audio
             event_bus: Event bus for publishing events
-            hotword_detector: Hotword detector instance
+            hotword_detector: Hotword detector instance, or None to disable hotword
+                detection (VAD events from AudioHandler still flow through EventBus).
             hotword_cooldown: Seconds to wait after hotword detection before detecting again
         """
         self.audio_handler = audio_handler
@@ -77,6 +78,12 @@ class VoiceDetectionService:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+        if self.hotword_detector is None:
+            logger.warning(
+                "Detection loop running WITHOUT hotword detector — VAD events still emit "
+                "from AudioHandler, but no hotword events will be published."
+            )
+
         logger.info("Starting detection loop...")
 
         try:
@@ -85,43 +92,45 @@ class VoiceDetectionService:
                 self.reader.skip_to_latest()
                 audio_data = self.reader.read(timeout=0.2)
 
-                if audio_data:
-                    # Check for hotword
-                    pcm16_data = self.audio_handler.convert_to_pcm16_mono(audio_data)
-                    scores = self.hotword_detector.get_scores(pcm16_data)
+                if not audio_data:
+                    continue
 
-                    for model_name, score in scores.items():
-                        if score >= self.hotword_detector.threshold:
-                            # Check debouncing - has enough time passed since last detection?
-                            current_time = time.time()
-                            last_time = self.last_detection_time.get(model_name, 0)
-                            time_since_last = current_time - last_time
+                if self.hotword_detector is None:
+                    # Nothing to score; keep the loop alive so signal handlers stay armed.
+                    continue
 
-                            if time_since_last < self.hotword_cooldown:
-                                # Still in cooldown period, skip this detection
-                                logger.debug(
-                                    f"Hotword '{model_name}' detected (score: {score:.3f}) but in"
-                                    f" cooldown ({time_since_last:.2f}s "
-                                    f"< {self.hotword_cooldown}s), skipping"
-                                )
-                                continue
+                pcm16_data = self.audio_handler.convert_to_pcm16_mono(audio_data)
+                scores = self.hotword_detector.get_scores(pcm16_data)
 
-                            # Cooldown passed - publish event!
-                            self.last_detection_time[model_name] = current_time
+                for model_name, score in scores.items():
+                    if score < self.hotword_detector.threshold:
+                        continue
 
-                            event = HotwordEvent(
-                                timestamp=datetime.now(),
-                                hotword=model_name,
-                                score=score,
-                            )
+                    current_time = time.time()
+                    last_time = self.last_detection_time.get(model_name, 0)
+                    time_since_last = current_time - last_time
 
-                            logger.info(f"Hotword '{model_name}' detected! Score: {score:.3f}")
+                    if time_since_last < self.hotword_cooldown:
+                        logger.debug(
+                            f"Hotword '{model_name}' detected (score: {score:.3f}) but in"
+                            f" cooldown ({time_since_last:.2f}s "
+                            f"< {self.hotword_cooldown}s), skipping"
+                        )
+                        continue
 
-                            # Publish event - consumers will handle it
-                            self.event_bus.publish("hotword_detected", event)
+                    self.last_detection_time[model_name] = current_time
 
-                            # Brief pause
-                            time.sleep(0.1)
+                    event = HotwordEvent(
+                        timestamp=datetime.now(),
+                        hotword=model_name,
+                        score=score,
+                    )
+
+                    logger.info(f"Hotword '{model_name}' detected! Score: {score:.3f}")
+
+                    self.event_bus.publish("hotword_detected", event)
+
+                    time.sleep(0.1)
 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")

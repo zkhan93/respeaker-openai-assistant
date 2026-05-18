@@ -1,11 +1,30 @@
 """Hotword detection using openWakeWord."""
 
 import logging
+import os
 
 import numpy as np
+import openwakeword
 from openwakeword.model import Model
 
 logger = logging.getLogger(__name__)
+
+
+def get_model_path(model_name: str = "alexa") -> str | None:
+    """Return the on-disk path openWakeWord will load for a given wake word.
+
+    Returns None if the model name is not registered with openWakeWord.
+    """
+    entry = openwakeword.MODELS.get(model_name)
+    if not entry:
+        return None
+    return entry.get("model_path")
+
+
+def is_model_available(model_name: str = "alexa") -> bool:
+    """Check whether the wake word model file has been downloaded locally."""
+    path = get_model_path(model_name)
+    return bool(path and os.path.exists(path))
 
 
 class HotwordDetector:
