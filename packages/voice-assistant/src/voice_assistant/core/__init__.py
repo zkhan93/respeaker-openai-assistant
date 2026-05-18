@@ -5,7 +5,7 @@ from .audio_bus import AudioBus, AudioBusReader
 from .audio_handler import AudioHandler
 from .detection_service import VoiceDetectionService
 from .event_bus import EventBus, HotwordEvent, VoiceActivityEvent
-from .hotword_detector import HotwordDetector, get_model_path, is_model_available
+from .hotword_detector import HotwordDetector, ensure_model, get_model_path, is_model_available
 
 __all__ = [
     "AudioBroadcaster",
@@ -17,6 +17,7 @@ __all__ = [
     "HotwordEvent",
     "VoiceActivityEvent",
     "HotwordDetector",
+    "ensure_model",
     "get_model_path",
     "is_model_available",
 ]

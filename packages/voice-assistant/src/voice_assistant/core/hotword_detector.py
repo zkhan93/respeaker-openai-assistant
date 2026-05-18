@@ -27,6 +27,49 @@ def is_model_available(model_name: str = "alexa") -> bool:
     return bool(path and os.path.exists(path))
 
 
+def ensure_model(model_name: str = "alexa") -> tuple[bool, str | None]:
+    """Ensure the openWakeWord model is downloaded.
+
+    If the model is missing, attempts to fetch it by instantiating
+    ``openwakeword.model.Model`` (which downloads on first use). Any download
+    error is caught and logged at WARNING level so callers can decide whether
+    to continue without hotword support.
+
+    Args:
+        model_name: Wake word name registered with openWakeWord.
+
+    Returns:
+        ``(available, path)`` where ``available`` is True when the model is
+        on disk after the call. ``path`` is the expected on-disk location, or
+        ``None`` if ``model_name`` is not a registered openWakeWord model.
+    """
+    path = get_model_path(model_name)
+    if path is None:
+        logger.warning("Unknown openWakeWord model %r", model_name)
+        return False, None
+
+    if os.path.exists(path):
+        return True, path
+
+    logger.info("hotword model %r missing, attempting download...", model_name)
+    try:
+        Model(wakeword_models=[model_name])
+    except Exception as exc:
+        logger.warning("Failed to download hotword model %r: %s", model_name, exc)
+        return False, path
+
+    available = os.path.exists(path)
+    if available:
+        logger.info("hotword model %r downloaded to %s", model_name, path)
+    else:
+        logger.warning(
+            "hotword model %r still missing at %s after download attempt",
+            model_name,
+            path,
+        )
+    return available, path
+
+
 class HotwordDetector:
     """Detects 'alexa' hotword using openWakeWord."""
 

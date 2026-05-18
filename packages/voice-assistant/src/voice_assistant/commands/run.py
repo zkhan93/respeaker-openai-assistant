@@ -13,8 +13,7 @@ from voice_assistant.core import (
     EventBus,
     HotwordDetector,
     VoiceDetectionService,
-    get_model_path,
-    is_model_available,
+    ensure_model,
 )
 from voice_assistant.systemd_notify import notify as sd_notify
 from voice_assistant.systemd_notify import start_watchdog_thread
@@ -48,14 +47,14 @@ def main() -> bool:
 
     logger.info("voice-assistant starting (hotword=%s)", HOTWORD_MODEL_NAME)
 
-    hotword_available = is_model_available(HOTWORD_MODEL_NAME)
+    hotword_available, hotword_path = ensure_model(HOTWORD_MODEL_NAME)
     if not hotword_available:
-        expected_path = get_model_path(HOTWORD_MODEL_NAME) or "<unknown>"
         logger.warning(
-            "hotword model %r missing at %s — hotword detection disabled. "
-            "Run `voice-assistant download-models`.",
+            "hotword model %r unavailable at %s — hotword detection disabled, "
+            "voice activity detection will continue. "
+            "Run `voice-assistant download-models` once online to enable hotwords.",
             HOTWORD_MODEL_NAME,
-            expected_path,
+            hotword_path or "<unknown>",
         )
 
     event_bus = EventBus()

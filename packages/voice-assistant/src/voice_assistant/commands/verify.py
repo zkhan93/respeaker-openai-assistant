@@ -45,14 +45,18 @@ def main() -> bool:
     # Check 3: Hotword models
     print("3. Hotword Models")
     try:
-        from voice_assistant.core import HotwordDetector
+        from voice_assistant.core import get_model_path, is_model_available
 
-        detector = HotwordDetector()
-        model_info = detector.get_model_info()
-        print(f"   ✓ Models loaded: {', '.join(model_info['models'])}")
+        model_name = "alexa"
+        path = get_model_path(model_name) or "<unknown>"
+        if is_model_available(model_name):
+            print(f"   ✓ {model_name} cached at {path}")
+        else:
+            print(f"   ✗ {model_name} not downloaded (expected at {path})")
+            print("   Run: voice-assistant download-models")
+            all_checks_passed = False
     except Exception as e:
-        print(f"   ✗ Failed to load models: {e}")
-        print("   Run: voice-assistant download-models")
+        print(f"   ✗ Failed to inspect models: {e}")
         all_checks_passed = False
     print()
 

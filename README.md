@@ -570,8 +570,8 @@ Debug: Max score = 0.0129 (alexa), threshold = 0.5
 ```
 
 **If scores are always 0.0000**:
-- Run `uv run voice-assistant download-models`
-- Check model file: `ls -lh models/`
+- Run `uv run voice-assistant download-models` (prints the actual on-disk cache path)
+- The wake-word model lives inside the installed `openwakeword` package, not in the project tree
 
 **If scores are low (0.01-0.3)**:
 - Speak louder or closer to mic
