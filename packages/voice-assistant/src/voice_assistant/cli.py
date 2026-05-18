@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -64,11 +64,21 @@ def verify() -> None:
 
 
 @app.command("download-models")
-def download_models() -> None:
+def download_models(
+    hotword: Optional[List[str]] = typer.Option(
+        None,
+        "--hotword",
+        "-w",
+        help=(
+            "Wake word to download (repeatable). Defaults to 'alexa'. "
+            "Examples: alexa, hey_jarvis, hey_mycroft, hey_rhasspy, timer, weather."
+        ),
+    ),
+) -> None:
     """Download pre-trained hotword models."""
     from voice_assistant.commands.download_models import main
 
-    raise typer.Exit(0 if main() else 1)
+    raise typer.Exit(0 if main(hotword) else 1)
 
 
 @app.command()

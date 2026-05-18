@@ -1,23 +1,34 @@
 """Download pre-trained hotword models."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
-from voice_assistant.core import ensure_model, get_model_path
+from voice_assistant.core import (
+    available_model_names,
+    ensure_model,
+    get_model_path,
+)
 
-WAKE_WORDS: tuple[str, ...] = ("alexa",)
+DEFAULT_HOTWORDS: tuple[str, ...] = ("alexa",)
 
 
-def main() -> bool:
-    """Download pre-trained hotword models.
+def main(hotwords: Sequence[str] | None = None) -> bool:
+    """Download pre-trained hotword models via ``openwakeword.utils.download_models``.
 
     Models are cached inside the installed ``openwakeword`` package (not in
     the project tree). This command reports the actual cache location and
-    triggers a download for each configured wake word, warning rather than
+    triggers a download for each requested wake word, warning rather than
     failing when a single download cannot complete.
 
+    Args:
+        hotwords: Wake word names to download (e.g. ``["alexa", "hey_jarvis"]``).
+            Defaults to ``("alexa",)`` when omitted.
+
     Returns:
-        True if at least one model is available on disk afterwards.
+        True if at least one requested model is available on disk afterwards.
     """
+    requested = tuple(hotwords) if hotwords else DEFAULT_HOTWORDS
+
     print("Downloading Hotword Models")
     print("=" * 60)
     print()
@@ -25,13 +36,18 @@ def main() -> bool:
     cache_dir = _cache_dir_hint()
     if cache_dir is not None:
         print(f"Model cache: {cache_dir}")
-        print()
+    print(f"Requested:   {', '.join(requested)}")
+    print(f"Available:   {', '.join(available_model_names())}")
+    print()
 
     any_available = False
-    for name in WAKE_WORDS:
-        expected = get_model_path(name) or "<unknown>"
-        already_present = Path(expected).exists() if expected != "<unknown>" else False
+    for name in requested:
+        expected = get_model_path(name)
+        if expected is None:
+            print(f"  ✗ {name} is not a registered openWakeWord model — skipping")
+            continue
 
+        already_present = Path(expected).exists()
         available, path = ensure_model(name)
         any_available = any_available or available
         path_str = path or "<unknown>"
@@ -45,8 +61,8 @@ def main() -> bool:
             print("    Hotword detection will be disabled until this is resolved.")
             print("    Check internet connection and retry, or run:")
             print(
-                "      uv run python -c 'from openwakeword.model import Model; "
-                f'Model(wakeword_models=["{name}"])\''
+                "      uv run python -c 'import openwakeword.utils as u; "
+                f'u.download_models(["{name}"])\''
             )
 
     print()
@@ -61,7 +77,7 @@ def main() -> bool:
 
 def _cache_dir_hint() -> Path | None:
     """Best-effort discovery of the openWakeWord on-disk cache directory."""
-    for name in WAKE_WORDS:
+    for name in available_model_names():
         path = get_model_path(name)
         if path:
             return Path(path).parent

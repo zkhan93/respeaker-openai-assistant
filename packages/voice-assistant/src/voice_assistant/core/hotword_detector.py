@@ -5,9 +5,15 @@ import os
 
 import numpy as np
 import openwakeword
+import openwakeword.utils
 from openwakeword.model import Model
 
 logger = logging.getLogger(__name__)
+
+
+def available_model_names() -> list[str]:
+    """Return the wake word names registered with openWakeWord."""
+    return list(openwakeword.MODELS.keys())
 
 
 def get_model_path(model_name: str = "alexa") -> str | None:
@@ -30,13 +36,14 @@ def is_model_available(model_name: str = "alexa") -> bool:
 def ensure_model(model_name: str = "alexa") -> tuple[bool, str | None]:
     """Ensure the openWakeWord model is downloaded.
 
-    If the model is missing, attempts to fetch it by instantiating
-    ``openwakeword.model.Model`` (which downloads on first use). Any download
-    error is caught and logged at WARNING level so callers can decide whether
-    to continue without hotword support.
+    If the model is missing, attempts to fetch it via
+    ``openwakeword.utils.download_models``. Any download error is caught and
+    logged at WARNING level so callers can decide whether to continue
+    without hotword support.
 
     Args:
-        model_name: Wake word name registered with openWakeWord.
+        model_name: Wake word name registered with openWakeWord
+            (e.g. ``alexa``, ``hey_jarvis``).
 
     Returns:
         ``(available, path)`` where ``available`` is True when the model is
@@ -45,7 +52,11 @@ def ensure_model(model_name: str = "alexa") -> tuple[bool, str | None]:
     """
     path = get_model_path(model_name)
     if path is None:
-        logger.warning("Unknown openWakeWord model %r", model_name)
+        logger.warning(
+            "Unknown openWakeWord model %r (known: %s)",
+            model_name,
+            ", ".join(available_model_names()),
+        )
         return False, None
 
     if os.path.exists(path):
@@ -53,7 +64,7 @@ def ensure_model(model_name: str = "alexa") -> tuple[bool, str | None]:
 
     logger.info("hotword model %r missing, attempting download...", model_name)
     try:
-        Model(wakeword_models=[model_name])
+        openwakeword.utils.download_models([model_name])
     except Exception as exc:
         logger.warning("Failed to download hotword model %r: %s", model_name, exc)
         return False, path
