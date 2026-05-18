@@ -17,6 +17,12 @@ class HotwordEvent:
     hotword: str
     score: float
 
+    def __post_init__(self) -> None:
+        # openWakeWord emits numpy.float32 scores; coerce to Python float so
+        # downstream JSON serialization (e.g. AudioBroadcaster) never trips on
+        # `Object of type float32 is not JSON serializable`.
+        self.score = float(self.score)
+
 
 @dataclass
 class VoiceActivityEvent:
