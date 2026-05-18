@@ -27,6 +27,16 @@ dependencies = [
     "spidev>=3.8 ; sys_platform == 'linux'",
 ]
 
+# Optional runtime dependency: `systemd-python` enables a structured
+# JournalHandler in voice_assistant.logging_config. It is intentionally NOT
+# declared here because (a) it is source-only (no wheels) and would force a
+# libsystemd-dev build on every dev machine, and (b) the fallback path
+# (sd-daemon "<priority>" stderr prefixes) already produces correctly
+# prioritised journal entries. To enable the richer backend on the Pi:
+#
+#     sudo apt-get install -y libsystemd-dev pkg-config
+#     uv pip install systemd-python
+
 [project.scripts]
 voice-assistant = "voice_assistant.cli:main"
 

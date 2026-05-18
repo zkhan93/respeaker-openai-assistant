@@ -1,25 +1,55 @@
 [Unit]
-Description=ReSpeaker Audio Publisher - captures audio and broadcasts via ZMQ
-After=network.target sound.target
-Wants=sound.target
+Description=ReSpeaker Audio Publisher (capture + hotword/VAD + ZMQ broadcast)
+Documentation=https://github.com/zeeshankhan/respeaker-openai-assistant
+After=network-online.target sound.target
+Wants=network-online.target sound.target
 
 [Service]
-Type=simple
+# Type=notify makes `systemctl start` block until the service emits READY=1
+# from voice_assistant.commands.run, so a failure to open the audio device
+# or bind ZMQ becomes a real start failure (not a flapping Restart loop).
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+
+Restart=on-failure
+RestartSec=5s
+
 ExecStart=/home/pi/.local/bin/uv run voice-assistant run
 WorkingDirectory=/home/pi/llm-assistant/respeaker-openai-assistant/packages/voice-assistant
+User=pi
+SupplementaryGroups=audio gpio spi
+
+# Logging — JournalHandler / sd-daemon priority prefixes are picked up here.
 StandardOutput=journal
 StandardError=journal
-Restart=always
-RestartSec=10
-User=pi
+SyslogIdentifier=voice-assistant
+# Don't let journald rate-limit drop bursts of detection events.
+LogRateLimitIntervalSec=0
 
-# Environment variables
-Environment="PYTHONUNBUFFERED=1"
-Environment="PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# PulseAudio access - connect to user's PulseAudio session
-Environment="XDG_RUNTIME_DIR=/run/user/1000"
-Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PulseAudio access (connect to the user's PulseAudio session).
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_RUNTIME_PATH=/run/user/1000/pulse
+
+# --- Hardening (audio + GPIO + SPI must keep working) ----------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The repo lives under /home/pi; allow writes there for models/, logs/, etc.
+ReadWritePaths=/home/pi/llm-assistant
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+# PortAudio may request SCHED_FIFO for low-latency capture; do not restrict.
+RestrictRealtime=no
 
 [Install]
 WantedBy=multi-user.target
-

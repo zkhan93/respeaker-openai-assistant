@@ -1,5 +1,7 @@
 """Command-line interface for voice assistant."""
 
+from __future__ import annotations
+
 import sys
 from typing import Optional
 
@@ -7,6 +9,7 @@ import typer
 from rich.console import Console
 
 from voice_assistant.commands.test import test_app
+from voice_assistant.logging_config import setup_logging
 
 app = typer.Typer(
     name="voice-assistant",
@@ -19,18 +22,37 @@ app.add_typer(test_app, name="test")
 console = Console()
 
 
-@app.command()
-def run(
-    log_level: Optional[str] = typer.Option(
-        None,
+@app.callback()
+def _bootstrap(
+    log_level: str = typer.Option(
+        "INFO",
         "--log-level",
+        envvar="VOICE_ASSISTANT_LOG_LEVEL",
         help="Logging level [DEBUG|INFO|WARNING|ERROR]",
     ),
+    log_backend: Optional[str] = typer.Option(
+        None,
+        "--log-backend",
+        envvar="VOICE_ASSISTANT_LOG_BACKEND",
+        help="Force logging backend [journal|console]. Auto-detected if omitted.",
+    ),
 ) -> None:
+    """Initialize logging for every subcommand.
+
+    Auto-detects the journal backend when launched by systemd (``$JOURNAL_STREAM``
+    is set), and falls back to a Rich console handler on a TTY.
+    """
+    if log_backend is not None and log_backend not in ("journal", "console"):
+        raise typer.BadParameter("--log-backend must be 'journal' or 'console'")
+    setup_logging(log_level, force=log_backend)  # type: ignore[arg-type]
+
+
+@app.command()
+def run() -> None:
     """Run the voice assistant core service."""
     from voice_assistant.commands.run import main as run_main
 
-    raise typer.Exit(0 if run_main(log_level=log_level) else 1)
+    raise typer.Exit(0 if run_main() else 1)
 
 
 @app.command()
