@@ -115,6 +115,37 @@ class Config:
         return self.get("vad.speech_threshold", 3)
 
     @property
+    def speaker_device(self) -> str | None:
+        """Substring matched against PyAudio output device names.
+
+        ``None`` means "use the system default output". A non-matching
+        name falls back to the system default with a WARNING log so the
+        same config works on Pi (where ``"respeaker"`` matches) and on
+        macOS dev boxes (where it doesn't).
+        """
+        return self.get("speaker.device", None)
+
+    @property
+    def speaker_channels(self) -> int:
+        """Output channel count (1 = mono, 2 = stereo)."""
+        return self.get("speaker.channels", 1)
+
+    @property
+    def tts_engine(self) -> str:
+        """Which TTS backend to use (``piper`` is the only one wired today)."""
+        return self.get("tts.engine", "piper")
+
+    @property
+    def tts_model(self) -> str:
+        """TTS voice model name (engine-specific; e.g. ``en_US-ryan-high``)."""
+        return self.get("tts.model", "en_US-ryan-high")
+
+    @property
+    def tts_cache_dir(self) -> str | None:
+        """Directory holding TTS voice files. ``None`` = engine default cache."""
+        return self.get("tts.cache_dir", None)
+
+    @property
     def broadcaster_enabled(self) -> bool:
         """Get whether ZMQ audio broadcasting is enabled."""
         return self.get("broadcaster.enabled", True)
@@ -186,6 +217,17 @@ class Config:
             self.broadcaster_pub_endpoint,
             self.broadcaster_pull_endpoint,
             self.broadcaster_meta_interval,
+        )
+        logger.info(
+            "  speaker:      device=%r channels=%d",
+            self.speaker_device,
+            self.speaker_channels,
+        )
+        logger.info(
+            "  tts:          engine=%r model=%r cache_dir=%r",
+            self.tts_engine,
+            self.tts_model,
+            self.tts_cache_dir,
         )
         logger.info("  logging:      level=%r", self.logging_level)
         logger.info("  secrets:      openai.api_key=%s", api_key_state)

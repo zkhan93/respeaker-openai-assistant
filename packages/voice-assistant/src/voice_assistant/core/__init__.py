@@ -4,7 +4,13 @@ from .audio_broadcaster import AudioBroadcaster
 from .audio_bus import AudioBus, AudioBusReader
 from .audio_handler import AudioHandler
 from .detection_service import VoiceDetectionService
-from .event_bus import EventBus, HotwordEvent, VoiceActivityEvent
+from .event_bus import (
+    EventBus,
+    HotwordEvent,
+    SpeakingStartedEvent,
+    SpeakingStoppedEvent,
+    VoiceActivityEvent,
+)
 from .hotword_detector import (
     HotwordDetector,
     available_model_names,
@@ -21,6 +27,8 @@ __all__ = [
     "VoiceDetectionService",
     "EventBus",
     "HotwordEvent",
+    "SpeakingStartedEvent",
+    "SpeakingStoppedEvent",
     "VoiceActivityEvent",
     "HotwordDetector",
     "available_model_names",

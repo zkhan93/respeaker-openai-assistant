@@ -37,6 +37,23 @@ broadcaster:
   pull_endpoint: "tcp://*:5556"  # Incoming: LED commands from external consumers
   meta_interval: 30  # Seconds between stream metadata messages
 
+# Speaker (audio playback) Configuration
+speaker:
+  device: null   # Substring of the PyAudio output device name; null = system default.
+  # Example values:
+  #   "respeaker"  - on a Pi with the ReSpeaker board
+  #   "USB Audio"  - generic USB DAC
+  # Non-matching names fall back to the system default with a WARNING.
+  channels: 1   # 1 = mono, 2 = stereo
+
+# TTS (Text-to-Speech) Configuration
+tts:
+  engine: "piper"               # Only "piper" is wired today.
+  model: "en_US-ryan-high"      # Piper voice name. Run
+                                # `voice-assistant download-tts-voice -v <name>`
+                                # to fetch a missing voice.
+  cache_dir: null               # Where voice .onnx files live; null = ~/.local/share/voice-assistant/piper-voices
+
 # Logging Configuration
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

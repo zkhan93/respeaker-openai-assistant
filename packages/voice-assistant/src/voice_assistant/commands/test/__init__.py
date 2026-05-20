@@ -86,3 +86,45 @@ def assistant_flow() -> None:
     from voice_assistant.commands.test.assistant_flow import main
 
     raise typer.Exit(0 if main() else 1)
+
+
+@test_app.command()
+def speaker(
+    file: str = typer.Option(
+        ...,
+        "--file",
+        "-f",
+        help="Path to a PCM16 WAV file (mono or stereo) to play.",
+    ),
+    interrupt_after: float = typer.Option(
+        0.0,
+        "--interrupt-after",
+        help=(
+            "Test-only knob. Seconds after playback starts to call "
+            "speaker.interrupt() and demonstrate the interruption path. "
+            "0 = play to natural completion."
+        ),
+    ),
+) -> None:
+    """Stream a WAV file through SpeakerManager (no TTS, no detection)."""
+    from voice_assistant.commands.test.speaker import main
+
+    raise typer.Exit(0 if main(file=file, interrupt_after=interrupt_after) else 1)
+
+
+@test_app.command()
+def tts(
+    text: str = typer.Argument(..., help="Text to synthesize and play."),
+    interrupt_after: float = typer.Option(
+        0.0,
+        "--interrupt-after",
+        help=(
+            "Test-only knob. Seconds after playback starts to call "
+            "speaker.interrupt(). 0 = play to natural completion."
+        ),
+    ),
+) -> None:
+    """Synthesize TEXT with Piper TTS and stream it through SpeakerManager."""
+    from voice_assistant.commands.test.tts import main
+
+    raise typer.Exit(0 if main(text=text, interrupt_after=interrupt_after) else 1)

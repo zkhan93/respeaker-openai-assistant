@@ -34,10 +34,25 @@ class VoiceActivityEvent:
 
 
 @dataclass
-class SpeakingFinishedEvent:
-    """Event emitted when speaker has finished playing all audio."""
+class SpeakingStartedEvent:
+    """Event emitted when the speaker has begun writing audio to the device."""
 
     timestamp: datetime
+    sample_rate: int
+
+
+@dataclass
+class SpeakingStoppedEvent:
+    """Event emitted when speaker playback ends.
+
+    ``reason`` is ``"completed"`` when the source iterable was exhausted
+    naturally, or ``"interrupted"`` when ``SpeakerManager.interrupt()``
+    (or an auto-interrupt from a new ``play()``) cut the session short.
+    """
+
+    timestamp: datetime
+    reason: str  # "completed" | "interrupted"
+    duration: float  # seconds of audio actually written (or attempted)
 
 
 class EventBus:
