@@ -75,3 +75,18 @@ def led(
     from voice_assistant.commands.test.led import main
 
     raise typer.Exit(0 if main(manual=manual, basic=basic) else 1)
+
+
+@test_app.command("led-events")
+def led_events(
+    name: str = typer.Option(
+        "alexa",
+        "--hotword",
+        "-w",
+        help="Wake word to listen for (must be a registered openWakeWord model).",
+    ),
+) -> None:
+    """LED ring choreography from hotword + VAD events (subscriber demo)."""
+    from voice_assistant.commands.test.led_events import main
+
+    raise typer.Exit(0 if main(hotword=name) else 1)
