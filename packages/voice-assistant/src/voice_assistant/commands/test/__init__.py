@@ -29,14 +29,25 @@ def record(
 
 @test_app.command()
 def hotword(
-    debug: bool = typer.Option(False, "--debug", help="Show detection scores"),
+    name: str = typer.Option(
+        "alexa",
+        "--hotword",
+        "-w",
+        help="Wake word to listen for (must be a registered openWakeWord model).",
+    ),
+    simulate_work: float = typer.Option(
+        0.0,
+        "--simulate-work",
+        help=(
+            "Seconds the hotword subscriber sleeps to demonstrate that the "
+            "detection loop stays realtime while a slow handler runs."
+        ),
+    ),
 ) -> None:
-    """Test hotword detection with recording (no OpenAI)."""
-    from voice_assistant.commands.test.hotword import TestMode
+    """Realtime hotword detection demo (logs events; subscribers run async)."""
+    from voice_assistant.commands.test.hotword import main
 
-    test = TestMode(config_path="config/config.yaml", debug=debug)
-    test.run()
-    raise typer.Exit(0)
+    raise typer.Exit(0 if main(hotword=name, simulate_work=simulate_work) else 1)
 
 
 @test_app.command("hotword-native")
