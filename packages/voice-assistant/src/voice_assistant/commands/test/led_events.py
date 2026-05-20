@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from voice_assistant.config import load_config
 from voice_assistant.consumers.led import LedConsumer
 from voice_assistant.core import (
     AudioHandler,
@@ -94,30 +95,46 @@ class _HotwordLedState:
         self._led.set_pattern("off")
 
 
-def main(hotword: str = "alexa") -> bool:
+def main() -> bool:
     """Light the ring on hotword, hold through voice activity, drop on silence.
 
-    Args:
-        hotword: Wake word to listen for. Must be a registered openWakeWord
-            model (download via ``voice-assistant download-models -w <name>``).
+    All audio / VAD / hotword settings are sourced from ``config/config.yaml``;
+    this command takes no overrides for them by design — there is one source
+    of truth. Tune ``vad.silence_threshold`` (frames @ 80 ms) in the YAML to
+    change how long the ring stays on after you stop talking.
 
     Returns:
         ``True`` on a clean shutdown, ``False`` on error.
     """
-    available, path = ensure_model(hotword)
+    try:
+        config = load_config("config/config.yaml")
+    except Exception as exc:
+        logger.error("Failed to load configuration: %s", exc, exc_info=True)
+        return False
+
+    hotword_name = config.hotword_model
+    available, path = ensure_model(hotword_name)
     if not available:
         logger.error(
             "hotword model %r unavailable at %s — run "
             "`voice-assistant download-models -w %s` to install it.",
-            hotword,
+            hotword_name,
             path or "<unknown>",
-            hotword,
+            hotword_name,
         )
         return False
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(event_bus=event_bus)  # VAD events enabled
-    hotword_detector = HotwordDetector(model_name=hotword)
+    audio_handler = AudioHandler(
+        event_bus=event_bus,  # VAD events enabled
+        vad_aggressiveness=config.vad_aggressiveness,
+        silence_threshold=config.vad_silence_threshold,
+        speech_threshold=config.vad_speech_threshold,
+    )
+    hotword_detector = HotwordDetector(
+        model_name=hotword_name,
+        threshold=config.hotword_threshold,
+    )
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
     led_consumer = LedConsumer(enabled=True)
 
@@ -134,7 +151,7 @@ def main(hotword: str = "alexa") -> bool:
     audio_handler.start_stream()
     logger.info(
         "ready — say %r, keep talking, then go silent. Ctrl+C to stop.",
-        hotword,
+        hotword_name,
     )
 
     try:

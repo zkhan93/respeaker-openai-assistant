@@ -99,6 +99,22 @@ class Config:
         return self.get("vad.aggressiveness", 2)
 
     @property
+    def vad_silence_threshold(self) -> int:
+        """Frames of silence before ``voice_activity_stopped`` fires.
+
+        At the default 80 ms chunk size, 15 frames ≈ 1.2 s.
+        """
+        return self.get("vad.silence_threshold", 15)
+
+    @property
+    def vad_speech_threshold(self) -> int:
+        """Consecutive speech frames before ``voice_activity_started`` fires.
+
+        At the default 80 ms chunk size, 3 frames ≈ 240 ms.
+        """
+        return self.get("vad.speech_threshold", 3)
+
+    @property
     def broadcaster_enabled(self) -> bool:
         """Get whether ZMQ audio broadcasting is enabled."""
         return self.get("broadcaster.enabled", True)

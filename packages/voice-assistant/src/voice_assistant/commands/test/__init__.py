@@ -29,25 +29,20 @@ def record(
 
 @test_app.command()
 def hotword(
-    name: str = typer.Option(
-        "alexa",
-        "--hotword",
-        "-w",
-        help="Wake word to listen for (must be a registered openWakeWord model).",
-    ),
     simulate_work: float = typer.Option(
         0.0,
         "--simulate-work",
         help=(
-            "Seconds the hotword subscriber sleeps to demonstrate that the "
-            "detection loop stays realtime while a slow handler runs."
+            "Test-only knob (no config equivalent). Seconds the hotword subscriber "
+            "sleeps to demonstrate that the detection loop stays realtime while a "
+            "slow handler runs."
         ),
     ),
 ) -> None:
     """Realtime hotword detection demo (logs events; subscribers run async)."""
     from voice_assistant.commands.test.hotword import main
 
-    raise typer.Exit(0 if main(hotword=name, simulate_work=simulate_work) else 1)
+    raise typer.Exit(0 if main(simulate_work=simulate_work) else 1)
 
 
 @test_app.command("hotword-native")
@@ -78,15 +73,8 @@ def led(
 
 
 @test_app.command("led-events")
-def led_events(
-    name: str = typer.Option(
-        "alexa",
-        "--hotword",
-        "-w",
-        help="Wake word to listen for (must be a registered openWakeWord model).",
-    ),
-) -> None:
+def led_events() -> None:
     """LED ring choreography from hotword + VAD events (subscriber demo)."""
     from voice_assistant.commands.test.led_events import main
 
-    raise typer.Exit(0 if main(hotword=name) else 1)
+    raise typer.Exit(0 if main() else 1)

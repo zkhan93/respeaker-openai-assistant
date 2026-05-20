@@ -2,6 +2,7 @@
 
 import logging
 
+from voice_assistant.config import load_config
 from voice_assistant.core import (
     AudioHandler,
     EventBus,
@@ -75,10 +76,23 @@ def main() -> bool:
         print(f"   Timestamp: {event.timestamp}")
         print(f"{'─' * 70}\n")
 
-    # Create core components
+    try:
+        config = load_config("config/config.yaml")
+    except Exception as exc:
+        logger.error("Failed to load configuration: %s", exc, exc_info=True)
+        return False
+
     event_bus = EventBus()
-    audio_handler = AudioHandler(event_bus=event_bus)  # VAD events enabled
-    hotword_detector = HotwordDetector()
+    audio_handler = AudioHandler(
+        event_bus=event_bus,  # VAD events enabled
+        vad_aggressiveness=config.vad_aggressiveness,
+        silence_threshold=config.vad_silence_threshold,
+        speech_threshold=config.vad_speech_threshold,
+    )
+    hotword_detector = HotwordDetector(
+        model_name=config.hotword_model,
+        threshold=config.hotword_threshold,
+    )
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
 
     # Subscribe to all events

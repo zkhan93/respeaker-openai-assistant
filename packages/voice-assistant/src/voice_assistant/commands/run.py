@@ -63,7 +63,12 @@ def main(hotword: str | None = None) -> bool:
         )
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(event_bus=event_bus)
+    audio_handler = AudioHandler(
+        event_bus=event_bus,
+        vad_aggressiveness=config.vad_aggressiveness,
+        silence_threshold=config.vad_silence_threshold,
+        speech_threshold=config.vad_speech_threshold,
+    )
 
     hotword_detector: HotwordDetector | None = None
     if hotword_available:

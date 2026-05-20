@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import time
 
+from voice_assistant.config import load_config
 from voice_assistant.core import (
     AudioHandler,
     EventBus,
@@ -35,35 +36,53 @@ from voice_assistant.core import (
 logger = logging.getLogger(__name__)
 
 
-def main(hotword: str = "alexa", simulate_work: float = 0.0) -> bool:
-    """Listen for ``hotword`` and log each detection.
+def main(simulate_work: float = 0.0) -> bool:
+    """Listen for the configured wake word and log each detection.
+
+    All audio / VAD / hotword settings are sourced from ``config/config.yaml``;
+    this command takes no overrides for them by design — there is one source
+    of truth.
 
     Args:
-        hotword: Wake word to listen for (must be a registered openWakeWord
-            model; download with ``voice-assistant download-models -w <name>``).
-        simulate_work: If > 0, the hotword subscriber sleeps this many seconds
-            before returning. Use it to verify that the detection loop keeps
-            firing during a slow handler — say the hotword again while a sleep
-            is in progress and you should still see a fresh event.
+        simulate_work: Test-only knob (no config equivalent). If > 0, the
+            hotword subscriber sleeps this many seconds before returning. Use
+            it to verify the detection loop stays realtime during a slow
+            handler — say the wake word again while a sleep is in progress
+            and you should still see a fresh event.
 
     Returns:
-        ``True`` on a clean shutdown, ``False`` if the model is missing or the
-        detection loop raised.
+        ``True`` on a clean shutdown, ``False`` if config or the model is
+        missing or the detection loop raised.
     """
-    available, path = ensure_model(hotword)
+    try:
+        config = load_config("config/config.yaml")
+    except Exception as exc:
+        logger.error("Failed to load configuration: %s", exc, exc_info=True)
+        return False
+
+    hotword_name = config.hotword_model
+    available, path = ensure_model(hotword_name)
     if not available:
         logger.error(
             "hotword model %r unavailable at %s — run "
             "`voice-assistant download-models -w %s` to install it.",
-            hotword,
+            hotword_name,
             path or "<unknown>",
-            hotword,
+            hotword_name,
         )
         return False
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(event_bus=event_bus)
-    hotword_detector = HotwordDetector(model_name=hotword)
+    audio_handler = AudioHandler(
+        event_bus=event_bus,
+        vad_aggressiveness=config.vad_aggressiveness,
+        silence_threshold=config.vad_silence_threshold,
+        speech_threshold=config.vad_speech_threshold,
+    )
+    hotword_detector = HotwordDetector(
+        model_name=hotword_name,
+        threshold=config.hotword_threshold,
+    )
     detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
 
     def on_hotword(event: HotwordEvent) -> None:
@@ -86,7 +105,7 @@ def main(hotword: str = "alexa", simulate_work: float = 0.0) -> bool:
     audio_handler.start_stream()
     logger.info(
         "listening for %r — say it to fire a hotword event (Ctrl+C to stop)",
-        hotword,
+        hotword_name,
     )
 
     try:
