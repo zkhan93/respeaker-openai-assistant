@@ -88,8 +88,16 @@ class VoiceDetectionService:
 
         try:
             while self.running:
-                # Skip ahead to latest frame for low-latency hotword detection
-                self.reader.skip_to_latest()
+                # Read the next 80 ms frame in sequence. Sequential reads are
+                # required: openWakeWord builds a rolling mel-spectrogram +
+                # embedding state from temporally consecutive frames, so we
+                # must NOT call self.reader.skip_to_latest() in this loop —
+                # doing so re-feeds the same frame multiple times whenever
+                # predict() runs faster than the 80 ms producer cadence and
+                # poisons the model state. AudioBusReader.read() already
+                # blocks on a condition variable until the next frame is
+                # published, giving us natural pacing, and auto-skips if we
+                # ever fall further than AudioBus.capacity behind.
                 audio_data = self.reader.read(timeout=0.2)
 
                 if not audio_data:
@@ -129,8 +137,6 @@ class VoiceDetectionService:
                     logger.info(f"Hotword '{model_name}' detected! Score: {score:.3f}")
 
                     self.event_bus.publish("hotword_detected", event)
-
-                    time.sleep(0.1)
 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")

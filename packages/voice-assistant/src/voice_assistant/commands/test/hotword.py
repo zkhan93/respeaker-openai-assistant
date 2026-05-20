@@ -3,13 +3,16 @@
 Reference command for the canonical "react to a hotword without falling
 out of realtime" pattern:
 
-* The detection loop runs inside ``VoiceDetectionService`` and stays glued
-  to the live audio edge via ``AudioBusReader.skip_to_latest()``.
+* The detection loop runs inside ``VoiceDetectionService`` and reads the
+  ``AudioBus`` sequentially — ``AudioBusReader.read()`` blocks on the
+  bus's condition variable until the audio callback publishes the next
+  80 ms frame, so the loop is paced exactly to the producer and feeds
+  openWakeWord temporally consecutive frames (which it requires).
 * Every detection fires a ``HotwordEvent`` on the ``EventBus``.
 * ``EventBus`` dispatches each subscriber on its own thread, so a slow
   handler (recording 5 minutes of audio, calling OpenAI, blinking LEDs)
-  never stalls the detector. Say the hotword again mid-handler and you
-  will get another event almost immediately.
+  never stalls the detector. Say the hotword again after the cooldown
+  window (default 2 s) and you will get another event immediately.
 
 Use this file as a starting point for new "do X on hotword" features:
 put X inside a subscriber, not inside the detection loop.

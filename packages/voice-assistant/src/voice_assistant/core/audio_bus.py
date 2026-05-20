@@ -84,7 +84,20 @@ class AudioBusReader:
             return frame
 
     def skip_to_latest(self) -> None:
-        """Jump cursor to the most recent frame (for low-latency consumers)."""
+        """Jump cursor to the most recent published frame.
+
+        Intended for one-shot use after a long pause (e.g. resuming from
+        sleep, attaching a fresh consumer mid-stream). Do NOT call this on
+        every iteration of a tight read loop: when the consumer is faster
+        than the producer it rewinds the cursor to ``write_pos - 1`` each
+        iteration, causing ``read()`` to return the same frame repeatedly
+        until a new one is published. For streaming models that depend on
+        temporally consecutive frames (e.g. openWakeWord), that breaks
+        their internal rolling state. ``read()`` already blocks on the
+        bus's condition variable until a new frame arrives and auto-skips
+        if the reader falls further than ``capacity`` behind, so plain
+        sequential ``read()`` calls are the correct steady-state pattern.
+        """
         with self._bus._condition:
             if self._bus._write_pos > 0:
                 self._read_pos = self._bus._write_pos - 1
