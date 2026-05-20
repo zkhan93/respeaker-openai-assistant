@@ -78,3 +78,11 @@ def led_events() -> None:
     from voice_assistant.commands.test.led_events import main
 
     raise typer.Exit(0 if main() else 1)
+
+
+@test_app.command("assistant-flow")
+def assistant_flow() -> None:
+    """Full assistant turn demo: hotword → listen → think → speak → idle (with interruption)."""
+    from voice_assistant.commands.test.assistant_flow import main
+
+    raise typer.Exit(0 if main() else 1)
