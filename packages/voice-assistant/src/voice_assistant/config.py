@@ -144,6 +144,52 @@ class Config:
         """Get logging format."""
         return self.get("logging.format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
+    def log_summary(self) -> None:
+        """Log resolved configuration values at INFO.
+
+        Useful as a single startup checkpoint to confirm what the rest of
+        the system will actually see — including default fallbacks when
+        YAML keys are missing or misspelled (e.g. a typo in
+        ``vad.silence_threshold`` will silently fall back to the default
+        and only this line will reveal it).
+
+        Secret values are NEVER logged. For ``openai.api_key`` only its
+        presence (``<set>`` / ``<missing>``) is reported; add new secrets
+        to the secret-rendering branch below rather than to one of the
+        plain-value lines.
+        """
+        api_key_state = "<set>" if self.openai_api_key else "<missing>"
+
+        logger.info("config resolved from %s:", self.config_path)
+        logger.info(
+            "  audio:        device=%r sample_rate=%d channels=%d output_device=%r",
+            self.audio_device,
+            self.audio_sample_rate,
+            self.audio_channels,
+            self.audio_output_device,
+        )
+        logger.info(
+            "  hotword:      model=%r threshold=%.2f",
+            self.hotword_model,
+            self.hotword_threshold,
+        )
+        logger.info(
+            "  vad:          aggressiveness=%d speech_threshold=%d frames "
+            "silence_threshold=%d frames",
+            self.vad_aggressiveness,
+            self.vad_speech_threshold,
+            self.vad_silence_threshold,
+        )
+        logger.info(
+            "  broadcaster:  enabled=%s pub=%r pull=%r meta_interval=%.1fs",
+            self.broadcaster_enabled,
+            self.broadcaster_pub_endpoint,
+            self.broadcaster_pull_endpoint,
+            self.broadcaster_meta_interval,
+        )
+        logger.info("  logging:      level=%r", self.logging_level)
+        logger.info("  secrets:      openai.api_key=%s", api_key_state)
+
 
 def load_config(config_path: str = "config/config.yaml") -> Config:
     """Load configuration from file.

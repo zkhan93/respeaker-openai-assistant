@@ -82,6 +82,8 @@ def main() -> bool:
         logger.error("Failed to load configuration: %s", exc, exc_info=True)
         return False
 
+    config.log_summary()
+
     event_bus = EventBus()
     audio_handler = AudioHandler(
         event_bus=event_bus,  # VAD events enabled

@@ -48,6 +48,8 @@ def main(hotword: str | None = None) -> bool:
         logger.error("Failed to load configuration: %s", exc, exc_info=True)
         return False
 
+    config.log_summary()
+
     hotword_name = hotword or config.hotword_model
     logger.info("voice-assistant starting (hotword=%s)", hotword_name)
 

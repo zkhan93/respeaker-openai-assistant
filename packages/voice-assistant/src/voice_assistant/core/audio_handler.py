@@ -70,6 +70,7 @@ class AudioHandler:
             f"AudioHandler initialized: {sample_rate}Hz, {channels}ch, "
             f"chunk_size={chunk_size}, vad_aggressiveness={vad_aggressiveness}, "
             f"speech_threshold={speech_threshold} frames, "
+            f"silence_threshold={silence_threshold} frames, "
             f"AudioBus capacity={self.audio_bus.capacity}, "
             f"VAD events={'enabled' if event_bus else 'disabled'}"
         )

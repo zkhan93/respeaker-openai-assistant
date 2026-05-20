@@ -112,6 +112,8 @@ def main() -> bool:
         logger.error("Failed to load configuration: %s", exc, exc_info=True)
         return False
 
+    config.log_summary()
+
     hotword_name = config.hotword_model
     available, path = ensure_model(hotword_name)
     if not available:
