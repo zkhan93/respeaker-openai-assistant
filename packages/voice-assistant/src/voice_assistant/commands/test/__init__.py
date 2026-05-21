@@ -81,11 +81,23 @@ def led_events() -> None:
 
 
 @test_app.command("assistant-flow")
-def assistant_flow() -> None:
+def assistant_flow(
+    music_url: str = typer.Option(
+        None,
+        "--music-url",
+        "-m",
+        help=(
+            "Optional file path or stream URL mpv can play. When set, "
+            "the demo starts music in the background and attaches a "
+            "DuckController so the assistant ducks / unducks while "
+            "you converse. Omit to run mic-only (no mpv subprocess)."
+        ),
+    ),
+) -> None:
     """Full assistant turn demo: hotword → listen → think → speak → idle (with interruption)."""
     from voice_assistant.commands.test.assistant_flow import main
 
-    raise typer.Exit(0 if main() else 1)
+    raise typer.Exit(0 if main(music_url=music_url) else 1)
 
 
 @test_app.command()
@@ -169,8 +181,18 @@ def music(
             "failsafe phase isn't a 30s wait. e.g. --session-timeout 5."
         ),
     ),
+    end_mode: str = typer.Option(
+        "explicit",
+        "--end-mode",
+        help=(
+            "How the demo ends the conversation: 'explicit' publishes "
+            "conversation_ended (the production path); 'failsafe' stays "
+            "silent so the DuckController's failsafe loop is exercised. "
+            "Defaults to 'explicit'."
+        ),
+    ),
 ) -> None:
     """Music playback + DuckController demo (synthetic events; no mic, no agent)."""
     from voice_assistant.commands.test.music import main
 
-    raise typer.Exit(0 if main(url=url, session_timeout=session_timeout) else 1)
+    raise typer.Exit(0 if main(url=url, session_timeout=session_timeout, end_mode=end_mode) else 1)

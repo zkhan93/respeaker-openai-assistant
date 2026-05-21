@@ -15,19 +15,21 @@ Why a refcount instead of a boolean:
 
 Reasons (string keys; loosely structured):
 
-* ``"session"`` — held from hotword → conversation done. Owned by the
-  ConversationManager (when it lands). For now the test command claims
-  it on hotword and the failsafe times it out.
+* ``"session"`` — held while a conversation is active. Claimed on
+  ``conversation_turn_started`` (the canonical "a turn just began"
+  signal from :class:`ConversationManager`); released on
+  ``conversation_ended``. The failsafe is the backstop for the rare
+  case where the manager wedges and never emits ``conversation_ended``.
 * ``"speaker"`` — held while ``SpeakerManager`` has audio playing. Same
   event for TTS, alarms, timers, anything else that goes through the
   speaker; no per-source branching needed.
 * future: ``"alarm"`` — only if alarms ever play *outside* SpeakerManager.
 
 The activity-aware failsafe (see :meth:`heartbeat`) protects against
-ConversationManager bugs: if it never releases ``"session"`` but the
-user is clearly still talking / the agent is clearly still speaking,
-we hold the duck. Only when nothing has happened for the timeout does
-the failsafe force-release.
+ConversationManager bugs: if it never emits ``conversation_ended`` but
+the user is clearly still talking / the agent is clearly still
+speaking, we hold the duck. Only when nothing has happened for the
+timeout does the failsafe force-release.
 """
 
 from __future__ import annotations
@@ -148,17 +150,20 @@ class DuckController:
 
         The mapping is:
 
-        * ``hotword_detected``  → claim ``"session"``
-        * ``speaking_started``  → claim ``"speaker"``
-        * ``speaking_stopped``  → release ``"speaker"``
-        * voice activity / transcription events → ``"session"`` heartbeats
-        * ``conversation_ended`` → release ``"session"`` (when emitted by
-          a future ConversationManager)
+        * ``conversation_turn_started`` → claim ``"session"`` (idempotent
+          — subsequent turns within the same session just heartbeat).
+        * ``conversation_ended``        → release ``"session"``.
+        * ``speaking_started``          → claim ``"speaker"``.
+        * ``speaking_stopped``          → release ``"speaker"``.
+        * voice / transcription / hotword / turn events → heartbeats
+          for ``"session"`` so the failsafe never fires mid-conversation.
 
-        Until ConversationManager lands, ``"session"`` is held until the
-        failsafe times it out. The user's hotword still ducks instantly,
-        the assistant's TTS keeps it ducked, and the failsafe protects
-        against stuck state. That's the whole policy for v1.
+        :class:`ConversationManager` is the canonical source of
+        ``"session"`` — DuckController used to react directly to
+        ``hotword_detected``, but that was a stand-in before
+        ConversationManager existed. The failsafe loop remains as a
+        safety net in case ConversationManager wedges and never emits
+        ``conversation_ended``.
         """
         if self._event_bus is not None:
             raise RuntimeError("DuckController.attach called twice")
@@ -166,7 +171,11 @@ class DuckController:
         self._event_bus = event_bus
 
         def on_hotword(_event: Any) -> None:
-            self.claim("session")
+            # ConversationManager owns the claim; we only heartbeat to
+            # keep the failsafe alive (the claim already happens via
+            # conversation_turn_started, which CM publishes immediately
+            # after handling the hotword).
+            self.heartbeat("session")
 
         def on_voice_started(_event: Any) -> None:
             self.heartbeat("session")
@@ -191,9 +200,17 @@ class DuckController:
             self.heartbeat("session")
             self.release("speaker")
 
+        def on_conversation_turn_started(_event: Any) -> None:
+            # First turn of a conversation: claim "session". Subsequent
+            # turns within the same conversation: claim is a no-op
+            # (already in the active set), but it refreshes the
+            # heartbeat — which is exactly what we want.
+            self.claim("session")
+
         def on_conversation_ended(_event: Any) -> None:
-            # Future ConversationManager fires this. When it does, we
-            # release immediately rather than wait for the failsafe.
+            # ConversationManager fires this on idle timeout / detach /
+            # explicit end. We release immediately rather than wait
+            # for the failsafe.
             self.release("session")
 
         wirings: list[tuple[str, Callable[[Any], None]]] = [
@@ -204,6 +221,7 @@ class DuckController:
             ("transcription_failed", on_transcription_failed),
             ("speaking_started", on_speaking_started),
             ("speaking_stopped", on_speaking_stopped),
+            ("conversation_turn_started", on_conversation_turn_started),
             ("conversation_ended", on_conversation_ended),
         ]
         for event_type, handler in wirings:

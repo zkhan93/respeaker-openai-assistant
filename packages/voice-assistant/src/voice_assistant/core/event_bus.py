@@ -81,6 +81,84 @@ class SpeakingStoppedEvent:
     duration: float  # seconds of audio actually written (or attempted)
 
 
+@dataclass
+class ConversationStartedEvent:
+    """Event emitted by ConversationManager when a new conversation thread begins.
+
+    Fires on the first hotword after :class:`ConversationManager` is
+    idle (either fresh boot or session-timeout sweep). A
+    ``ConversationTurnStartedEvent`` for the first turn follows
+    immediately after. Subscribers that want a "conversation just
+    started" hook (greeting, telemetry, agent state warm-up) should
+    listen here rather than try to dedup on turn_index==0 themselves.
+    """
+
+    timestamp: datetime
+    thread_id: str
+
+
+@dataclass
+class ConversationTurnStartedEvent:
+    """Event emitted by ConversationManager at the start of every turn.
+
+    Fires from :meth:`ConversationManager.on_hotword`, after thread
+    rotation has been resolved. ``turn_index`` is 0 for the first turn
+    of a conversation and increments per turn within the same
+    ``thread_id``.
+    """
+
+    timestamp: datetime
+    thread_id: str
+    turn_index: int
+    hotword: str
+    hotword_score: float
+
+
+@dataclass
+class ConversationTurnCompletedEvent:
+    """Event emitted by ConversationManager once a turn's reply has finished speaking.
+
+    Carries both the user's transcript and the assistant's full reply
+    text, plus timing for telemetry. Fires *after* ``speaking_stopped``
+    when the speaker session that played the reply ended naturally;
+    interrupted turns do not emit a "completed" event (the interrupting
+    hotword's ``ConversationTurnStartedEvent`` is the next thing on the
+    bus).
+    """
+
+    timestamp: datetime
+    thread_id: str
+    turn_index: int
+    transcript: str
+    reply: str
+    audio_duration: float
+    inference_time: float
+    speak_duration: float
+
+
+@dataclass
+class ConversationEndedEvent:
+    """Event emitted by ConversationManager when a conversation thread ends.
+
+    ``reason`` semantics:
+
+    * ``"idle_timeout"`` — sweep thread observed no activity for
+      ``session_timeout_s`` while in the idle state.
+    * ``"shutdown"`` — :meth:`ConversationManager.detach` was called
+      while a session was active.
+    * ``"explicit"`` — :meth:`ConversationManager.end_conversation`
+      was called.
+    * ``"error"`` — an unrecoverable error occurred during the turn
+      (e.g. ReplyEngine raised). ConversationManager logs the cause
+      separately; subscribers should treat this as "session done".
+    """
+
+    timestamp: datetime
+    thread_id: str
+    reason: str  # "idle_timeout" | "shutdown" | "explicit" | "error"
+    turn_count: int
+
+
 class EventBus:
     """Simple event bus for pub-sub communication between components."""
 

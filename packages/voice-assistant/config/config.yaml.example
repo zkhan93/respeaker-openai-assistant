@@ -64,6 +64,22 @@ music:
                               # so it cannot fire mid-conversation. ConversationManager
                               # will release deterministically once it lands.
 
+# Conversation Manager Configuration
+#
+# ConversationManager owns the assistant's per-turn lifecycle and
+# rotates a `thread_id` across consecutive turns so an LLM
+# checkpointer can thread memory through. The session_timeout_s knob
+# below decides "what counts as the same conversation".
+conversation:
+  session_timeout_s: 300.0    # while the manager is idle, the next hotword received
+                              # within this window reuses the existing thread_id; past
+                              # it a fresh thread is minted (ConversationStartedEvent
+                              # fires). The sweep thread also emits ConversationEndedEvent
+                              # after this much idle time so DuckController & future
+                              # analytics subscribers know the conversation is truly over.
+                              # Refreshed by every event during a turn — never fires
+                              # mid-conversation.
+
 # Speaker (audio playback) Configuration
 speaker:
   device: null   # Substring of the PyAudio output device name; null = system default.

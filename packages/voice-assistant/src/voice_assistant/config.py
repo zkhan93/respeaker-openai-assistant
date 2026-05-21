@@ -259,6 +259,26 @@ class Config:
         return float(self.get("music.duck.session_timeout_s", 30.0))
 
     @property
+    def conversation_session_timeout_s(self) -> float:
+        """Idle window before ConversationManager rotates the thread id.
+
+        While the manager is idle, the next hotword received within
+        this window reuses the previous ``thread_id`` (so an LLM
+        checkpointer threads memory across turns). Past it, a fresh
+        ``thread_id`` is minted and ``ConversationStartedEvent`` fires.
+        The sweep thread also emits ``ConversationEndedEvent`` once the
+        window passes with no further activity, so subscribers
+        (DuckController, future analytics) know the conversation is
+        truly over.
+
+        Defaults to 5 minutes — long enough that users don't have to
+        say the wake word twice when picking up a thought, short
+        enough that an unrelated request half an hour later starts
+        clean.
+        """
+        return float(self.get("conversation.session_timeout_s", 300.0))
+
+    @property
     def logging_level(self) -> str:
         """Get logging level."""
         return self.get("logging.level", "INFO")
@@ -328,6 +348,10 @@ class Config:
             self.music_duck_fade_in_ms,
             self.music_duck_fade_out_ms,
             self.music_duck_session_timeout_s,
+        )
+        logger.info(
+            "  conversation: session_timeout=%.1fs",
+            self.conversation_session_timeout_s,
         )
         logger.info("  tts:          engine=%r", self.tts_engine)
         # Print the active engine sub-block so config typos (e.g.

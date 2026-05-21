@@ -5,6 +5,10 @@ from .audio_bus import AudioBus, AudioBusReader
 from .audio_handler import AudioHandler
 from .detection_service import VoiceDetectionService
 from .event_bus import (
+    ConversationEndedEvent,
+    ConversationStartedEvent,
+    ConversationTurnCompletedEvent,
+    ConversationTurnStartedEvent,
     EventBus,
     HotwordEvent,
     SpeakingStartedEvent,
@@ -27,6 +31,10 @@ __all__ = [
     "AudioBusReader",
     "AudioHandler",
     "VoiceDetectionService",
+    "ConversationEndedEvent",
+    "ConversationStartedEvent",
+    "ConversationTurnCompletedEvent",
+    "ConversationTurnStartedEvent",
     "EventBus",
     "HotwordEvent",
     "SpeakingStartedEvent",

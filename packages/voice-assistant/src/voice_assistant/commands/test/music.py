@@ -5,20 +5,27 @@ Exercises the new ownership model end-to-end on the device:
     voice-assistant test music --url <file_or_url>
 
 Spawns mpv, plays the source, then publishes synthetic events on the
-EventBus to demonstrate the centralized duck policy:
+EventBus to demonstrate the centralized duck policy. The synthetic
+events stand in for what :class:`ConversationManager` would emit in a
+real flow — this test does not run the manager itself, on purpose: the
+goal here is to verify DuckController in isolation.
 
     play (3s)
         ↓
-    hotword_detected         → DuckController.claim("session")  → DUCKED
-    voice_activity_started   → heartbeat
-    voice_activity_stopped   → heartbeat
-    speaking_started         → DuckController.claim("speaker")  → still ducked
-    speaking_stopped         → DuckController.release("speaker") → still ducked
-                                                                   (session held)
-    (idle, no events)         → after session_timeout            → failsafe unducks
+    hotword_detected             → heartbeat (no claim — CM owns that)
+    conversation_turn_started    → DuckController.claim("session")  → DUCKED
+    voice_activity_started       → heartbeat
+    voice_activity_stopped       → heartbeat
+    speaking_started             → DuckController.claim("speaker")  → still ducked
+    speaking_stopped             → DuckController.release("speaker") → still ducked
+                                                                       (session held)
+    Two paths from here, exercised by --end-mode:
 
-The session_timeout default is 30s so a real demo pauses for that long
-in the silent phase. Use ``--session-timeout 5`` to compress the demo.
+      end-mode = "explicit" (default): publish conversation_ended →
+        release("session") → music unducks immediately.
+      end-mode = "failsafe": no further events; after session_timeout
+        the failsafe force-releases. Use --session-timeout 5 to keep
+        the demo short.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ from pathlib import Path
 from voice_assistant.config import load_config
 from voice_assistant.consumers.music import DuckController, MusicConsumer
 from voice_assistant.core.event_bus import (
+    ConversationEndedEvent,
+    ConversationTurnStartedEvent,
     EventBus,
     HotwordEvent,
     SpeakingStartedEvent,
@@ -42,7 +51,11 @@ from voice_assistant.core.event_bus import (
 logger = logging.getLogger(__name__)
 
 
-def main(url: str, session_timeout: float | None = None) -> bool:
+def main(
+    url: str,
+    session_timeout: float | None = None,
+    end_mode: str = "explicit",
+) -> bool:
     """Run the music + duck demo.
 
     Args:
@@ -50,7 +63,14 @@ def main(url: str, session_timeout: float | None = None) -> bool:
         session_timeout: Override ``music.duck.session_timeout_s`` so the
             failsafe phase isn't a 30s wait. ``None`` keeps the config
             default.
+        end_mode: ``"explicit"`` publishes a synthetic
+            ``conversation_ended`` event so the duck releases via the
+            normal path; ``"failsafe"`` publishes no further events so
+            the failsafe loop is exercised. Defaults to ``"explicit"``.
     """
+    if end_mode not in {"explicit", "failsafe"}:
+        logger.error("end_mode must be 'explicit' or 'failsafe'; got %r", end_mode)
+        return False
     try:
         config = load_config("config/config.yaml")
     except Exception as exc:
@@ -109,14 +129,29 @@ def main(url: str, session_timeout: float | None = None) -> bool:
         time.sleep(3.0)
         log_state("after 3s")
 
-        # ----- hotword fires (start of conversation) ----------------
+        # ----- hotword fires (heartbeat only; CM would publish turn_started) -----
         logger.info(">>> publishing hotword_detected")
         event_bus.publish(
             "hotword_detected",
             HotwordEvent(timestamp=datetime.now(), hotword="alexa", score=0.95),
         )
-        time.sleep(0.3)
+        time.sleep(0.1)
         log_state("post-hotword")
+
+        # ----- ConversationManager would now claim "session" via this event ----
+        logger.info(">>> publishing conversation_turn_started (stand-in for CM)")
+        event_bus.publish(
+            "conversation_turn_started",
+            ConversationTurnStartedEvent(
+                timestamp=datetime.now(),
+                thread_id="test-thread-1",
+                turn_index=0,
+                hotword="alexa",
+                hotword_score=0.95,
+            ),
+        )
+        time.sleep(0.3)
+        log_state("post-turn-started")
 
         time.sleep(1.0)
 
@@ -158,10 +193,28 @@ def main(url: str, session_timeout: float | None = None) -> bool:
         time.sleep(0.3)
         log_state("post-speaking")
 
-        # ----- silence — wait for failsafe ------------------------
-        # ConversationManager isn't wired yet, so "session" is held
-        # until the failsafe times it out. With --session-timeout 5
-        # this completes in a few seconds.
+        # ----- end of conversation -------------------------------
+        if end_mode == "explicit":
+            logger.info(">>> publishing conversation_ended (CM fired explicit end)")
+            event_bus.publish(
+                "conversation_ended",
+                ConversationEndedEvent(
+                    timestamp=datetime.now(),
+                    thread_id="test-thread-1",
+                    reason="explicit",
+                    turn_count=1,
+                ),
+            )
+            time.sleep(0.5)
+            log_state("post-conversation-ended")
+            if duck.is_ducked:
+                logger.error("expected music to unduck after conversation_ended")
+                return False
+            log_state("final")
+            return True
+
+        # end_mode == "failsafe": exercise the failsafe loop by NOT
+        # publishing conversation_ended and waiting out the timeout.
         wait_for = timeout + 2.0
         logger.info(
             ">>> waiting %.1fs of dead air for failsafe (session_timeout=%.1fs)",
