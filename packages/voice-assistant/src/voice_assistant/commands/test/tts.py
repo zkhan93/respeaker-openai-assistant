@@ -21,7 +21,7 @@ import threading
 from voice_assistant.config import load_config
 from voice_assistant.consumers.speaker import SpeakerManager
 from voice_assistant.core import EventBus, SpeakingStartedEvent, SpeakingStoppedEvent
-from voice_assistant.tts import PiperTTSEngine, ensure_voice
+from voice_assistant.tts import available_engines, make_tts_engine
 
 logger = logging.getLogger(__name__)
 
@@ -49,26 +49,18 @@ def main(text: str, interrupt_after: float = 0.0) -> bool:
 
     config.log_summary()
 
-    if config.tts_engine != "piper":
+    if config.tts_engine not in available_engines():
         logger.error(
-            "tts.engine=%r is not supported (only 'piper' is wired today)",
+            "tts.engine=%r is not supported. Known engines: %s",
             config.tts_engine,
-        )
-        return False
-
-    available, onnx_path = ensure_voice(config.tts_model, config.tts_cache_dir)
-    if not available:
-        logger.error(
-            "piper voice %r unavailable at %s — check network access or pre-download manually",
-            config.tts_model,
-            onnx_path,
+            available_engines(),
         )
         return False
 
     try:
-        tts = PiperTTSEngine(config.tts_model, cache_dir=config.tts_cache_dir)
+        tts = make_tts_engine(config)
     except Exception:
-        logger.exception("failed to load piper voice %r", config.tts_model)
+        logger.exception("failed to instantiate TTS engine %r", config.tts_engine)
         return False
 
     event_bus = EventBus()
@@ -100,9 +92,9 @@ def main(text: str, interrupt_after: float = 0.0) -> bool:
     event_bus.subscribe("speaking_stopped", on_stopped)
 
     logger.info(
-        "synthesizing %d chars with %r at %d Hz",
+        "synthesizing %d chars with engine=%r at %d Hz",
         len(text),
-        config.tts_model,
+        config.tts_engine,
         tts.sample_rate,
     )
     speaker.play(tts.synthesize(text), sample_rate=tts.sample_rate)

@@ -60,8 +60,10 @@ from voice_assistant.core import (
     VoiceDetectionService,
     ensure_model,
 )
-from voice_assistant.stt import Transcriber, available_engines, make_stt_engine
-from voice_assistant.tts import PiperTTSEngine, ensure_voice
+from voice_assistant.stt import Transcriber, make_stt_engine
+from voice_assistant.stt import available_engines as available_stt_engines
+from voice_assistant.tts import TTSEngine, make_tts_engine
+from voice_assistant.tts import available_engines as available_tts_engines
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +102,7 @@ class _AssistantFlow:
         self,
         led_consumer: LedConsumer,
         speaker: SpeakerManager,
-        tts: PiperTTSEngine,
+        tts: TTSEngine,
     ) -> None:
         self._led = led_consumer
         self._speaker = speaker
@@ -267,33 +269,25 @@ def main() -> bool:
         )
         return False
 
-    if config.tts_engine != "piper":
+    if config.tts_engine not in available_tts_engines():
         logger.error(
-            "tts.engine=%r is not supported (only 'piper' is wired today)",
+            "tts.engine=%r is not supported. Known engines: %s",
             config.tts_engine,
-        )
-        return False
-
-    tts_available, tts_path = ensure_voice(config.tts_model, config.tts_cache_dir)
-    if not tts_available:
-        logger.error(
-            "piper voice %r unavailable at %s — check network access or pre-download manually",
-            config.tts_model,
-            tts_path,
+            available_tts_engines(),
         )
         return False
 
     try:
-        tts = PiperTTSEngine(config.tts_model, cache_dir=config.tts_cache_dir)
+        tts = make_tts_engine(config)
     except Exception:
-        logger.exception("failed to load piper voice %r", config.tts_model)
+        logger.exception("failed to instantiate TTS engine %r", config.tts_engine)
         return False
 
-    if config.stt_engine not in available_engines():
+    if config.stt_engine not in available_stt_engines():
         logger.error(
             "stt.engine=%r is not supported. Known engines: %s",
             config.stt_engine,
-            available_engines(),
+            available_stt_engines(),
         )
         return False
 

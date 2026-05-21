@@ -132,18 +132,26 @@ class Config:
 
     @property
     def tts_engine(self) -> str:
-        """Which TTS backend to use (``piper`` is the only one wired today)."""
+        """Which TTS backend to use. Known: ``piper``, ``openai``."""
         return self.get("tts.engine", "piper")
 
     @property
-    def tts_model(self) -> str:
-        """TTS voice model name (engine-specific; e.g. ``en_US-ryan-high``)."""
-        return self.get("tts.model", "en_US-ryan-high")
+    def tts_engine_params(self) -> dict[str, Any]:
+        """Engine-specific kwargs from ``tts.<engine>.*``.
 
-    @property
-    def tts_cache_dir(self) -> str | None:
-        """Directory holding TTS voice files. ``None`` = engine default cache."""
-        return self.get("tts.cache_dir", None)
+        The factory passes this dict straight through to the engine
+        class's ``__init__``. Keys are deliberately not validated here —
+        we want a typo to surface as ``TypeError: unexpected keyword
+        argument`` from the engine constructor at startup, not as a
+        silent default fallback. See :func:`tts.make_tts_engine`.
+        """
+        block = self.get(f"tts.{self.tts_engine}", {}) or {}
+        if not isinstance(block, dict):
+            raise TypeError(
+                f"tts.{self.tts_engine} must be a mapping in config.yaml; "
+                f"got {type(block).__name__}"
+            )
+        return dict(block)
 
     @property
     def stt_engine(self) -> str:
@@ -256,12 +264,13 @@ class Config:
             self.speaker_device,
             self.speaker_channels,
         )
-        logger.info(
-            "  tts:          engine=%r model=%r cache_dir=%r",
-            self.tts_engine,
-            self.tts_model,
-            self.tts_cache_dir,
-        )
+        logger.info("  tts:          engine=%r", self.tts_engine)
+        # Print the active engine sub-block so config typos (e.g.
+        # ``voic:``) are visible: the resolved dict simply won't
+        # contain the typo'd key. Secrets are masked rather than logged.
+        masked_tts_params = _mask_secrets(self.tts_engine_params)
+        tts_params_str = " ".join(f"{k}={v!r}" for k, v in sorted(masked_tts_params.items()))
+        logger.info("  tts(active):  %s", tts_params_str or "<empty block>")
         logger.info(
             "  stt:          engine=%r min_dur=%.2fs max_dur=%.1fs",
             self.stt_engine,

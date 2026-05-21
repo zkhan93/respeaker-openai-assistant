@@ -47,12 +47,38 @@ speaker:
   channels: 1   # 1 = mono, 2 = stereo
 
 # TTS (Text-to-Speech) Configuration
+#
+# Same shape as the STT block: `engine:` selects a sub-block, and only
+# that sub-block's keys are read. Each sub-block's keys map 1:1 to the
+# engine class's __init__ signature, so a typo'd YAML key surfaces as
+# `TypeError: unexpected keyword argument` at startup — fail loud.
 tts:
-  engine: "piper"               # Only "piper" is wired today.
-  model: "en_US-ryan-high"      # Piper voice name. Run
+  engine: "piper"               # "piper" (local) | "openai" (cloud)
+
+  # Local engine: piper-tts. Voices are downloaded on first use into
+  # `cache_dir` (or the default user cache). The engine's prepare()
+  # step handles ensure-voice + load.
+  piper:
+    model: "en_US-ryan-high"    # Piper voice name. The engine will
+                                # auto-download on first prepare(); use
                                 # `voice-assistant download-tts-voice -v <name>`
-                                # to fetch a missing voice.
-  cache_dir: null               # Where voice .onnx files live; null = ~/.local/share/voice-assistant/piper-voices
+                                # to pre-fetch manually.
+    cache_dir: null             # null = ~/.local/share/voice-assistant/piper-voices
+    use_cuda: false             # GPU inference if true; CPU otherwise.
+
+  # Cloud engine: OpenAI audio.speech API. Streams 24 kHz mono PCM16
+  # via response_format="pcm" so SpeakerManager can play directly with
+  # no decoder dependency.
+  openai:
+    model: "gpt-4o-mini-tts"    # tts-1 / tts-1-hd / gpt-4o-mini-tts
+    voice: "ash"                # alloy/ash/ballad/coral/echo/fable/nova/onyx/sage/shimmer/verse
+    speed: 1.0                  # 0.25 .. 4.0
+    instructions: null          # Tone/style hint (gpt-4o-mini-tts only;
+                                # silently ignored on tts-1*).
+    timeout: 15.0               # Per-request timeout in seconds.
+    api_key: null               # null = falls back to top-level openai.api_key / OPENAI_API_KEY
+    base_url: null              # null = OpenAI default; set for OpenAI-compatible proxies.
+    chunk_size: 4096            # Bytes per iter_bytes() read while streaming.
 
 # STT (Speech-to-Text) Configuration
 #

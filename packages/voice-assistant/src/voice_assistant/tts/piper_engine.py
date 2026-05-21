@@ -10,8 +10,11 @@ layout used by ``piper.download_voices``):
     <cache_dir>/en_US-ryan-high.onnx
     <cache_dir>/en_US-ryan-high.onnx.json
 
-Use :func:`ensure_voice` to lazily download a missing voice — it mirrors
-``hotword_detector.ensure_model`` so the bring-up flow is consistent.
+Bring-up is owned by :meth:`PiperTTSEngine.prepare` — it calls
+:func:`ensure_voice` (which mirrors ``hotword_detector.ensure_model``)
+internally. Call sites should not need to invoke ``ensure_voice``
+directly; the helper stays exported for CLI / status tooling that
+wants to check or pre-fetch voices without constructing an engine.
 """
 
 from __future__ import annotations
@@ -99,9 +102,13 @@ def ensure_voice(
 class PiperTTSEngine:
     """Streaming TTS backed by piper-tts.
 
+    Lifecycle: cheap :meth:`__init__` (just stashes config) →
+    :meth:`prepare` (downloads + loads the voice) → :meth:`synthesize`.
+
     Each call to :meth:`synthesize` yields one PCM16 chunk per sentence
     (Piper's natural granularity). The chunk's sample rate is fixed by
-    the loaded voice and exposed via :attr:`sample_rate`.
+    the loaded voice and exposed via :attr:`sample_rate` — both are
+    only valid after :meth:`prepare`.
     """
 
     def __init__(
@@ -110,39 +117,22 @@ class PiperTTSEngine:
         cache_dir: str | Path | None = None,
         use_cuda: bool = False,
     ) -> None:
-        """Load a Piper voice from disk.
+        """Stash configuration; do not touch disk or network here.
 
         Args:
             model_name: Piper voice name (e.g. ``"en_US-ryan-high"``).
-                Must already be downloaded; call :func:`ensure_voice`
-                first if you're not sure.
+                If missing, :meth:`prepare` will attempt to download it.
             cache_dir: Where the model files live. ``None`` uses the
                 default user cache.
             use_cuda: True to run inference on GPU. Default CPU.
         """
         self._model_name = model_name
-        resolved = resolve_cache_dir(cache_dir)
-        onnx_path, config_path = voice_paths(model_name, resolved)
-        if not onnx_path.exists():
-            raise FileNotFoundError(
-                f"Piper voice {model_name!r} not found at {onnx_path}. "
-                f"Run `voice-assistant download-tts-voice -v {model_name}` to install it."
-            )
-        # Set download_dir to the cache so any extra resources Piper needs
-        # (e.g. Chinese g2pW) land alongside the voice files.
-        os.makedirs(resolved, exist_ok=True)
-        self._voice = PiperVoice.load(
-            str(onnx_path),
-            config_path=str(config_path) if config_path.exists() else None,
-            use_cuda=use_cuda,
-            download_dir=str(resolved),
-        )
-        self._sample_rate = int(self._voice.config.sample_rate)
-        logger.info(
-            "piper voice loaded: %s (sample_rate=%d Hz)",
-            model_name,
-            self._sample_rate,
-        )
+        self._cache_dir = cache_dir
+        self._use_cuda = use_cuda
+        # Populated by prepare(); guarded accessors below raise a clear
+        # error if anyone tries to synthesize before prepare runs.
+        self._voice: Optional[PiperVoice] = None
+        self._sample_rate: Optional[int] = None
 
     @property
     def model_name(self) -> str:
@@ -150,10 +140,53 @@ class PiperTTSEngine:
 
     @property
     def sample_rate(self) -> int:
+        if self._sample_rate is None:
+            raise RuntimeError("PiperTTSEngine.sample_rate is only valid after prepare().")
         return self._sample_rate
+
+    def prepare(self) -> None:
+        """Download the voice if missing, then load it into memory.
+
+        Idempotent: a second call is a no-op once the voice is loaded.
+        Failures (no network + missing voice, corrupt files, ONNX load
+        errors) propagate so the caller can surface them at startup.
+        """
+        if self._voice is not None:
+            return
+
+        resolved = resolve_cache_dir(self._cache_dir)
+        available, onnx_path = ensure_voice(self._model_name, resolved)
+        if not available:
+            raise FileNotFoundError(
+                f"Piper voice {self._model_name!r} unavailable at {onnx_path}. "
+                "Check network access or pre-download the voice manually."
+            )
+        _, config_path = voice_paths(self._model_name, resolved)
+
+        # Set download_dir to the cache so any extra resources Piper
+        # needs (e.g. the Chinese g2pW model) land alongside the voice
+        # files instead of in a random tmpdir.
+        os.makedirs(resolved, exist_ok=True)
+        self._voice = PiperVoice.load(
+            str(onnx_path),
+            config_path=str(config_path) if config_path.exists() else None,
+            use_cuda=self._use_cuda,
+            download_dir=str(resolved),
+        )
+        self._sample_rate = int(self._voice.config.sample_rate)
+        logger.info(
+            "piper voice loaded: %s (sample_rate=%d Hz)",
+            self._model_name,
+            self._sample_rate,
+        )
 
     def synthesize(self, text: str) -> Iterator[bytes]:
         """Yield PCM16 chunks (one per sentence) as Piper produces them."""
+        if self._voice is None:
+            raise RuntimeError(
+                "PiperTTSEngine.synthesize() called before prepare(). "
+                "Call prepare() once after construction."
+            )
         for chunk in self._voice.synthesize(text):
             data = chunk.audio_int16_bytes
             if data:
