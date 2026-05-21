@@ -66,7 +66,9 @@ stt:
   min_audio_duration: 0.3       # Drop utterances shorter than this — Whisper hallucinates
                                 # on tiny clips ("Thanks for watching!" is the canonical case)
   max_audio_duration: 30.0      # Hard cap on a single recording (seconds)
-  cpu_threads: 0                # 0 = let CTranslate2 pick; cap to leave Pi room for capture
+  cpu_threads: 4                # Pi 4B has 4 cores. 0 ("auto") sometimes resolves to 1 or 2
+                                # in CTranslate2 ARM builds — pin it to remove the variance.
+                                # Cap below 4 if you want headroom for the realtime audio loop.
   cache_dir: null               # Where model weights live; null = HuggingFace default cache
 
 # Logging Configuration

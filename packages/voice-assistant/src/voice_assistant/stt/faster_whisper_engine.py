@@ -127,6 +127,27 @@ class FasterWhisperSTT:
             # re-run faster-whisper's internal Silero VAD pass — it adds
             # ~50–100 ms of latency for no benefit here.
             vad_filter=False,
+            # ----- short-utterance speedups -----
+            # Whisper's default policy retries decoding at temperatures
+            # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] whenever any of the
+            # *_threshold checks reject the first pass. On noisy or
+            # quiet clips this fires often and silently runs inference
+            # 2–6 times; on a Pi 4B that turns "1× realtime" into "5×
+            # realtime". We're driving Whisper from a hotword + VAD
+            # gate, so each utterance is independent and we'd rather
+            # take a single fast (possibly worse) decode than wait for
+            # fallback retries.
+            temperature=0.0,
+            compression_ratio_threshold=None,
+            log_prob_threshold=None,
+            no_speech_threshold=None,
+            # We don't carry context across turns — disabling the
+            # previous-text conditioning saves a small amount per call
+            # and avoids weird cross-turn echo effects.
+            condition_on_previous_text=False,
+            # We don't use the timestamps; skipping them cuts ~30% off
+            # decoder cost.
+            without_timestamps=True,
         )
         # ``segments`` is a generator; consuming it runs the inference.
         text = " ".join(seg.text.strip() for seg in segments).strip()
