@@ -113,6 +113,29 @@ def speaker(
 
 
 @test_app.command()
+def stt(
+    file: str = typer.Option(
+        ...,
+        "--file",
+        "-f",
+        help="Path to a 16-bit PCM mono WAV at 16 kHz to transcribe.",
+    ),
+) -> None:
+    """Transcribe a WAV file with the configured STT engine (no mic, no detection)."""
+    from voice_assistant.commands.test.stt import main
+
+    raise typer.Exit(0 if main(file=file) else 1)
+
+
+@test_app.command("stt-live")
+def stt_live() -> None:
+    """Live STT loop: hotword → record → VAD stop → transcribe → log."""
+    from voice_assistant.commands.test.stt_live import main
+
+    raise typer.Exit(0 if main() else 1)
+
+
+@test_app.command()
 def tts(
     text: str = typer.Argument(..., help="Text to synthesize and play."),
     interrupt_after: float = typer.Option(

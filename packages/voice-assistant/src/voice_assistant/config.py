@@ -146,6 +146,51 @@ class Config:
         return self.get("tts.cache_dir", None)
 
     @property
+    def stt_engine(self) -> str:
+        """Which STT backend to use (``faster-whisper`` is the only one wired today)."""
+        return self.get("stt.engine", "faster-whisper")
+
+    @property
+    def stt_model(self) -> str:
+        """STT model name (``tiny.en``, ``base.en``, …, or absolute path)."""
+        return self.get("stt.model", "tiny.en")
+
+    @property
+    def stt_compute_type(self) -> str:
+        """CTranslate2 compute type. ``int8`` is Pi-friendly; ``float32`` for max accuracy."""
+        return self.get("stt.compute_type", "int8")
+
+    @property
+    def stt_language(self) -> str | None:
+        """ISO language code (``en``) to skip detection, or ``None`` to auto-detect."""
+        return self.get("stt.language", "en")
+
+    @property
+    def stt_cache_dir(self) -> str | None:
+        """Directory for downloaded STT model weights. ``None`` = HF default cache."""
+        return self.get("stt.cache_dir", None)
+
+    @property
+    def stt_min_audio_duration(self) -> float:
+        """Drop utterances shorter than this many seconds (Whisper hallucinates on tiny clips)."""
+        return self.get("stt.min_audio_duration", 0.3)
+
+    @property
+    def stt_max_audio_duration(self) -> float:
+        """Hard cap on a single utterance recording (seconds)."""
+        return self.get("stt.max_audio_duration", 30.0)
+
+    @property
+    def stt_beam_size(self) -> int:
+        """Whisper beam-search width. 1 (greedy) is the right default on Pi."""
+        return self.get("stt.beam_size", 1)
+
+    @property
+    def stt_cpu_threads(self) -> int:
+        """CPU threads CTranslate2 should use. 0 = pick automatically."""
+        return self.get("stt.cpu_threads", 0)
+
+    @property
     def broadcaster_enabled(self) -> bool:
         """Get whether ZMQ audio broadcasting is enabled."""
         return self.get("broadcaster.enabled", True)
@@ -228,6 +273,18 @@ class Config:
             self.tts_engine,
             self.tts_model,
             self.tts_cache_dir,
+        )
+        logger.info(
+            "  stt:          engine=%r model=%r compute=%r lang=%r beam=%d "
+            "min_dur=%.2fs max_dur=%.1fs cache_dir=%r",
+            self.stt_engine,
+            self.stt_model,
+            self.stt_compute_type,
+            self.stt_language,
+            self.stt_beam_size,
+            self.stt_min_audio_duration,
+            self.stt_max_audio_duration,
+            self.stt_cache_dir,
         )
         logger.info("  logging:      level=%r", self.logging_level)
         logger.info("  secrets:      openai.api_key=%s", api_key_state)

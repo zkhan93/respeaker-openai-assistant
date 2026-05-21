@@ -42,6 +42,32 @@ class SpeakingStartedEvent:
 
 
 @dataclass
+class TranscriptionCompletedEvent:
+    """Event emitted when an STT engine finishes transcribing an utterance.
+
+    ``text`` is the engine's best-effort transcript and may be the empty
+    string when Whisper detects no speech in the clip — subscribers
+    typically should treat empty text as "nothing to act on" rather
+    than as failure.
+    """
+
+    timestamp: datetime
+    text: str
+    audio_duration: float  # seconds of audio fed to the engine
+    inference_time: float  # seconds spent inside engine.transcribe()
+    language: str | None = None  # detected language (engine-dependent)
+
+
+@dataclass
+class TranscriptionFailedEvent:
+    """Event emitted when an STT engine raises during transcription."""
+
+    timestamp: datetime
+    error: str
+    audio_duration: float
+
+
+@dataclass
 class SpeakingStoppedEvent:
     """Event emitted when speaker playback ends.
 

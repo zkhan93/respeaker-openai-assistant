@@ -9,6 +9,8 @@ from .event_bus import (
     HotwordEvent,
     SpeakingStartedEvent,
     SpeakingStoppedEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
     VoiceActivityEvent,
 )
 from .hotword_detector import (
@@ -29,6 +31,8 @@ __all__ = [
     "HotwordEvent",
     "SpeakingStartedEvent",
     "SpeakingStoppedEvent",
+    "TranscriptionCompletedEvent",
+    "TranscriptionFailedEvent",
     "VoiceActivityEvent",
     "HotwordDetector",
     "available_model_names",

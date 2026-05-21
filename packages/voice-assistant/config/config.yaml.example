@@ -54,6 +54,21 @@ tts:
                                 # to fetch a missing voice.
   cache_dir: null               # Where voice .onnx files live; null = ~/.local/share/voice-assistant/piper-voices
 
+# STT (Speech-to-Text) Configuration
+stt:
+  engine: "faster-whisper"      # Only "faster-whisper" is wired today.
+  model: "tiny.en"              # tiny / tiny.en / base / base.en / small.en / ...
+                                # `.en` variants are smaller, English-only, slightly faster.
+                                # First use downloads from HuggingFace (~75 MB for tiny.en).
+  compute_type: "int8"          # int8 (Pi-friendly) | int8_float16 | float32 (max accuracy)
+  language: "en"                # ISO code, or null to auto-detect each utterance
+  beam_size: 1                  # 1 (greedy) recommended on Pi; 5 doubles inference time
+  min_audio_duration: 0.3       # Drop utterances shorter than this — Whisper hallucinates
+                                # on tiny clips ("Thanks for watching!" is the canonical case)
+  max_audio_duration: 30.0      # Hard cap on a single recording (seconds)
+  cpu_threads: 0                # 0 = let CTranslate2 pick; cap to leave Pi room for capture
+  cache_dir: null               # Where model weights live; null = HuggingFace default cache
+
 # Logging Configuration
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

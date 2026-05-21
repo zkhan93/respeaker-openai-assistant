@@ -1,11 +1,9 @@
 """Full voice-assistant lifecycle demo: hotword → listen → think → speak → idle.
 
 Goto reference for "what does one assistant turn look like end-to-end on
-top of this codebase". Wire a real LLM call into ``_on_think_done``
-later — the realtime detection loop, the LED choreography, and the
-interruption semantics will keep working unchanged because every
-reaction lives in a subscriber or a timer callback, never in the audio
-loop.
+top of this codebase". Every reaction lives in a subscriber, never in
+the audio loop, so the realtime detection path stays unaffected by
+slow LLM / TTS / STT work.
 
 Cycle::
 
@@ -13,9 +11,13 @@ Cycle::
     listening    hotword fired; ring shows the ``listen`` pattern; we
                  wait for VAD to report end-of-speech.
     thinking     VAD stopped; ring shows the ``think`` (rotating)
-                 pattern while a dummy timer simulates a model call.
-    speaking     think done; ring shows the ``speak`` (pulsing) pattern
-                 while Piper TTS streams ``REPLY_TEXT`` through the
+                 pattern. The Transcriber has the captured audio and
+                 is calling Whisper on a worker thread. When the
+                 ``transcription_completed`` event lands, we move on.
+                 (Plug an LLM call in here later — between transcript
+                 and reply.)
+    speaking     transcript in hand; ring shows the ``speak`` (pulsing)
+                 pattern while Piper TTS streams the reply through the
                  speaker. Ends on the ``speaking_stopped`` event — no
                  timer involved, so the duration matches the actual
                  audio length.
@@ -23,14 +25,19 @@ Cycle::
                  word.
 
 Interruption: at any point — including mid-think and mid-speak — a fresh
-hotword cancels the in-flight timer (think) or interrupts the speaker
-(speak) and snaps back to listening. The state-check pattern in each
-callback (``if self._state == ...``) makes the cancellation race-safe:
-a Timer or a late ``speaking_stopped`` that fires after we changed state
-out from under it sees the new state and bails.
+hotword cancels the in-flight speaker (if any) and snaps back to
+listening. Stale ``transcription_completed`` results from the previous
+session are dropped two ways: the Transcriber bumps an internal
+session counter so the old result never publishes, and the assistant
+flow's state-check (``if self._state == "thinking"``) catches anything
+that slipped through.
 
-All audio / VAD / hotword / speaker / TTS settings are sourced from
-``config/config.yaml`` — there is one source of truth.
+For the reply we just echo the transcript ("You said: …"). Drop in a
+real LLM call inside :meth:`_AssistantFlow.on_transcription_completed`
+when wiring this against an actual model.
+
+All audio / VAD / hotword / speaker / TTS / STT settings come from
+``config/config.yaml``.
 """
 
 from __future__ import annotations
@@ -47,39 +54,46 @@ from voice_assistant.core import (
     HotwordDetector,
     HotwordEvent,
     SpeakingStoppedEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
     VoiceActivityEvent,
     VoiceDetectionService,
     ensure_model,
 )
+from voice_assistant.stt import FasterWhisperSTT, Transcriber
 from voice_assistant.tts import PiperTTSEngine, ensure_voice
 
 logger = logging.getLogger(__name__)
 
 
-# Dummy think duration — stands in for an LLM call. The speak phase used
-# to be a dummy timer too; it is now driven by the real ``SpeakerManager``
-# / ``PiperTTSEngine`` pair, so its duration is whatever ``REPLY_TEXT``
-# takes to synthesize and play.
-THINK_SECONDS = 4.0
-REPLY_TEXT = "I'm not feeling well today!"
+# Build the spoken reply from the transcript. Drop in an LLM call here
+# (or in ``_AssistantFlow.on_transcription_completed``) when wiring a
+# real model. Kept as a module-level helper so it's easy to swap.
+def build_reply(transcript: str) -> str:
+    return f"You said: {transcript}"
 
 
 class _AssistantFlow:
-    """State machine that drives LED patterns through a full assistant turn.
+    """State machine that drives LED + speaker through one assistant turn.
 
     States: ``idle`` → ``listening`` → ``thinking`` → ``speaking`` → ``idle``.
 
-    Triggers come from three sources, all running on different threads:
+    Triggers come from event-bus worker threads only:
 
-    * ``EventBus`` worker threads invoke :meth:`on_hotword`,
-      :meth:`on_voice_started`, :meth:`on_voice_stopped`.
-    * ``threading.Timer`` threads invoke :meth:`_on_think_done` and
-      :meth:`_on_speak_done` after the dummy phase elapses.
+    * ``hotword_detected`` → :meth:`on_hotword`
+    * ``voice_activity_started`` / ``voice_activity_stopped`` →
+      :meth:`on_voice_started` / :meth:`on_voice_stopped`
+    * ``transcription_completed`` / ``transcription_failed`` →
+      :meth:`on_transcription_completed` / :meth:`on_transcription_failed`
+    * ``speaking_stopped`` → :meth:`on_speaking_stopped`
 
-    ``_lock`` guards the shared state and the active timer handle.
-    Pattern commands are issued *outside* the lock to keep critical
-    sections short and to avoid any chance of contention with the LED
-    driver thread.
+    No threading.Timer anywhere — every transition is event-driven, so
+    "thinking" lasts exactly as long as STT + (future) LLM work takes,
+    and "speaking" lasts exactly as long as the audio plays.
+
+    ``_lock`` guards the shared state. LED / speaker calls are issued
+    *outside* the lock to keep critical sections short and avoid
+    contention with hardware drivers.
     """
 
     def __init__(
@@ -87,22 +101,18 @@ class _AssistantFlow:
         led_consumer: LedConsumer,
         speaker: SpeakerManager,
         tts: PiperTTSEngine,
-        reply_text: str = REPLY_TEXT,
     ) -> None:
         self._led = led_consumer
         self._speaker = speaker
         self._tts = tts
-        self._reply_text = reply_text
         self._lock = threading.Lock()
         self._state = "idle"
-        self._timer: threading.Timer | None = None
 
-    # ------- event handlers (EventBus worker threads) -------
+    # ------- detection events -------
 
     def on_hotword(self, event: HotwordEvent) -> None:
         with self._lock:
             previous = self._state
-            self._cancel_timer_locked()
             self._state = "listening"
 
         # If we were mid-playback, cut the audio. The speaker will fire
@@ -131,58 +141,78 @@ class _AssistantFlow:
     def on_voice_started(self, event: VoiceActivityEvent) -> None:
         with self._lock:
             if self._state != "listening":
-                # Stray VAD without a hotword (e.g. background chatter or
+                # Stray VAD without a hotword (background chatter or
                 # the wake word itself before the hotword fires). Ignore.
                 return
         # Idempotent reaffirm — already in the listen pattern.
         self._led.set_pattern("listen")
 
     def on_voice_stopped(self, event: VoiceActivityEvent) -> None:
+        """End of speech → handoff to the Transcriber via the ``think`` state."""
         fire = False
         with self._lock:
             if self._state == "listening":
                 self._state = "thinking"
-                self._timer = threading.Timer(THINK_SECONDS, self._on_think_done)
-                self._timer.daemon = True
-                self._timer.start()
                 fire = True
 
         if fire:
             self._led.set_pattern("think")
-            logger.info(
-                "→ thinking (dummy %.1fs; voice was %.2fs)",
-                THINK_SECONDS,
-                event.duration,
-            )
+            logger.info("→ thinking (voice was %.2fs; awaiting transcription)", event.duration)
 
-    # ------- timer callback (Timer thread) -------
+    # ------- STT events -------
 
-    def _on_think_done(self) -> None:
-        """Think phase done → start real TTS playback as the speak phase."""
-        fire = False
+    def on_transcription_completed(self, event: TranscriptionCompletedEvent) -> None:
+        """Transcript in hand → start the speak phase with the reply."""
+        text = event.text.strip()
+
         with self._lock:
-            if self._state == "thinking":
-                self._state = "speaking"
-                self._timer = None
-                fire = True
+            if self._state != "thinking":
+                # User interrupted mid-think (or two utterances raced).
+                # The Transcriber already drops stale results via its
+                # session counter; this is a defensive second check.
+                logger.info(
+                    "ignoring transcription %r — state is %s, not 'thinking'",
+                    text,
+                    self._state,
+                )
+                return
+            if not text:
+                # Whisper returned empty (silence / unintelligible).
+                # Skip the speak phase, go straight to idle.
+                self._state = "idle"
+                logger.info("→ idle (empty transcript after %.2fs of audio)", event.audio_duration)
+                self._led.set_pattern("off")
+                return
+            self._state = "speaking"
 
-        if not fire:
-            return
-
+        reply = build_reply(text)
+        logger.info(
+            "transcribed in %.2fs: %r → speaking reply %r",
+            event.inference_time,
+            text,
+            reply,
+        )
         self._led.set_pattern("speak")
-        logger.info("→ speaking (TTS %r @ %d Hz)", self._reply_text, self._tts.sample_rate)
-        # Generator-driven streaming. ``speaker.play`` returns
-        # immediately; the worker pulls chunks lazily and emits
-        # ``speaking_started`` / ``speaking_stopped`` along the way.
-        # Interruptions land on the speaker (via ``on_hotword``) and
-        # surface here as ``speaking_stopped(reason="interrupted")``,
-        # which is fine — ``on_speaking_stopped`` handles both.
         self._speaker.play(
-            self._tts.synthesize(self._reply_text),
+            self._tts.synthesize(reply),
             sample_rate=self._tts.sample_rate,
         )
 
-    # ------- event handler (SpeakerManager session thread, via EventBus) -------
+    def on_transcription_failed(self, event: TranscriptionFailedEvent) -> None:
+        """STT crashed → log it and drop back to idle without speaking."""
+        with self._lock:
+            if self._state != "thinking":
+                return
+            self._state = "idle"
+
+        logger.error(
+            "→ idle (transcription failed after %.2fs of audio: %s)",
+            event.audio_duration,
+            event.error,
+        )
+        self._led.set_pattern("off")
+
+    # ------- speaker event -------
 
     def on_speaking_stopped(self, event: SpeakingStoppedEvent) -> None:
         """Speak phase ends when the speaker finishes (or was interrupted)."""
@@ -200,25 +230,19 @@ class _AssistantFlow:
                 event.duration,
             )
 
-    # ------- helpers -------
-
-    def _cancel_timer_locked(self) -> None:
-        """Cancel the active timer if any. Caller MUST hold ``self._lock``."""
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
+    # ------- lifecycle -------
 
     def shutdown(self) -> None:
-        """Cancel any pending timer and reset to idle (called during teardown)."""
+        """Reset state for teardown. Idempotent."""
         with self._lock:
-            self._cancel_timer_locked()
             self._state = "idle"
 
 
 def main() -> bool:
     """Run the full voice-assistant lifecycle demo.
 
-    All audio / VAD / hotword settings come from ``config/config.yaml``.
+    All audio / VAD / hotword / speaker / TTS / STT settings come from
+    ``config/config.yaml``.
 
     Returns:
         ``True`` on a clean shutdown, ``False`` on error.
@@ -265,6 +289,26 @@ def main() -> bool:
         logger.exception("failed to load piper voice %r", config.tts_model)
         return False
 
+    if config.stt_engine != "faster-whisper":
+        logger.error(
+            "stt.engine=%r is not supported (only 'faster-whisper' is wired today)",
+            config.stt_engine,
+        )
+        return False
+
+    try:
+        stt_engine = FasterWhisperSTT(
+            model=config.stt_model,
+            compute_type=config.stt_compute_type,
+            language=config.stt_language,
+            cache_dir=config.stt_cache_dir,
+            cpu_threads=config.stt_cpu_threads,
+            beam_size=config.stt_beam_size,
+        )
+    except Exception:
+        logger.exception("failed to load STT engine %r", config.stt_model)
+        return False
+
     event_bus = EventBus()
     audio_handler = AudioHandler(
         event_bus=event_bus,
@@ -283,6 +327,13 @@ def main() -> bool:
         device_name=config.speaker_device,
         channels=config.speaker_channels,
     )
+    transcriber = Transcriber(
+        audio_handler=audio_handler,
+        event_bus=event_bus,
+        engine=stt_engine,
+        min_audio_duration=config.stt_min_audio_duration,
+        max_audio_duration=config.stt_max_audio_duration,
+    )
 
     if not led_consumer.enabled:
         logger.warning(
@@ -293,14 +344,14 @@ def main() -> bool:
     event_bus.subscribe("hotword_detected", flow.on_hotword)
     event_bus.subscribe("voice_activity_started", flow.on_voice_started)
     event_bus.subscribe("voice_activity_stopped", flow.on_voice_stopped)
+    event_bus.subscribe("transcription_completed", flow.on_transcription_completed)
+    event_bus.subscribe("transcription_failed", flow.on_transcription_failed)
     event_bus.subscribe("speaking_stopped", flow.on_speaking_stopped)
 
     audio_handler.start_stream()
     logger.info(
-        "ready — say %r, talk, then go silent. (think=%.1fs reply=%r) Ctrl+C to stop.",
+        "ready — say %r, talk, then go silent. Ctrl+C to stop.",
         hotword_name,
-        THINK_SECONDS,
-        REPLY_TEXT,
     )
 
     try:
@@ -312,6 +363,7 @@ def main() -> bool:
         return False
     finally:
         flow.shutdown()
+        transcriber.shutdown()
         speaker.cleanup()
         led_consumer.set_pattern("off")
         audio_handler.stop_stream()
