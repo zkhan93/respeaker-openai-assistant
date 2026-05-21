@@ -37,6 +37,33 @@ broadcaster:
   pull_endpoint: "tcp://*:5556"  # Incoming: LED commands from external consumers
   meta_interval: 30  # Seconds between stream metadata messages
 
+# Music Configuration (mpv subprocess + duck policy)
+#
+# voice-assistant owns the mpv subprocess. The socket below is private —
+# nothing else should connect to it. External callers (the music MCP
+# server, future on-device tools) drive playback through the ZMQ
+# command channel (broadcaster.pull_endpoint), not by talking to mpv
+# directly.
+#
+# Ducking is a *reflex*: hotword + speaker activity duck the music
+# automatically, no agent involvement. See `music.duck.*` below.
+music:
+  default_volume: 80          # 0..100. Initial volume; restored on unduck.
+  mpv:
+    socket: "/tmp/voice-assistant-mpv.sock"
+    extra_args:               # passed verbatim to mpv
+      - "--ao=coreaudio"      # macOS dev box; use --ao=pulse on Pi
+      # - "--audio-device=alsa/default:CARD=Headphones"
+  duck:
+    target_volume: 20         # volume to duck *to*
+    fade_in_ms: 200           # fade-down on duck
+    fade_out_ms: 400          # fade-up on unduck
+    session_timeout_s: 30.0   # failsafe: force-release the "session" duck reason
+                              # after this much dead air. Refreshed by every event
+                              # (voice activity, speaking, transcription, hotword)
+                              # so it cannot fire mid-conversation. ConversationManager
+                              # will release deterministically once it lands.
+
 # Speaker (audio playback) Configuration
 speaker:
   device: null   # Substring of the PyAudio output device name; null = system default.

@@ -207,6 +207,58 @@ class Config:
         return self.get("broadcaster.meta_interval", 30.0)
 
     @property
+    def music_mpv_socket(self) -> str:
+        """Path mpv should listen on for IPC.
+
+        Voice-assistant owns the lifecycle of the mpv subprocess; the
+        socket file is private and ephemeral. Default lives under
+        ``$XDG_RUNTIME_DIR``-style paths so multiple users / instances
+        don't collide. Parent dir will be created at startup.
+        """
+        return self.get("music.mpv.socket", "/tmp/voice-assistant-mpv.sock")
+
+    @property
+    def music_default_volume(self) -> int:
+        """Initial mpv volume (0..100), and the value `unduck` returns to."""
+        return int(self.get("music.default_volume", 80))
+
+    @property
+    def music_mpv_extra_args(self) -> list[str]:
+        """Extra args passed verbatim to mpv. Useful for ``--ao=...`` / sink pinning."""
+        val = self.get("music.mpv.extra_args", []) or []
+        if not isinstance(val, list):
+            raise TypeError(
+                f"music.mpv.extra_args must be a list of strings; got {type(val).__name__}"
+            )
+        return [str(arg) for arg in val]
+
+    @property
+    def music_duck_target_volume(self) -> int:
+        """Volume to duck *to*, 0..100. (Q4 default = 20.)"""
+        return int(self.get("music.duck.target_volume", 20))
+
+    @property
+    def music_duck_fade_in_ms(self) -> int:
+        """Fade-down duration on duck (ms). (Q4 default = 200.)"""
+        return int(self.get("music.duck.fade_in_ms", 200))
+
+    @property
+    def music_duck_fade_out_ms(self) -> int:
+        """Fade-up duration on unduck (ms). (Q4 default = 400.)"""
+        return int(self.get("music.duck.fade_out_ms", 400))
+
+    @property
+    def music_duck_session_timeout_s(self) -> float:
+        """Failsafe: force-release ``"session"`` after this much dead air.
+
+        Refreshed by every "session is alive" event (voice activity,
+        speaking, transcription, hotword). Only fires when nothing has
+        happened for the duration — cannot unduck mid-conversation.
+        (Q3 default = 30s.)
+        """
+        return float(self.get("music.duck.session_timeout_s", 30.0))
+
+    @property
     def logging_level(self) -> str:
         """Get logging level."""
         return self.get("logging.level", "INFO")
@@ -263,6 +315,19 @@ class Config:
             "  speaker:      device=%r channels=%d",
             self.speaker_device,
             self.speaker_channels,
+        )
+        logger.info(
+            "  music:        socket=%r default_volume=%d extra_args=%s",
+            self.music_mpv_socket,
+            self.music_default_volume,
+            self.music_mpv_extra_args,
+        )
+        logger.info(
+            "  music.duck:   target=%d fade_in=%dms fade_out=%dms session_timeout=%.1fs",
+            self.music_duck_target_volume,
+            self.music_duck_fade_in_ms,
+            self.music_duck_fade_out_ms,
+            self.music_duck_session_timeout_s,
         )
         logger.info("  tts:          engine=%r", self.tts_engine)
         # Print the active engine sub-block so config typos (e.g.

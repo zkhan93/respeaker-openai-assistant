@@ -151,3 +151,26 @@ def tts(
     from voice_assistant.commands.test.tts import main
 
     raise typer.Exit(0 if main(text=text, interrupt_after=interrupt_after) else 1)
+
+
+@test_app.command()
+def music(
+    url: str = typer.Option(
+        ...,
+        "--url",
+        "-u",
+        help="File path or stream URL mpv can play (anything mpv accepts).",
+    ),
+    session_timeout: float = typer.Option(
+        None,
+        "--session-timeout",
+        help=(
+            "Test-only knob. Override music.duck.session_timeout_s so the "
+            "failsafe phase isn't a 30s wait. e.g. --session-timeout 5."
+        ),
+    ),
+) -> None:
+    """Music playback + DuckController demo (synthetic events; no mic, no agent)."""
+    from voice_assistant.commands.test.music import main
+
+    raise typer.Exit(0 if main(url=url, session_timeout=session_timeout) else 1)
