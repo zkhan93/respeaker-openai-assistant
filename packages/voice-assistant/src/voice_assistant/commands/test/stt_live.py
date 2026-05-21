@@ -28,7 +28,7 @@ from voice_assistant.core import (
     VoiceDetectionService,
     ensure_model,
 )
-from voice_assistant.stt import FasterWhisperSTT, Transcriber
+from voice_assistant.stt import Transcriber, available_engines, make_stt_engine
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +54,18 @@ def main() -> bool:
         )
         return False
 
-    if config.stt_engine != "faster-whisper":
+    if config.stt_engine not in available_engines():
         logger.error(
-            "stt.engine=%r is not supported (only 'faster-whisper' is wired today)",
+            "stt.engine=%r is not supported. Known engines: %s",
             config.stt_engine,
+            available_engines(),
         )
         return False
 
     try:
-        engine = FasterWhisperSTT(
-            model=config.stt_model,
-            compute_type=config.stt_compute_type,
-            language=config.stt_language,
-            cache_dir=config.stt_cache_dir,
-            cpu_threads=config.stt_cpu_threads,
-            beam_size=config.stt_beam_size,
-        )
+        engine = make_stt_engine(config)
     except Exception:
-        logger.exception("failed to load STT engine %r", config.stt_model)
+        logger.exception("failed to instantiate STT engine %r", config.stt_engine)
         return False
 
     event_bus = EventBus()

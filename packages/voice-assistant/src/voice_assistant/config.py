@@ -147,28 +147,26 @@ class Config:
 
     @property
     def stt_engine(self) -> str:
-        """Which STT backend to use (``faster-whisper`` is the only one wired today)."""
+        """Which STT backend to use. Known: ``faster-whisper``, ``openai``."""
         return self.get("stt.engine", "faster-whisper")
 
     @property
-    def stt_model(self) -> str:
-        """STT model name (``tiny.en``, ``base.en``, …, or absolute path)."""
-        return self.get("stt.model", "tiny.en")
+    def stt_engine_params(self) -> dict[str, Any]:
+        """Engine-specific kwargs from ``stt.<engine>.*``.
 
-    @property
-    def stt_compute_type(self) -> str:
-        """CTranslate2 compute type. ``int8`` is Pi-friendly; ``float32`` for max accuracy."""
-        return self.get("stt.compute_type", "int8")
-
-    @property
-    def stt_language(self) -> str | None:
-        """ISO language code (``en``) to skip detection, or ``None`` to auto-detect."""
-        return self.get("stt.language", "en")
-
-    @property
-    def stt_cache_dir(self) -> str | None:
-        """Directory for downloaded STT model weights. ``None`` = HF default cache."""
-        return self.get("stt.cache_dir", None)
+        The factory passes this dict straight through to the engine
+        class's ``__init__``. Keys are deliberately not validated here —
+        we want a typo to surface as ``TypeError: unexpected keyword
+        argument`` from the engine constructor at startup, not as a
+        silent default fallback. See :func:`stt.make_stt_engine`.
+        """
+        block = self.get(f"stt.{self.stt_engine}", {}) or {}
+        if not isinstance(block, dict):
+            raise TypeError(
+                f"stt.{self.stt_engine} must be a mapping in config.yaml; "
+                f"got {type(block).__name__}"
+            )
+        return dict(block)
 
     @property
     def stt_min_audio_duration(self) -> float:
@@ -179,16 +177,6 @@ class Config:
     def stt_max_audio_duration(self) -> float:
         """Hard cap on a single utterance recording (seconds)."""
         return self.get("stt.max_audio_duration", 30.0)
-
-    @property
-    def stt_beam_size(self) -> int:
-        """Whisper beam-search width. 1 (greedy) is the right default on Pi."""
-        return self.get("stt.beam_size", 1)
-
-    @property
-    def stt_cpu_threads(self) -> int:
-        """CPU threads CTranslate2 should use. 0 = pick automatically."""
-        return self.get("stt.cpu_threads", 0)
 
     @property
     def broadcaster_enabled(self) -> bool:
@@ -275,19 +263,40 @@ class Config:
             self.tts_cache_dir,
         )
         logger.info(
-            "  stt:          engine=%r model=%r compute=%r lang=%r beam=%d "
-            "min_dur=%.2fs max_dur=%.1fs cache_dir=%r",
+            "  stt:          engine=%r min_dur=%.2fs max_dur=%.1fs",
             self.stt_engine,
-            self.stt_model,
-            self.stt_compute_type,
-            self.stt_language,
-            self.stt_beam_size,
             self.stt_min_audio_duration,
             self.stt_max_audio_duration,
-            self.stt_cache_dir,
         )
+        # Print the active engine sub-block so config typos (e.g.
+        # ``compute_typ:``) are visible: the resolved dict simply won't
+        # contain the typo'd key. Secrets are masked rather than logged.
+        masked_params = _mask_secrets(self.stt_engine_params)
+        params_str = " ".join(f"{k}={v!r}" for k, v in sorted(masked_params.items()))
+        logger.info("  stt(active):  %s", params_str or "<empty block>")
         logger.info("  logging:      level=%r", self.logging_level)
         logger.info("  secrets:      openai.api_key=%s", api_key_state)
+
+
+_SECRET_KEY_HINTS = ("api_key", "token", "secret", "password")
+
+
+def _mask_secrets(params: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``params`` with secret-looking values masked.
+
+    A key is treated as a secret if its name contains any of
+    :data:`_SECRET_KEY_HINTS`. The value is replaced with ``"<set>"``
+    when truthy and ``"<missing>"`` otherwise so the log line still
+    reveals whether the secret is present without disclosing it.
+    """
+    out: dict[str, Any] = {}
+    for key, value in params.items():
+        lowered = key.lower()
+        if any(hint in lowered for hint in _SECRET_KEY_HINTS):
+            out[key] = "<set>" if value else "<missing>"
+        else:
+            out[key] = value
+    return out
 
 
 def load_config(config_path: str = "config/config.yaml") -> Config:

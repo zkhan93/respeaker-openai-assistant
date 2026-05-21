@@ -19,7 +19,7 @@ import wave
 from pathlib import Path
 
 from voice_assistant.config import load_config
-from voice_assistant.stt import FasterWhisperSTT
+from voice_assistant.stt import available_engines, make_stt_engine
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,11 @@ def main(file: str) -> bool:
 
     config.log_summary()
 
-    if config.stt_engine != "faster-whisper":
+    if config.stt_engine not in available_engines():
         logger.error(
-            "stt.engine=%r is not supported (only 'faster-whisper' is wired today)",
+            "stt.engine=%r is not supported. Known engines: %s",
             config.stt_engine,
+            available_engines(),
         )
         return False
 
@@ -81,16 +82,9 @@ def main(file: str) -> bool:
     logger.info("loaded WAV: %s (%.2fs of audio)", path, duration)
 
     try:
-        engine = FasterWhisperSTT(
-            model=config.stt_model,
-            compute_type=config.stt_compute_type,
-            language=config.stt_language,
-            cache_dir=config.stt_cache_dir,
-            cpu_threads=config.stt_cpu_threads,
-            beam_size=config.stt_beam_size,
-        )
+        engine = make_stt_engine(config)
     except Exception:
-        logger.exception("failed to load STT engine %r", config.stt_model)
+        logger.exception("failed to instantiate STT engine %r", config.stt_engine)
         return False
 
     t0 = time.perf_counter()

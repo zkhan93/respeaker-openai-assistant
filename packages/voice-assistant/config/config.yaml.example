@@ -55,21 +55,49 @@ tts:
   cache_dir: null               # Where voice .onnx files live; null = ~/.local/share/voice-assistant/piper-voices
 
 # STT (Speech-to-Text) Configuration
+#
+# Two layers:
+#   * Engine-agnostic knobs (`min_audio_duration`, `max_audio_duration`)
+#     configure the Transcriber's recording state machine, not the engine.
+#   * Engine-specific params live under `stt.<engine>.*`. Only the
+#     sub-block matching `engine:` is read; the other sub-blocks sit
+#     alongside so toggling engines is a single-line change at the top.
+#
+# Each sub-block's keys map 1:1 to the engine class's __init__ signature.
+# A typo'd key surfaces as `TypeError: unexpected keyword argument` at
+# startup — fail loud, not silent.
 stt:
-  engine: "faster-whisper"      # Only "faster-whisper" is wired today.
-  model: "tiny.en"              # tiny / tiny.en / base / base.en / small.en / ...
-                                # `.en` variants are smaller, English-only, slightly faster.
-                                # First use downloads from HuggingFace (~75 MB for tiny.en).
-  compute_type: "int8"          # int8 (Pi-friendly) | int8_float16 | float32 (max accuracy)
-  language: "en"                # ISO code, or null to auto-detect each utterance
-  beam_size: 1                  # 1 (greedy) recommended on Pi; 5 doubles inference time
+  engine: "faster-whisper"      # "faster-whisper" (local) | "openai" (cloud)
+
+  # Engine-agnostic
   min_audio_duration: 0.3       # Drop utterances shorter than this — Whisper hallucinates
                                 # on tiny clips ("Thanks for watching!" is the canonical case)
   max_audio_duration: 30.0      # Hard cap on a single recording (seconds)
-  cpu_threads: 4                # Pi 4B has 4 cores. 0 ("auto") sometimes resolves to 1 or 2
+
+  # Local engine: faster-whisper (CTranslate2-backed, runs on-device).
+  faster-whisper:
+    model: "tiny.en"            # tiny / tiny.en / base / base.en / small / small.en / ...
+                                # `.en` variants are English-only, smaller, slightly faster.
+                                # Multilingual variants (no `.en`) handle code-switched
+                                # speech (e.g. en/hi). First use downloads from
+                                # HuggingFace (~75 MB for tiny.en, ~145 MB for base).
+    compute_type: "int8"        # int8 (Pi-friendly) | int8_float16 | float32 (max accuracy)
+    language: "en"              # ISO code, or null to auto-detect each utterance
+    beam_size: 1                # 1 (greedy) recommended on Pi; 5 doubles inference time
+    cpu_threads: 4              # Pi 4B has 4 cores. 0 ("auto") sometimes resolves to 1 or 2
                                 # in CTranslate2 ARM builds — pin it to remove the variance.
-                                # Cap below 4 if you want headroom for the realtime audio loop.
-  cache_dir: null               # Where model weights live; null = HuggingFace default cache
+    cache_dir: null             # Where model weights live; null = HuggingFace default cache
+
+  # Cloud engine: OpenAI audio.transcriptions API.
+  # `gpt-4o-mini-transcribe` is usually the right default — half the
+  # price of whisper-1, comparable accuracy, often lower latency.
+  openai:
+    model: "gpt-4o-mini-transcribe"   # whisper-1 / gpt-4o-transcribe / gpt-4o-mini-transcribe
+    language: null              # ISO code, or null to auto-detect (recommended for hi/en mix)
+    prompt: null                # Optional priming text to bias the decoder
+    timeout: 15.0               # Per-request timeout in seconds
+    api_key: null               # null = fall back to top-level openai.api_key / OPENAI_API_KEY env
+    base_url: null              # null = OpenAI default; set for OpenAI-compatible proxies
 
 # Logging Configuration
 logging:
