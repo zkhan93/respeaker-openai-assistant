@@ -5,31 +5,43 @@ Anywhere else in the system, ducking is a side-effect of publishing the
 right event on the bus — :meth:`DuckController.attach` translates events
 into ``claim`` / ``release`` calls.
 
-Why a refcount instead of a boolean:
+Counting refcount per reason
+----------------------------
 
-    Multiple stacking conditions can demand a duck at the same time
-    (the user said "alexa" *while* the assistant is still speaking the
-    last reply, or an alarm fires during a conversation). A boolean
-    flickers — refcount stacks. Music stays ducked while *any* reason
-    is active and only un-ducks when the last one releases.
+Each reason carries an integer count of outstanding claims. ``claim``
+increments; ``release`` decrements; the reason disappears when the count
+hits zero. Music stays ducked while ANY reason has count > 0.
+
+Why counting (not just a set of keys): when the user interrupts the
+assistant mid-speech, ConversationManager publishes
+``conversation_turn_started`` for the new turn AND
+``conversation_turn_ended`` for the old one. With a plain set, the
+release would briefly drop the only key and unduck the music for a
+few milliseconds before the new claim re-ducks. With a count, the
+sequence claim→release goes 1→2→1, and the music stays ducked
+throughout. (Order still matters — see ConversationManager's
+interrupt path: it publishes the new turn_started *before* the old
+turn_ended.)
 
 Reasons (string keys; loosely structured):
 
-* ``"session"`` — held while a conversation is active. Claimed on
-  ``conversation_turn_started`` (the canonical "a turn just began"
-  signal from :class:`ConversationManager`); released on
-  ``conversation_ended``. The failsafe is the backstop for the rare
-  case where the manager wedges and never emits ``conversation_ended``.
+* ``"session"`` — held for the duration of a single turn. Claimed on
+  ``conversation_turn_started`` and released on
+  ``conversation_turn_ended`` (any outcome — completed, empty,
+  failed, interrupted, error). Music unducks at the end of every
+  turn. The next hotword re-ducks via the next ``turn_started``.
+  ``conversation_ended`` also releases ``"session"`` defensively, in
+  case ConversationManager fires it without a matching turn_ended
+  pair (shutdown mid-turn, idle-timeout sweep, etc.).
 * ``"speaker"`` — held while ``SpeakerManager`` has audio playing. Same
   event for TTS, alarms, timers, anything else that goes through the
   speaker; no per-source branching needed.
 * future: ``"alarm"`` — only if alarms ever play *outside* SpeakerManager.
 
-The activity-aware failsafe (see :meth:`heartbeat`) protects against
-ConversationManager bugs: if it never emits ``conversation_ended`` but
-the user is clearly still talking / the agent is clearly still
-speaking, we hold the duck. Only when nothing has happened for the
-timeout does the failsafe force-release.
+The activity-aware failsafe (see :meth:`heartbeat`) is now purely a
+backstop for "ConversationManager wedged mid-turn and never emitted
+turn_ended". With per-turn ducking it should fire approximately never;
+its timeout can be raised without affecting normal flow.
 """
 
 from __future__ import annotations
@@ -37,6 +49,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
@@ -53,8 +66,21 @@ logger = logging.getLogger(__name__)
 _FAILSAFE_REASONS = frozenset({"session"})
 
 
+@dataclass
+class _ReasonState:
+    """Per-reason refcount + last-heartbeat timestamp.
+
+    ``count`` is the number of outstanding claims. The reason is
+    "active" while ``count > 0``. ``last_heartbeat`` is monotonic time
+    used by the failsafe sweep.
+    """
+
+    count: int
+    last_heartbeat: float
+
+
 class DuckController:
-    """Stack-based duck policy with an activity-aware failsafe."""
+    """Counting-refcount duck policy with an activity-aware failsafe."""
 
     def __init__(
         self,
@@ -74,9 +100,11 @@ class DuckController:
                 they're advisory (mpv volume changes apply instantly);
                 kept in the API so a future stepped-fade implementation
                 inside MusicConsumer doesn't need a public-API change.
-            session_timeout_s: How long ``"session"`` (or any other
-                failsafe-eligible reason) can go without a heartbeat
-                before being force-released. Q3 default.
+            session_timeout_s: How long a failsafe-eligible reason can
+                go without a heartbeat before being force-released. With
+                per-turn ducking this is a true backstop (turn_ended
+                releases ``"session"`` deterministically); the timeout
+                only matters if ConversationManager wedges.
         """
         self._music = music
         self._target_volume = target_volume
@@ -85,9 +113,10 @@ class DuckController:
         self._session_timeout_s = session_timeout_s
 
         self._lock = threading.Lock()
-        # reason → last activity timestamp (monotonic). The set of keys
-        # IS the set of active reasons; values are heartbeat times.
-        self._reasons: dict[str, float] = {}
+        # reason → state (count + last_heartbeat). A reason is present
+        # iff its count > 0; release pops the entry when the count
+        # drops to zero.
+        self._reasons: dict[str, _ReasonState] = {}
 
         self._stop_event = threading.Event()
         self._failsafe_thread: Optional[threading.Thread] = None
@@ -100,38 +129,68 @@ class DuckController:
     # ----- core API -----------------------------------------------------------
 
     def claim(self, reason: str) -> None:
-        """Add ``reason`` to the active set; duck if this is the first."""
+        """Add one outstanding claim for ``reason``; duck if first overall."""
         with self._lock:
             should_duck = not self._reasons
-            self._reasons[reason] = time.monotonic()
+            now = time.monotonic()
+            state = self._reasons.get(reason)
+            if state is None:
+                self._reasons[reason] = _ReasonState(count=1, last_heartbeat=now)
+                new_count = 1
+            else:
+                state.count += 1
+                state.last_heartbeat = now
+                new_count = state.count
         if should_duck:
-            logger.info("duck: claim=%r → ducking music", reason)
+            logger.info("duck: claim=%r (count=%d) → ducking music", reason, new_count)
             self._music.duck(target_volume=self._target_volume, fade_ms=self._fade_in_ms)
         else:
-            logger.debug("duck: claim=%r (reasons=%s)", reason, list(self._reasons))
+            logger.debug(
+                "duck: claim=%r (count=%d, active=%s)",
+                reason,
+                new_count,
+                self._snapshot_locked_for_log(),
+            )
 
     def release(self, reason: str) -> None:
-        """Remove ``reason``; unduck if it was the last one."""
+        """Decrement ``reason``'s count; unduck if no reasons remain."""
         with self._lock:
-            existed = self._reasons.pop(reason, None) is not None
-            should_unduck = existed and not self._reasons
+            state = self._reasons.get(reason)
+            if state is None or state.count <= 0:
+                # Releasing something that was never claimed (or already
+                # fully released). Common when ``conversation_ended`` is
+                # emitted defensively after turn_ended already drained
+                # the count — log at debug, no-op.
+                logger.debug("duck: release=%r ignored (not held)", reason)
+                return
+            state.count -= 1
+            new_count = state.count
+            if new_count == 0:
+                del self._reasons[reason]
+            should_unduck = not self._reasons
         if should_unduck:
-            logger.info("duck: release=%r → unducking music", reason)
+            logger.info("duck: release=%r (count=0) → unducking music", reason)
             self._music.unduck(fade_ms=self._fade_out_ms)
-        elif existed:
-            logger.debug("duck: release=%r (still active=%s)", reason, list(self._reasons))
+        else:
+            logger.debug(
+                "duck: release=%r (count=%d, active=%s)",
+                reason,
+                new_count,
+                self.active_reasons,
+            )
 
     def heartbeat(self, reason: str) -> None:
-        """Refresh activity timestamp for ``reason`` if it's currently held.
+        """Refresh the heartbeat timestamp for ``reason`` if currently held.
 
         Called by :meth:`attach` from every event that signals
         "something is still happening" so the failsafe doesn't time
-        out mid-conversation. No-op if the reason isn't currently held
-        (we don't claim from heartbeats).
+        out mid-turn. No-op if the reason isn't currently held — we
+        don't claim from heartbeats.
         """
         with self._lock:
-            if reason in self._reasons:
-                self._reasons[reason] = time.monotonic()
+            state = self._reasons.get(reason)
+            if state is not None and state.count > 0:
+                state.last_heartbeat = time.monotonic()
 
     @property
     def is_ducked(self) -> bool:
@@ -140,30 +199,40 @@ class DuckController:
 
     @property
     def active_reasons(self) -> list[str]:
+        """List of currently-held reason names. Order is insertion order."""
         with self._lock:
-            return list(self._reasons)
+            return list(self._reasons.keys())
+
+    def _snapshot_locked_for_log(self) -> dict[str, int]:
+        """Caller MUST hold ``_lock``. Returns ``reason → count`` for logging."""
+        return {r: s.count for r, s in self._reasons.items()}
 
     # ----- event-bus wiring ---------------------------------------------------
 
     def attach(self, event_bus: "EventBus") -> None:
         """Subscribe to the bus so ducking happens automatically.
 
-        The mapping is:
+        Per-turn ducking model:
 
-        * ``conversation_turn_started`` → claim ``"session"`` (idempotent
-          — subsequent turns within the same session just heartbeat).
-        * ``conversation_ended``        → release ``"session"``.
-        * ``speaking_started``          → claim ``"speaker"``.
-        * ``speaking_stopped``          → release ``"speaker"``.
-        * voice / transcription / hotword / turn events → heartbeats
-          for ``"session"`` so the failsafe never fires mid-conversation.
+        * ``conversation_turn_started`` → ``claim("session")``  (one
+          per turn, including subsequent turns within the same
+          conversation; the count stacks during interruption).
+        * ``conversation_turn_ended``   → ``release("session")``  (one
+          per turn, in all five outcomes: completed, empty_transcript,
+          stt_failed, interrupted, error).
+        * ``speaking_started`` / ``speaking_stopped`` → claim / release
+          ``"speaker"``.
+        * ``conversation_ended`` → defensive ``release("session")``.
+          Normally a no-op (turn_ended already drained the count); only
+          actually does something on shutdown mid-turn or if CM's idle
+          sweep fires while a turn is somehow still in flight.
+        * voice / transcription / hotword / turn events → heartbeat
+          ``"session"`` so the failsafe doesn't trip during a long
+          single utterance or slow LLM call within a turn.
 
-        :class:`ConversationManager` is the canonical source of
-        ``"session"`` — DuckController used to react directly to
-        ``hotword_detected``, but that was a stand-in before
-        ConversationManager existed. The failsafe loop remains as a
-        safety net in case ConversationManager wedges and never emits
-        ``conversation_ended``.
+        The failsafe loop remains as the last-resort backstop for
+        "ConversationManager wedged mid-turn and never emitted
+        turn_ended" — under normal flow it should never fire.
         """
         if self._event_bus is not None:
             raise RuntimeError("DuckController.attach called twice")
@@ -171,10 +240,9 @@ class DuckController:
         self._event_bus = event_bus
 
         def on_hotword(_event: Any) -> None:
-            # ConversationManager owns the claim; we only heartbeat to
-            # keep the failsafe alive (the claim already happens via
+            # Heartbeat only; the actual claim happens via
             # conversation_turn_started, which CM publishes immediately
-            # after handling the hotword).
+            # after this handler returns.
             self.heartbeat("session")
 
         def on_voice_started(_event: Any) -> None:
@@ -187,9 +255,6 @@ class DuckController:
             self.heartbeat("session")
 
         def on_transcription_failed(_event: Any) -> None:
-            # An empty / failed STT result doesn't necessarily end the
-            # session — the user might be re-trying. Keep the duck
-            # alive via heartbeat; the failsafe handles dead air.
             self.heartbeat("session")
 
         def on_speaking_started(_event: Any) -> None:
@@ -201,16 +266,23 @@ class DuckController:
             self.release("speaker")
 
         def on_conversation_turn_started(_event: Any) -> None:
-            # First turn of a conversation: claim "session". Subsequent
-            # turns within the same conversation: claim is a no-op
-            # (already in the active set), but it refreshes the
-            # heartbeat — which is exactly what we want.
+            # One claim per turn. Counting refcount: during
+            # interruption, CM publishes the new turn's start *before*
+            # the old turn's end, so the count goes 1→2→1 and music
+            # stays ducked across the boundary.
             self.claim("session")
 
+        def on_conversation_turn_ended(_event: Any) -> None:
+            # One release per turn, all outcomes (completed, empty,
+            # failed, interrupted, error). Music unducks at end of
+            # turn unless another turn is already in flight.
+            self.release("session")
+
         def on_conversation_ended(_event: Any) -> None:
-            # ConversationManager fires this on idle timeout / detach /
-            # explicit end. We release immediately rather than wait
-            # for the failsafe.
+            # Defensive: under normal flow turn_ended already released
+            # session. This catches "session was held when CM shut
+            # down / idle-timeout-swept while a turn was somehow
+            # still in flight". release() ignores no-op decrements.
             self.release("session")
 
         wirings: list[tuple[str, Callable[[Any], None]]] = [
@@ -222,6 +294,7 @@ class DuckController:
             ("speaking_started", on_speaking_started),
             ("speaking_stopped", on_speaking_stopped),
             ("conversation_turn_started", on_conversation_turn_started),
+            ("conversation_turn_ended", on_conversation_turn_ended),
             ("conversation_ended", on_conversation_ended),
         ]
         for event_type, handler in wirings:
@@ -260,27 +333,35 @@ class DuckController:
         """Periodic sweep that force-releases stale failsafe-eligible reasons.
 
         Runs on its own daemon thread. Wakes once a second, checks every
-        reason in :data:`_FAILSAFE_REASONS`, and releases any that has
-        gone longer than the timeout without a heartbeat.
+        reason in :data:`_FAILSAFE_REASONS`, and force-releases any that
+        has gone longer than the timeout without a heartbeat.
 
         Crucially, ``"speaker"`` is *not* failsafe-eligible: while the
         assistant is speaking back, ``speaking_started`` keeps that
         reason alive; ``speaking_stopped`` releases it deterministically.
         We don't want the failsafe to second-guess that.
+
+        Force-release fully drains the count (vs. ``release()`` which
+        decrements by one). After the failsafe fires, any subsequent
+        ``release()`` from the bus is a defensive no-op.
         """
         while not self._stop_event.wait(timeout=1.0):
             now = time.monotonic()
-            stale: list[str] = []
+            stale: list[tuple[str, int]] = []
             with self._lock:
-                for reason, last_seen in list(self._reasons.items()):
+                for reason, state in list(self._reasons.items()):
                     if reason not in _FAILSAFE_REASONS:
                         continue
-                    if now - last_seen > self._session_timeout_s:
-                        stale.append(reason)
-            for reason in stale:
+                    if now - state.last_heartbeat > self._session_timeout_s:
+                        stale.append((reason, state.count))
+            for reason, count in stale:
                 logger.warning(
-                    "duck: failsafe release %r (no heartbeat for %.1fs)",
+                    "duck: failsafe release %r (count=%d, no heartbeat for %.1fs)",
                     reason,
+                    count,
                     self._session_timeout_s,
                 )
-                self.release(reason)
+                # Drain the count fully — failsafe means "this reason
+                # is wedged, don't care how many outstanding claims".
+                for _ in range(count):
+                    self.release(reason)

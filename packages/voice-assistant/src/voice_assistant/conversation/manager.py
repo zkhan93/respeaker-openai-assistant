@@ -22,7 +22,7 @@ What this owns
   checkpointer can thread memory through.
 * :class:`ConversationStartedEvent` /
   :class:`ConversationTurnStartedEvent` /
-  :class:`ConversationTurnCompletedEvent` /
+  :class:`ConversationTurnEndedEvent` (one per turn, in all outcomes) /
   :class:`ConversationEndedEvent` emission on the bus.
 
 What this does NOT own
@@ -88,7 +88,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Optional
 from ..core.event_bus import (
     ConversationEndedEvent,
     ConversationStartedEvent,
-    ConversationTurnCompletedEvent,
+    ConversationTurnEndedEvent,
     ConversationTurnStartedEvent,
     HotwordEvent,
     SpeakingStoppedEvent,
@@ -176,15 +176,11 @@ class ConversationManager:
         # every new turn so an old engine that holds onto its context
         # cannot affect the next turn.
         self._current_cancel: Optional[threading.Event] = None
-        # Telemetry captured when transcription completes, consumed
-        # when the matching speaking_stopped lands.
-        self._pending_turn_meta: Optional[_TurnMeta] = None
-        # Reply text accumulated as the engine yields chunks. Read by
-        # on_speaking_stopped to populate ConversationTurnCompletedEvent.
-        # Append happens inside the audio_chunks generator (which runs
-        # on the speaker's session thread, not the reply worker), so
-        # all access is lock-protected.
-        self._completed_reply_text: str = ""
+        # The current turn's record. Set at turn_started, cleared at
+        # turn_ended. Populated incrementally by the various handlers
+        # (STT result, reply chunks, speaker duration) — its final
+        # state becomes the ConversationTurnEndedEvent payload.
+        self._current_turn: Optional[_TurnMeta] = None
 
         # Worker thread for ReplyEngine + TTS streaming. Bus callbacks
         # must return promptly, and TTS can take seconds; we don't
@@ -265,7 +261,9 @@ class ConversationManager:
         # callers always do their own cleanup pass (see assistant_flow).
         self._cancel_in_flight_reply()
 
-        ended = self._finalize_session(reason="shutdown")
+        in_flight, ended = self._finalize_session(reason="shutdown")
+        if in_flight is not None:
+            self._publish_turn_ended(in_flight, outcome="interrupted")
         if ended is not None:
             self._publish(ended)
         logger.info("ConversationManager detached")
@@ -299,11 +297,14 @@ class ConversationManager:
         sweep handle this.
         """
         self._cancel_in_flight_reply()
-        ended = self._finalize_session(reason=reason)
+        in_flight, ended = self._finalize_session(reason=reason)
         if ended is not None:
             # Move LED to "off" outside the lock so the publish doesn't
             # contend with hardware writes.
             self._led.set_pattern("off")
+            if in_flight is not None:
+                outcome = "error" if reason == "error" else "interrupted"
+                self._publish_turn_ended(in_flight, outcome=outcome)
             self._publish(ended)
 
     def cancel_current_reply(self) -> None:
@@ -318,7 +319,7 @@ class ConversationManager:
     # ----- event handlers ----------------------------------------------------
 
     def _on_hotword(self, event: HotwordEvent) -> None:
-        """Fresh hotword: reset to listening, rotate thread if needed."""
+        """Fresh hotword: start a new turn (and end the previous one if mid-flight)."""
         now = time.monotonic()
 
         with self._lock:
@@ -340,32 +341,38 @@ class ConversationManager:
             self._last_activity = now
 
             self._state = "listening"
-            # Replace the per-turn cancel flag. Any previous engine
-            # still holding the old Event sees its cancel.set() below
-            # but its yields will be ignored because the worker thread
-            # checks state and bails.
+            # Replace the per-turn cancel flag. The OLD cancel will be
+            # set below so any in-flight ReplyEngine bails. The new one
+            # is fresh for the new turn.
             old_cancel = self._current_cancel
             self._current_cancel = threading.Event()
+
+            # If a turn was in progress, capture its meta so we can
+            # publish turn_ended(interrupted) for it. Replace
+            # _current_turn with a fresh record for the new turn —
+            # this MUST happen here so handlers that fire after the
+            # interrupt (the old speaker's speaking_stopped, late STT
+            # results) don't accidentally mutate the new turn's data.
+            interrupted_meta = self._current_turn
             new_thread_id = self._thread_id
             new_turn_index = self._turn_index
+            self._current_turn = _TurnMeta(
+                thread_id=new_thread_id,
+                turn_index=new_turn_index,
+            )
 
         # Side-effects outside the lock.
 
         if previous_state == "speaking":
-            # Speaker.interrupt() will fire speaking_stopped(reason="interrupted").
-            # By the time that handler runs, _state == "listening", so
-            # the speaking_stopped branch knows to skip the
-            # "completed turn" emission.
+            # Cuts the in-flight speaker; speaking_stopped(interrupted)
+            # will fire on a separate thread. By the time
+            # _on_speaking_stopped runs, _state is already "listening"
+            # (and _current_turn refers to the new turn), so it
+            # short-circuits.
             self._speaker.interrupt()
 
         if old_cancel is not None:
             old_cancel.set()
-
-        # Drop any stale turn meta from the previous transcription→speak
-        # window — the interrupt killed that turn before it could emit
-        # a "completed" event.
-        with self._lock:
-            self._pending_turn_meta = None
 
         if is_new_conversation:
             self._publish(
@@ -389,6 +396,11 @@ class ConversationManager:
                 )
             )
 
+        # Per-turn ducking: publish turn_started for the NEW turn FIRST
+        # so DuckController's session refcount goes from 1→2 (or 0→1
+        # for the very first turn). Only THEN publish turn_ended for
+        # the previous turn (refcount 2→1). This ordering prevents a
+        # momentary unduck-blip during interruption.
         self._publish(
             ConversationTurnStartedEvent(
                 timestamp=datetime.now(),
@@ -398,6 +410,9 @@ class ConversationManager:
                 hotword_score=event.score,
             )
         )
+
+        if interrupted_meta is not None:
+            self._publish_turn_ended(interrupted_meta, outcome="interrupted")
 
         self._led.set_pattern("listen")
         if previous_state in ("thinking", "speaking"):
@@ -442,47 +457,63 @@ class ConversationManager:
             logger.info("→ thinking (voice was %.2fs; awaiting transcription)", event.duration)
 
     def _on_transcription_completed(self, event: TranscriptionCompletedEvent) -> None:
-        """Transcript in hand → kick off ReplyEngine + TTS on a worker thread."""
+        """Transcript in hand → either start the reply or end the turn (empty result)."""
         text = event.text.strip()
+
+        ended_meta: Optional[_TurnMeta] = None
+        ctx: Optional[ReplyContext] = None
 
         with self._lock:
             self._last_activity = time.monotonic()
-            if self._state != "thinking":
+            if self._state != "thinking" or self._current_turn is None:
                 # User interrupted mid-think (or two utterances raced).
                 # The Transcriber already drops stale results via its
                 # session counter; this is a defensive second check.
                 logger.info(
-                    "ignoring transcription %r — state is %s, not 'thinking'",
+                    "ignoring transcription %r — state is %s, current_turn=%s",
                     text,
                     self._state,
+                    "set" if self._current_turn is not None else "None",
                 )
                 return
+
+            # Fold STT results into the current turn's record so any
+            # outcome (including a later interrupt) carries the
+            # transcript and timing.
+            self._current_turn.transcript = text
+            self._current_turn.audio_duration = event.audio_duration
+            self._current_turn.inference_time = event.inference_time
+
             if not text:
                 # Whisper returned empty (silence / unintelligible).
-                # Skip the speak phase, go straight back to idle.
+                # Skip the speak phase, end the turn here.
                 self._state = "idle"
-                logger.info("→ idle (empty transcript after %.2fs of audio)", event.audio_duration)
-                self._led.set_pattern("off")
-                return
+                ended_meta = self._current_turn
+                self._current_turn = None
+            else:
+                self._state = "speaking"
+                ctx = ReplyContext(
+                    transcript=text,
+                    thread_id=self._thread_id or "<unset>",
+                    turn_index=self._turn_index,
+                    is_new_conversation=(self._turn_count_in_session == 1),
+                    audio_duration=event.audio_duration,
+                    inference_time=event.inference_time,
+                    cancel=self._current_cancel or threading.Event(),
+                )
 
-            self._state = "speaking"
-            ctx = ReplyContext(
-                transcript=text,
-                thread_id=self._thread_id or "<unset>",
-                turn_index=self._turn_index,
-                is_new_conversation=(self._turn_count_in_session == 1),
-                audio_duration=event.audio_duration,
-                inference_time=event.inference_time,
-                cancel=self._current_cancel or threading.Event(),
-            )
-            self._pending_turn_meta = _TurnMeta(
-                thread_id=ctx.thread_id,
-                turn_index=ctx.turn_index,
-                transcript=text,
-                audio_duration=event.audio_duration,
-                inference_time=event.inference_time,
-            )
+        # Outside the lock.
 
+        if ended_meta is not None:
+            logger.info(
+                "→ idle (empty transcript after %.2fs of audio)",
+                ended_meta.audio_duration,
+            )
+            self._led.set_pattern("off")
+            self._publish_turn_ended(ended_meta, outcome="empty_transcript")
+            return
+
+        assert ctx is not None  # narrowing for type checkers
         self._led.set_pattern("speak")
         logger.info(
             "transcribed in %.2fs: %r → invoking %s (thread=%s turn=%d)",
@@ -503,11 +534,15 @@ class ConversationManager:
         worker.start()
 
     def _on_transcription_failed(self, event: TranscriptionFailedEvent) -> None:
-        """STT crashed → log it and drop back to idle without speaking."""
+        """STT crashed → emit turn_ended(stt_failed) and drop back to idle."""
+        ended_meta: Optional[_TurnMeta] = None
         with self._lock:
             self._last_activity = time.monotonic()
-            if self._state != "thinking":
+            if self._state != "thinking" or self._current_turn is None:
                 return
+            self._current_turn.audio_duration = event.audio_duration
+            ended_meta = self._current_turn
+            self._current_turn = None
             self._state = "idle"
 
         logger.error(
@@ -516,49 +551,43 @@ class ConversationManager:
             event.error,
         )
         self._led.set_pattern("off")
+        self._publish_turn_ended(ended_meta, outcome="stt_failed")
 
     def _on_speaking_stopped(self, event: SpeakingStoppedEvent) -> None:
-        """Speak phase ends. Emit turn-completed only on natural completion."""
-        completed_meta: Optional[_TurnMeta] = None
-        completed_reply: str = ""
-        fire = False
+        """Speak phase ends. Emit turn_ended(completed) on natural completion only.
+
+        ``reason="interrupted"`` is owned by either the interrupting
+        hotword (which already published ``turn_ended(interrupted)``)
+        or the reply error path (which publishes
+        ``turn_ended(error)``). Either way, this handler is a no-op
+        on interrupted speakers.
+        """
+        ended_meta: Optional[_TurnMeta] = None
 
         with self._lock:
             self._last_activity = time.monotonic()
-            if self._state == "speaking":
-                self._state = "idle"
-                fire = True
-                # Only count as a "completed turn" if the speaker
-                # finished naturally. An interrupted speaker means the
-                # next turn has already started (or end_conversation
-                # ran); the interrupting handler owns the next event.
-                if event.reason == "completed" and self._pending_turn_meta is not None:
-                    completed_meta = self._pending_turn_meta
-                    completed_reply = self._completed_reply_text
-                self._pending_turn_meta = None
-                self._completed_reply_text = ""
+            if self._state != "speaking" or self._current_turn is None:
+                # State already moved on (interrupted by a fresh
+                # hotword, or _run_reply's error path already cleared
+                # _current_turn). Nothing to do.
+                return
+            if event.reason != "completed":
+                # Speaker was interrupted but somehow we're still in
+                # "speaking" with a current_turn — defensive: don't
+                # fire turn_ended here; the interrupter owns it.
+                return
+            self._current_turn.speak_duration = event.duration
+            ended_meta = self._current_turn
+            self._current_turn = None
+            self._state = "idle"
 
-        if fire:
-            self._led.set_pattern("off")
-            logger.info(
-                "→ idle (speak %s after %.2fs)",
-                event.reason,
-                event.duration,
-            )
-
-        if completed_meta is not None:
-            self._publish(
-                ConversationTurnCompletedEvent(
-                    timestamp=datetime.now(),
-                    thread_id=completed_meta.thread_id,
-                    turn_index=completed_meta.turn_index,
-                    transcript=completed_meta.transcript,
-                    reply=completed_reply,
-                    audio_duration=completed_meta.audio_duration,
-                    inference_time=completed_meta.inference_time,
-                    speak_duration=event.duration,
-                )
-            )
+        self._led.set_pattern("off")
+        logger.info(
+            "→ idle (speak %s after %.2fs)",
+            event.reason,
+            event.duration,
+        )
+        self._publish_turn_ended(ended_meta, outcome="completed")
 
     # ----- reply pipeline ----------------------------------------------------
 
@@ -583,16 +612,17 @@ class ConversationManager:
            treats this as ``reason="interrupted"`` rather than a
            natural ``"completed"`` end. That's important because
            ``_on_speaking_stopped`` only publishes
-           ``ConversationTurnCompletedEvent`` on a clean
-           ``"completed"`` end — re-raising prevents a bogus
-           "completed" event for a turn that actually crashed
-           (and ``_finalize_session`` has already cleared state, so
-           the handler will see ``state == "idle"`` and skip the
-           transition entirely).
+           ``ConversationTurnEndedEvent(outcome="completed")`` on a
+           clean ``"completed"`` end — re-raising prevents a bogus
+           "completed" event for a turn that actually crashed (and
+           the error path has already cleared ``_current_turn``, so
+           the handler will see no current turn and skip).
+
+        Per-user policy: a ReplyEngine / TTS crash ends only the
+        TURN, not the whole conversation. The conversation thread
+        (and its long-running context, e.g. an LLM agent's memory)
+        survives so the next hotword resumes the same conversation.
         """
-        # Reset the running reply buffer for this turn.
-        with self._lock:
-            self._completed_reply_text = ""
 
         def audio_chunks() -> Iterator[bytes]:
             try:
@@ -602,27 +632,31 @@ class ConversationManager:
                     chunk = (raw or "").strip()
                     if not chunk:
                         continue
-                    # Accumulate under the lock — this generator runs
-                    # on the speaker's session thread, while
-                    # on_speaking_stopped runs on a bus dispatch
-                    # thread; both touch _completed_reply_text.
+                    # Append to the current turn's reply text under the
+                    # lock — this generator runs on the speaker's
+                    # session thread, while on_speaking_stopped runs
+                    # on a bus dispatch thread; both touch the meta.
+                    # If a fresh hotword has already swapped
+                    # _current_turn out from under us, our chunks no
+                    # longer belong to it; just accumulate locally and
+                    # let the cancel flag stop us on the next iter.
                     with self._lock:
-                        if self._completed_reply_text:
-                            self._completed_reply_text = self._completed_reply_text + " " + chunk
-                        else:
-                            self._completed_reply_text = chunk
+                        meta = self._current_turn
+                        if meta is not None and meta.turn_index == ctx.turn_index:
+                            if meta.reply is None:
+                                meta.reply = chunk
+                            else:
+                                meta.reply = meta.reply + " " + chunk
                     for pcm in self._tts.synthesize(chunk):
                         if ctx.cancel.is_set():
                             return
                         yield pcm
             except Exception:
                 logger.exception("ReplyEngine / TTS crashed mid-turn")
-                # Force-end the session immediately so DuckController
-                # & friends release "session" without waiting for the
-                # idle-timeout sweep. Then re-raise so the speaker
-                # marks this session as "interrupted" (see method
-                # docstring).
-                self.end_conversation(reason="error")
+                self._finalize_turn_on_error(ctx)
+                # Re-raise so the speaker session terminates with
+                # reason="interrupted"; on_speaking_stopped will then
+                # see _current_turn cleared and skip its emission.
                 raise
 
         try:
@@ -631,8 +665,36 @@ class ConversationManager:
                 sample_rate=self._tts.sample_rate,
             )
         except Exception:
-            logger.exception("speaker.play() raised; forcing session end")
-            self.end_conversation(reason="error")
+            # The speaker re-raised the audio_chunks crash (or its
+            # own playback raised). Either way, _finalize_turn_on_error
+            # already ran inside audio_chunks. Just log here.
+            logger.exception("speaker.play() raised; turn already ended")
+
+    def _finalize_turn_on_error(self, ctx: ReplyContext) -> None:
+        """End the current turn with outcome="error" — does NOT end the conversation.
+
+        Called from inside ``audio_chunks`` when the ReplyEngine or TTS
+        raises. Idempotent guard: only finalizes if ``_current_turn``
+        still refers to *this* turn (a fresh hotword may have already
+        swapped it out, in which case the interrupt path already
+        published turn_ended for it).
+        """
+        ended_meta: Optional[_TurnMeta] = None
+        with self._lock:
+            self._last_activity = time.monotonic()
+            if self._current_turn is None:
+                return
+            if self._current_turn.turn_index != ctx.turn_index:
+                # A newer turn took over already; the interrupt path
+                # owns the old turn's turn_ended.
+                return
+            ended_meta = self._current_turn
+            self._current_turn = None
+            if self._state == "speaking":
+                self._state = "idle"
+
+        self._led.set_pattern("off")
+        self._publish_turn_ended(ended_meta, outcome="error")
 
     def _cancel_in_flight_reply(self) -> None:
         """Set the per-turn cancel flag so the engine bails ASAP. No-op when idle."""
@@ -647,35 +709,51 @@ class ConversationManager:
         self,
         *,
         reason: str,
-    ) -> Optional[ConversationEndedEvent]:
-        """Tear down session bookkeeping and return the event to publish, or None.
+    ) -> tuple[Optional["_TurnMeta"], Optional[ConversationEndedEvent]]:
+        """Tear down session bookkeeping; return (in-flight turn, conv-ended).
 
-        Returns None when there is no active session to end (already
-        idle with no thread_id). Callers publish the returned event
-        outside the lock. Acquires :attr:`_lock` internally — callers
-        must NOT already hold it.
+        Returns ``(None, None)`` when there is no active session to end
+        (already idle with no thread_id). Otherwise:
+
+        * the first element is the in-flight ``_TurnMeta`` (or
+          ``None`` if no turn was in progress) — the caller should
+          publish a :class:`ConversationTurnEndedEvent` for it with
+          an appropriate outcome;
+        * the second is the :class:`ConversationEndedEvent` to publish.
+
+        Order matters at the call site: publish ``turn_ended`` for the
+        in-flight turn FIRST, then ``conversation_ended``, so
+        DuckController sees ``release(session)`` from turn_ended
+        rather than the defensive release(session) on
+        conversation_ended (which would still work — the defensive
+        release tolerates "already drained" — but the cleaner shape
+        keeps the count math obvious).
+
+        Callers publish events outside the lock. Acquires
+        :attr:`_lock` internally — callers must NOT already hold it.
         """
         with self._lock:
             if self._thread_id is None and self._state == "idle":
-                return None
+                return (None, None)
 
             ended_thread = self._thread_id or "<unset>"
             turn_count = self._turn_count_in_session
+            in_flight = self._current_turn
 
             # Reset state.
             self._state = "idle"
             self._thread_id = None
             self._turn_index = 0
             self._turn_count_in_session = 0
-            self._pending_turn_meta = None
-            self._completed_reply_text = ""
+            self._current_turn = None
 
-        return ConversationEndedEvent(
+        ended = ConversationEndedEvent(
             timestamp=datetime.now(),
             thread_id=ended_thread,
             reason=reason,
             turn_count=turn_count,
         )
+        return (in_flight, ended)
 
     # ----- idle-timeout sweep ------------------------------------------------
 
@@ -702,7 +780,19 @@ class ConversationManager:
                 logger.info(
                     "conversation idle for >%.1fs — ending session", self._session_timeout_s
                 )
-                ended = self._finalize_session(reason="idle_timeout")
+                # Idle sweep only runs when state == idle, so any
+                # _current_turn here is a leak (previous turn never
+                # ended cleanly). Defensively publish turn_ended for
+                # it before conversation_ended.
+                in_flight, ended = self._finalize_session(reason="idle_timeout")
+                if in_flight is not None:
+                    logger.warning(
+                        "idle sweep found stale in-flight turn %d for thread %s — "
+                        "publishing turn_ended(interrupted) defensively",
+                        in_flight.turn_index,
+                        in_flight.thread_id,
+                    )
+                    self._publish_turn_ended(in_flight, outcome="interrupted")
                 if ended is not None:
                     self._publish(ended)
 
@@ -713,7 +803,7 @@ class ConversationManager:
         type_map = {
             ConversationStartedEvent: "conversation_started",
             ConversationTurnStartedEvent: "conversation_turn_started",
-            ConversationTurnCompletedEvent: "conversation_turn_completed",
+            ConversationTurnEndedEvent: "conversation_turn_ended",
             ConversationEndedEvent: "conversation_ended",
         }
         event_type = type_map.get(type(event))
@@ -722,23 +812,69 @@ class ConversationManager:
             return
         self._event_bus.publish(event_type, event)
 
+    def _publish_turn_ended(
+        self,
+        meta: "_TurnMeta",
+        *,
+        outcome: str,
+    ) -> None:
+        """Publish a :class:`ConversationTurnEndedEvent` from a populated ``_TurnMeta``.
+
+        Just a convenience to keep the five end-paths terse and
+        consistent. ``outcome`` MUST be one of:
+        ``"completed" | "empty_transcript" | "stt_failed" |``
+        ``"interrupted" | "error"`` (matches the field's documented
+        enum on :class:`ConversationTurnEndedEvent`).
+        """
+        self._publish(
+            ConversationTurnEndedEvent(
+                timestamp=datetime.now(),
+                thread_id=meta.thread_id,
+                turn_index=meta.turn_index,
+                outcome=outcome,
+                transcript=meta.transcript,
+                reply=meta.reply,
+                audio_duration=meta.audio_duration,
+                inference_time=meta.inference_time,
+                speak_duration=meta.speak_duration,
+            )
+        )
+
 
 class _TurnMeta:
-    """Per-turn telemetry captured at transcription_completed, used at speaking_stopped."""
+    """Per-turn record built up from turn_started → turn_ended.
 
-    __slots__ = ("thread_id", "turn_index", "transcript", "audio_duration", "inference_time")
+    Created in :meth:`ConversationManager._on_hotword` (with placeholder
+    transcript/timing). Filled in progressively as the turn advances:
 
-    def __init__(
-        self,
-        *,
-        thread_id: str,
-        turn_index: int,
-        transcript: str,
-        audio_duration: float,
-        inference_time: float,
-    ) -> None:
-        self.thread_id = thread_id
-        self.turn_index = turn_index
-        self.transcript = transcript
-        self.audio_duration = audio_duration
-        self.inference_time = inference_time
+    * STT result lands → ``transcript``, ``audio_duration``, and
+      ``inference_time`` are filled.
+    * ReplyEngine yields chunks → each is appended to ``reply`` under
+      the manager's lock (the audio_chunks generator runs on the
+      speaker thread, on_speaking_stopped reads on the bus thread).
+    * Speaker session ends naturally → ``speak_duration`` is set
+      from the SpeakingStoppedEvent.
+
+    Whatever is filled when :class:`ConversationTurnEndedEvent` fires
+    becomes the event payload. ``None`` fields mean "we never got that
+    far in this turn".
+    """
+
+    __slots__ = (
+        "thread_id",
+        "turn_index",
+        "transcript",
+        "reply",
+        "audio_duration",
+        "inference_time",
+        "speak_duration",
+    )
+
+    def __init__(self, *, thread_id: str, turn_index: int) -> None:
+        self.thread_id: str = thread_id
+        self.turn_index: int = turn_index
+        self.transcript: Optional[str] = None
+        self.reply: Optional[str] = None  # None until the engine yields its first chunk
+        self.audio_duration: float = 0.0
+        self.inference_time: float = 0.0
+        self.speak_duration: Optional[float] = None

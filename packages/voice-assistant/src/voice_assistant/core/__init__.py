@@ -7,7 +7,7 @@ from .detection_service import VoiceDetectionService
 from .event_bus import (
     ConversationEndedEvent,
     ConversationStartedEvent,
-    ConversationTurnCompletedEvent,
+    ConversationTurnEndedEvent,
     ConversationTurnStartedEvent,
     EventBus,
     HotwordEvent,
@@ -33,7 +33,7 @@ __all__ = [
     "VoiceDetectionService",
     "ConversationEndedEvent",
     "ConversationStartedEvent",
-    "ConversationTurnCompletedEvent",
+    "ConversationTurnEndedEvent",
     "ConversationTurnStartedEvent",
     "EventBus",
     "HotwordEvent",

@@ -4,7 +4,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -115,25 +115,41 @@ class ConversationTurnStartedEvent:
 
 
 @dataclass
-class ConversationTurnCompletedEvent:
-    """Event emitted by ConversationManager once a turn's reply has finished speaking.
+class ConversationTurnEndedEvent:
+    """Event emitted by ConversationManager once a turn has terminated, for any reason.
 
-    Carries both the user's transcript and the assistant's full reply
-    text, plus timing for telemetry. Fires *after* ``speaking_stopped``
-    when the speaker session that played the reply ended naturally;
-    interrupted turns do not emit a "completed" event (the interrupting
-    hotword's ``ConversationTurnStartedEvent`` is the next thing on the
-    bus).
+    Fires once per :class:`ConversationTurnStartedEvent` — every turn
+    that begins ends with exactly one of these. The ``outcome`` field
+    discriminates the path:
+
+    * ``"completed"``         — happy path; TTS finished naturally.
+      ``transcript``, ``reply``, and ``speak_duration`` are all set.
+    * ``"empty_transcript"``  — STT returned silence / no speech.
+      ``transcript`` is the (empty / whitespace) text from STT;
+      ``reply`` and ``speak_duration`` are ``None``.
+    * ``"stt_failed"``        — STT raised. ``transcript``, ``reply``,
+      ``speak_duration`` all ``None``; ``inference_time`` is 0.
+    * ``"interrupted"``       — a fresh hotword arrived while this turn
+      was thinking or speaking. ``transcript`` may be set if STT had
+      already completed; ``reply`` may be partial (what the engine had
+      yielded before interruption).
+    * ``"error"``             — :class:`ReplyEngine` or TTS raised.
+      ``transcript`` is set; ``reply`` may be partial.
+
+    Per-turn ducking model: :class:`DuckController` releases the
+    ``"session"`` reason on this event regardless of outcome, so music
+    unducks at the end of every turn — see DuckController for details.
     """
 
     timestamp: datetime
     thread_id: str
     turn_index: int
-    transcript: str
-    reply: str
+    outcome: str  # "completed" | "empty_transcript" | "stt_failed" | "interrupted" | "error"
+    transcript: Optional[str]
+    reply: Optional[str]
     audio_duration: float
     inference_time: float
-    speak_duration: float
+    speak_duration: Optional[float]
 
 
 @dataclass

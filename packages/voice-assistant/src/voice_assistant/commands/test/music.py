@@ -21,8 +21,11 @@ goal here is to verify DuckController in isolation.
                                                                        (session held)
     Two paths from here, exercised by --end-mode:
 
-      end-mode = "explicit" (default): publish conversation_ended →
-        release("session") → music unducks immediately.
+      end-mode = "explicit" (default): publish conversation_turn_ended
+        → release("session") → music unducks immediately. This is the
+        per-turn ducking path that ConversationManager fires after
+        every turn, regardless of whether the conversation as a whole
+        is still alive (the ~30 min session timeout for memory).
       end-mode = "failsafe": no further events; after session_timeout
         the failsafe force-releases. Use --session-timeout 5 to keep
         the demo short.
@@ -39,7 +42,7 @@ from pathlib import Path
 from voice_assistant.config import load_config
 from voice_assistant.consumers.music import DuckController, MusicConsumer
 from voice_assistant.core.event_bus import (
-    ConversationEndedEvent,
+    ConversationTurnEndedEvent,
     ConversationTurnStartedEvent,
     EventBus,
     HotwordEvent,
@@ -64,9 +67,10 @@ def main(
             failsafe phase isn't a 30s wait. ``None`` keeps the config
             default.
         end_mode: ``"explicit"`` publishes a synthetic
-            ``conversation_ended`` event so the duck releases via the
-            normal path; ``"failsafe"`` publishes no further events so
-            the failsafe loop is exercised. Defaults to ``"explicit"``.
+            ``conversation_turn_ended`` event so the duck releases via
+            the normal per-turn path; ``"failsafe"`` publishes no
+            further events so the failsafe loop is exercised.
+            Defaults to ``"explicit"``.
     """
     if end_mode not in {"explicit", "failsafe"}:
         logger.error("end_mode must be 'explicit' or 'failsafe'; got %r", end_mode)
@@ -193,22 +197,27 @@ def main(
         time.sleep(0.3)
         log_state("post-speaking")
 
-        # ----- end of conversation -------------------------------
+        # ----- end of turn (per-turn ducking) -----------------------
         if end_mode == "explicit":
-            logger.info(">>> publishing conversation_ended (CM fired explicit end)")
+            logger.info(">>> publishing conversation_turn_ended (CM fired turn end)")
             event_bus.publish(
-                "conversation_ended",
-                ConversationEndedEvent(
+                "conversation_turn_ended",
+                ConversationTurnEndedEvent(
                     timestamp=datetime.now(),
                     thread_id="test-thread-1",
-                    reason="explicit",
-                    turn_count=1,
+                    turn_index=0,
+                    outcome="completed",
+                    transcript="hello",
+                    reply="hi there",
+                    audio_duration=1.0,
+                    inference_time=0.2,
+                    speak_duration=2.0,
                 ),
             )
             time.sleep(0.5)
-            log_state("post-conversation-ended")
+            log_state("post-turn-ended")
             if duck.is_ducked:
-                logger.error("expected music to unduck after conversation_ended")
+                logger.error("expected music to unduck after conversation_turn_ended")
                 return False
             log_state("final")
             return True
