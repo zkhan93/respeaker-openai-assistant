@@ -297,8 +297,15 @@ class DuckController:
             ("conversation_turn_ended", on_conversation_turn_ended),
             ("conversation_ended", on_conversation_ended),
         ]
+        # All handlers share one ordering domain (order_key=self) so the
+        # bus delivers them on a single worker in strict publish order.
+        # The refcount logic depends on this: e.g. a new turn's
+        # ``turn_started`` must be processed before the previous turn's
+        # ``turn_ended`` (the 1→2→1 count), and ``speaking_started``
+        # before ``speaking_stopped``. These are closures (no ``__self__``
+        # for the bus to group on), so the key must be passed explicitly.
         for event_type, handler in wirings:
-            event_bus.subscribe(event_type, handler)
+            event_bus.subscribe(event_type, handler, order_key=self)
             self._subscriptions.append((event_type, handler))
 
         self._stop_event.clear()

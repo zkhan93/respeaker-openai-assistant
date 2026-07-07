@@ -123,10 +123,14 @@ def main(hotword: str | None = None) -> bool:
         sd_notify("STOPPING=1")
         watchdog_stop.set()
         logger.info("shutting down")
+        # Stop producers (audio_handler publishes VAD events) before
+        # subscribers, then drain the bus so no worker is mid-callback
+        # while its component is torn down.
+        audio_handler.stop_stream()
         if broadcaster is not None:
             broadcaster.cleanup()
+        event_bus.shutdown()
         led_consumer.cleanup()
-        audio_handler.stop_stream()
         audio_handler.cleanup()
         logger.info("shutdown complete")
 
