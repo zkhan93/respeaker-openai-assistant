@@ -2,8 +2,17 @@
 
 This command is now a thin harness around :class:`ConversationManager`:
 it sets up the audio pipeline (capture, hotword, VAD, STT, TTS, LED,
-speaker), wires a :class:`EchoReplyEngine` as the reply strategy, and
-hands control to the manager.
+speaker), wires a :class:`ReplyEngine` (echo or agent) as the reply
+strategy, and hands control to the manager.
+
+Reply engine selection (``--reply-engine``):
+
+* ``echo``  — :class:`EchoReplyEngine`. Repeats the transcript back.
+  No LLM, no API key needed. Default; use for hardware smoke tests.
+* ``agent`` — :class:`AgentReplyEngine` backed by a deepagents
+  LangGraph agent with local music tools and (optionally) the music
+  MCP for library search. Requires an LLM provider key in env (e.g.
+  ``OPENAI_API_KEY``) and the ``agent:`` block in ``config.yaml``.
 
 Cycle (state machine lives in ConversationManager — see its docstring
 for the canonical version)::
@@ -64,7 +73,12 @@ from voice_assistant.config import load_config
 from voice_assistant.consumers.led import LedConsumer
 from voice_assistant.consumers.music import DuckController, MusicConsumer
 from voice_assistant.consumers.speaker import SpeakerManager
-from voice_assistant.conversation import ConversationManager, EchoReplyEngine
+from voice_assistant.conversation import (
+    AgentReplyEngine,
+    ConversationManager,
+    EchoReplyEngine,
+    ReplyEngine,
+)
 from voice_assistant.core import (
     AudioHandler,
     EventBus,
@@ -80,7 +94,10 @@ from voice_assistant.tts import make_tts_engine
 logger = logging.getLogger(__name__)
 
 
-def main(music_url: Optional[str] = None) -> bool:
+def main(
+    music_url: Optional[str] = None,
+    reply_engine: str = "echo",
+) -> bool:
     """Run the full voice-assistant lifecycle demo.
 
     Args:
@@ -88,14 +105,23 @@ def main(music_url: Optional[str] = None) -> bool:
             accepts — local file, stream URL, etc.) and attach a
             :class:`DuckController` so the assistant ducks/unducks
             music end-to-end. ``None`` skips the music subsystem
-            entirely (default behavior, mic-only).
+            entirely (default behavior, mic-only). When
+            ``reply_engine="agent"``, music starts up regardless
+            (the agent's ``play_url`` tool needs a started
+            :class:`MusicConsumer`); ``music_url`` becomes optional
+            seed audio rather than a requirement.
+        reply_engine: ``"echo"`` (default, no LLM) or ``"agent"``
+            (deepagents + music MCP).
 
-    All audio / VAD / hotword / speaker / TTS / STT / music settings
-    come from ``config/config.yaml``.
+    All audio / VAD / hotword / speaker / TTS / STT / music / agent
+    settings come from ``config/config.yaml``.
 
     Returns:
         ``True`` on a clean shutdown, ``False`` on error.
     """
+    if reply_engine not in ("echo", "agent"):
+        logger.error("reply_engine must be 'echo' or 'agent'; got %r", reply_engine)
+        return False
     try:
         config = load_config("config/config.yaml")
     except Exception as exc:
@@ -175,12 +201,18 @@ def main(music_url: Optional[str] = None) -> bool:
             "LED hardware not available — events will still log but the ring stays dark."
         )
 
-    # Optional music subsystem. Spun up only when the caller passes
-    # --music-url so the default mic-only smoke test stays fast (no
-    # mpv subprocess, no audio sink contention with the speaker).
+    # Music subsystem.
+    #
+    # The agent needs a live MusicConsumer so its play_url / pause /
+    # resume / stop / set_volume tools have something to drive — when
+    # reply_engine == "agent" we spin music up unconditionally
+    # (without a seed URL it just sits idle until the agent calls
+    # play_url). For the echo demo, music is opt-in via --music-url
+    # so the default smoke test stays fast (no mpv subprocess).
     music: Optional[MusicConsumer] = None
     duck: Optional[DuckController] = None
-    if music_url:
+    music_required = reply_engine == "agent" or music_url is not None
+    if music_required:
         music = MusicConsumer(
             socket_path=Path(config.music_mpv_socket),
             default_volume=config.music_default_volume,
@@ -196,29 +228,71 @@ def main(music_url: Optional[str] = None) -> bool:
         try:
             music.start()
         except Exception:
-            logger.exception("failed to start mpv (is it installed?) — skipping music")
+            logger.exception("failed to start mpv (is it installed?)")
+            if reply_engine == "agent":
+                # Agent's tools won't work; fail loudly instead of
+                # silently degrading.
+                return False
             music = None
             duck = None
         else:
             duck.attach(event_bus)
-            try:
-                music.play_url(music_url, title="assistant-flow demo")
-                logger.info("music started: %s", music_url)
-            except Exception:
-                logger.exception(
-                    "failed to load music URL %r — continuing without playback",
-                    music_url,
-                )
+            if music_url:
+                try:
+                    music.play_url(music_url, title="assistant-flow demo")
+                    logger.info("music started: %s", music_url)
+                except Exception:
+                    logger.exception(
+                        "failed to load music URL %r — continuing without playback",
+                        music_url,
+                    )
 
-    # ConversationManager owns the entire turn lifecycle. EchoReplyEngine
-    # is the smoke-test strategy ("You said: …"); swap it for a
-    # LangGraph-backed engine once that's wired up.
+    # Pick the reply strategy. Echo is fully local (no API key, no
+    # network); agent talks to an LLM provider and (optionally) the
+    # music MCP. Both implement the ReplyEngine protocol so
+    # ConversationManager doesn't care which one is in use.
+    engine: ReplyEngine
+    agent_engine_for_shutdown: Optional["AgentReplyEngine"] = None
+    if reply_engine == "agent":
+        if AgentReplyEngine is None:
+            logger.error("AgentReplyEngine unavailable — install deepagents / langchain-openai")
+            return False
+        if music is None:
+            logger.error("agent reply engine requires music; aborting")
+            return False
+        try:
+            from voice_assistant.agent import build_agent
+        except ImportError:
+            logger.exception("failed to import agent builder")
+            return False
+        try:
+            agent = build_agent(
+                music=music,
+                model=config.agent_model,
+                music_mcp_url=config.agent_music_mcp_url,
+                music_mcp_headers=config.agent_music_mcp_headers,
+                music_mcp_timeout_s=config.agent_music_mcp_timeout_s,
+                system_prompt=config.agent_system_prompt,
+            )
+        except Exception:
+            logger.exception("failed to build agent (model=%r)", config.agent_model)
+            return False
+        agent_engine_for_shutdown = AgentReplyEngine(agent)
+        engine = agent_engine_for_shutdown
+        logger.info("reply engine: agent (model=%r)", config.agent_model)
+    else:
+        engine = EchoReplyEngine()
+        logger.info("reply engine: echo")
+
+    # ConversationManager owns the entire turn lifecycle. The chosen
+    # engine slots in via the ReplyEngine protocol — same code path
+    # for echo vs. agent.
     conversation = ConversationManager(
         event_bus=event_bus,
         led_consumer=led_consumer,
         speaker=speaker,
         tts=tts,
-        reply_engine=EchoReplyEngine(),
+        reply_engine=engine,
         session_timeout_s=config.conversation_session_timeout_s,
     )
     conversation.attach()
@@ -238,6 +312,8 @@ def main(music_url: Optional[str] = None) -> bool:
         return False
     finally:
         conversation.detach()
+        if agent_engine_for_shutdown is not None:
+            agent_engine_for_shutdown.shutdown()
         if duck is not None:
             duck.detach()
         if music is not None:
@@ -248,9 +324,12 @@ def main(music_url: Optional[str] = None) -> bool:
         audio_handler.stop_stream()
         audio_handler.cleanup()
         led_consumer.cleanup()
+        # Drain and stop any bus workers not already reaped by the
+        # detach/shutdown calls above (safety net; idempotent).
+        event_bus.shutdown()
 
 
 if __name__ == "__main__":
     import sys
 
-    sys.exit(0 if main() else 1)
+    sys.exit(0 if main(reply_engine="echo") else 1)

@@ -279,6 +279,60 @@ class Config:
         return float(self.get("conversation.session_timeout_s", 300.0))
 
     @property
+    def agent_model(self) -> str:
+        """deepagents model spec for :class:`AgentReplyEngine`.
+
+        Format is :func:`langchain.chat_models.init_chat_model`'s —
+        ``"<provider>:<model>"``, e.g. ``"openai:gpt-4o-mini"``,
+        ``"openai:gpt-4o"``, or ``"anthropic:claude-3-5-sonnet"``.
+        Whichever provider is chosen must have its credentials in env
+        (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ...).
+        """
+        return self.get("agent.model", "openai:gpt-4o-mini")
+
+    @property
+    def agent_system_prompt(self) -> str | None:
+        """Override the built-in voice-first system prompt.
+
+        ``None`` keeps the package default (terse, conversational,
+        no markdown — read aloud by TTS). Set to a string in
+        ``config.yaml`` to add personality, project context, or
+        domain knowledge. Multi-line YAML blocks are supported.
+        """
+        val = self.get("agent.system_prompt", None)
+        if val is None:
+            return None
+        return str(val)
+
+    @property
+    def agent_music_mcp_url(self) -> str | None:
+        """Streamable-HTTP URL for the music MCP server (search/library).
+
+        Set to ``null`` (or omit) to run the agent without library
+        search — playback control still works locally. Typical value
+        on a single-host setup: ``"http://localhost:8765/mcp"``.
+        """
+        val = self.get("agent.mcp.music.url", None)
+        if val in (None, ""):
+            return None
+        return str(val)
+
+    @property
+    def agent_music_mcp_headers(self) -> dict[str, str] | None:
+        """Optional HTTP headers for the music MCP request (auth, etc.)."""
+        val = self.get("agent.mcp.music.headers", None)
+        if val is None:
+            return None
+        if not isinstance(val, dict):
+            raise TypeError(f"agent.mcp.music.headers must be a mapping; got {type(val).__name__}")
+        return {str(k): str(v) for k, v in val.items()}
+
+    @property
+    def agent_music_mcp_timeout_s(self) -> float:
+        """HTTP timeout for the music MCP request, in seconds."""
+        return float(self.get("agent.mcp.music.timeout_s", 30.0))
+
+    @property
     def logging_level(self) -> str:
         """Get logging level."""
         return self.get("logging.level", "INFO")
@@ -352,6 +406,12 @@ class Config:
         logger.info(
             "  conversation: session_timeout=%.1fs",
             self.conversation_session_timeout_s,
+        )
+        logger.info(
+            "  agent:        model=%r mcp_music=%s system_prompt=%s",
+            self.agent_model,
+            self.agent_music_mcp_url or "<unset>",
+            "<custom>" if self.agent_system_prompt else "<default>",
         )
         logger.info("  tts:          engine=%r", self.tts_engine)
         # Print the active engine sub-block so config typos (e.g.

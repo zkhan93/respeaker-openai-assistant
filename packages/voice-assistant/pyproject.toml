@@ -27,6 +27,10 @@ dependencies = [
     "pyaudio>=0.2.14 ; sys_platform == 'linux'",
     "rpi-gpio>=0.7.1 ; sys_platform == 'linux'",
     "spidev>=3.8 ; sys_platform == 'linux'",
+    "deepagents>=0.6.3",
+    "langchain-openai>=1.2.2",
+    "langchain-mcp-adapters>=0.2.2",
+    "langgraph>=1.2.1",
 ]
 
 # Optional runtime dependency: `systemd-python` enables a structured

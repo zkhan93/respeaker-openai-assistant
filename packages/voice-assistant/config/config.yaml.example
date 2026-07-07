@@ -80,6 +80,38 @@ conversation:
                               # Refreshed by every event during a turn — never fires
                               # mid-conversation.
 
+# Agent (LLM ReplyEngine) Configuration
+#
+# The agent is a deepagents (LangGraph) instance backing
+# `AgentReplyEngine`. ConversationManager hands it the user's
+# transcript; it returns the spoken reply. Local tools drive
+# voice-assistant's mpv directly; MCP tools (over HTTP) provide
+# search / library lookup against the alt-alexa-music-mcp server.
+#
+# Memory: in-process LangGraph InMemorySaver, keyed by `thread_id`
+# from ConversationManager. Survives across turns within a process;
+# lost on restart. SQLite-backed memory is on the roadmap.
+agent:
+  model: "openai:gpt-4o-mini"   # `<provider>:<model>` for langchain init_chat_model.
+                                # Requires OPENAI_API_KEY (or the provider's equivalent)
+                                # in the environment. Common alternatives:
+                                #   "openai:gpt-4o"           - higher quality
+                                #   "anthropic:claude-3-5-sonnet"
+  system_prompt: null           # Optional override for the built-in voice-first prompt
+                                # (concise, no markdown, conversational). Multi-line
+                                # YAML strings are fine. null → use the package default.
+  mcp:
+    music:
+      url: null                 # Streamable-HTTP URL of the music MCP server.
+                                # Example: "http://localhost:8765/mcp"
+                                # null → agent runs without library search; the
+                                # local play/pause/stop tools still work but the
+                                # agent can't resolve song names to URLs.
+      timeout_s: 30.0           # HTTP timeout for MCP requests.
+      headers: null             # Optional dict of HTTP headers for auth, e.g.
+                                #   headers:
+                                #     Authorization: "Bearer ${MUSIC_MCP_TOKEN}"
+
 # Speaker (audio playback) Configuration
 speaker:
   device: null   # Substring of the PyAudio output device name; null = system default.

@@ -90,14 +90,29 @@ def assistant_flow(
             "Optional file path or stream URL mpv can play. When set, "
             "the demo starts music in the background and attaches a "
             "DuckController so the assistant ducks / unducks while "
-            "you converse. Omit to run mic-only (no mpv subprocess)."
+            "you converse. Omit to run mic-only (no mpv subprocess) "
+            "with the echo engine; with --reply-engine agent, mpv is "
+            "always started so the agent has a play_url target."
+        ),
+    ),
+    reply_engine: str = typer.Option(
+        "echo",
+        "--reply-engine",
+        "-e",
+        help=(
+            "Which ReplyEngine to use. 'echo' (default) repeats the "
+            "transcript — no LLM, no API key needed. 'agent' uses the "
+            "deepagents LangGraph agent with local music tools and "
+            "(optionally) the music MCP for library search; configure "
+            "model + MCP URL under `agent:` in config.yaml. Requires "
+            "an LLM provider key in env (e.g. OPENAI_API_KEY)."
         ),
     ),
 ) -> None:
     """Full assistant turn demo: hotword → listen → think → speak → idle (with interruption)."""
     from voice_assistant.commands.test.assistant_flow import main
 
-    raise typer.Exit(0 if main(music_url=music_url) else 1)
+    raise typer.Exit(0 if main(music_url=music_url, reply_engine=reply_engine) else 1)
 
 
 @test_app.command()
