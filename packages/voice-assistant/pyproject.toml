@@ -46,6 +46,17 @@ dependencies = [
 [project.scripts]
 voice-assistant = "voice_assistant.cli:main"
 
+[dependency-groups]
+# Dev-only tooling. Installed by `uv run` / `uv sync` but never shipped
+# in the wheel. Run the suite with `uv run pytest` from this directory.
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

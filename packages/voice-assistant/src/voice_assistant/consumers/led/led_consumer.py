@@ -8,13 +8,25 @@ from typing import Optional
 try:
     from gpiozero import LED
 
-    HARDWARE_AVAILABLE = True
+    _GPIOZERO_AVAILABLE = True
 except ImportError:
-    HARDWARE_AVAILABLE = False
-    logging.warning("LED hardware libraries not available (gpiozero)")
+    LED = None
+    _GPIOZERO_AVAILABLE = False
 
-from .apa102_driver import APA102
+from .apa102_driver import APA102, SPIDEV_AVAILABLE
 from .led_pattern import AlexaLedPattern
+
+# Driving the ring needs BOTH the GPIO power pin (gpiozero) and the SPI
+# data bus (spidev). If either is missing — e.g. on a non-Pi dev box —
+# the LED consumer disables itself cleanly instead of erroring when it
+# tries to open the hardware.
+HARDWARE_AVAILABLE = _GPIOZERO_AVAILABLE and SPIDEV_AVAILABLE
+if not HARDWARE_AVAILABLE:
+    logging.warning(
+        "LED hardware libraries not available (gpiozero=%s, spidev=%s) — LED consumer disabled",
+        _GPIOZERO_AVAILABLE,
+        SPIDEV_AVAILABLE,
+    )
 
 logger = logging.getLogger(__name__)
 

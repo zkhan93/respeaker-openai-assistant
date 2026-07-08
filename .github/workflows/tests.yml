@@ -1,0 +1,47 @@
+name: Tests
+
+# Runs the voice-assistant test suite on every push to main and on PRs
+# targeting main (so breakage is caught before it lands).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  voice-assistant:
+    name: voice-assistant unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/voice-assistant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Create virtualenv (Python 3.11)
+        run: uv venv .venv --python 3.11
+
+      # Install ONLY the test runner and the package itself, without its
+      # runtime dependencies (--no-deps). Those runtime deps include
+      # native, Pi-only libraries (pyaudio needs the portaudio system lib;
+      # rpi-gpio / spidev build against Linux/Pi headers) and a large
+      # LLM/ASR stack (faster-whisper, openwakeword, deepagents, langgraph)
+      # that the current unit tests do not need — the event bus is pure
+      # stdlib and tests/conftest.py stubs the native modules. Skipping
+      # them keeps CI fast (seconds) and free of native-build fragility.
+      #
+      # When tests start needing real runtime deps, split those into
+      # optional extras in pyproject.toml and install the relevant extra
+      # here instead of broadening this step to a full `uv sync`.
+      - name: Install test dependencies
+        run: |
+          uv pip install --python .venv/bin/python pytest
+          uv pip install --python .venv/bin/python -e . --no-deps
+
+      - name: Run tests
+        run: .venv/bin/python -m pytest

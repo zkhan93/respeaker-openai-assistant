@@ -5,7 +5,19 @@ This is the main driver module for APA102 LEDs
 
 from math import ceil
 
-import spidev
+try:
+    import spidev
+
+    SPIDEV_AVAILABLE = True
+except ImportError:
+    # spidev drives the Linux SPI subsystem and ships wheels for Linux
+    # only (declared with a `sys_platform == 'linux'` marker in
+    # pyproject). On macOS / WSL dev boxes and in CI it is simply absent.
+    # Importing this module must still succeed — so the package stays
+    # importable off-Pi and tests can inject a fake `spidev` — while
+    # actually constructing an APA102 without it fails loudly.
+    spidev = None  # type: ignore[assignment]
+    SPIDEV_AVAILABLE = False
 
 RGB_MAP = {
     "rgb": [3, 2, 1],
@@ -103,6 +115,12 @@ class APA102:
             self.global_brightness = global_brightness
 
         self.leds = [self.LED_START, 0, 0, 0] * self.num_led  # Pixel buffer
+        if spidev is None:
+            raise RuntimeError(
+                "spidev is not installed — APA102 needs Linux SPI support. "
+                "Install it on the device (Linux-only) or keep LEDs disabled; "
+                "tests can inject a fake spidev module."
+            )
         self.spi = spidev.SpiDev()  # Init the SPI device
         self.spi.open(bus, device)  # Open SPI port 0, slave device (CS) 1
         # Up the speed a bit, so that the LEDs are painted faster
