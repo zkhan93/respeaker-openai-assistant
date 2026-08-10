@@ -10,6 +10,19 @@
 #   make sign    codesign with a Developer ID (needs IDENTITY=...)
 #   make dmg     package the signed app
 #   make clean
+#
+# WHICH CORE:  CORE=rust (default) | CORE=python
+#
+#   make dmg                 Rust core   — ~60 MB bundle, ~65 MB resident
+#   make dmg CORE=python     Python core — ~187 MB bundle, ~480 MB resident
+#
+# Both speak the same protocol (see protocol/README.md), so the Swift shell
+# is identical either way. Python stays buildable deliberately: it is the
+# reference implementation and the other half of the conformance suite.
+
+# Which core to bundle. Rust by default since 2026-08-09 — verified in the
+# real app, and 61 MB against the Python helper's ~480.
+CORE        ?= rust
 
 APP_NAME    := Raneen
 BUNDLE      := build/$(APP_NAME).app
@@ -31,11 +44,34 @@ ENTITLEMENTS:= Resources/entitlements.plist
 #
 # Override explicitly if you have several:
 #   make dmg IDENTITY="Developer ID Application: ACME (TEAMID)"
+# ----- core selection -------------------------------------------------------
+
+RUST_CRATE   := ../../crates/voice-helper
+RUST_BIN     := $(RUST_CRATE)/target/release/voice-helper
+RUST_SOURCES := $(shell find $(RUST_CRATE)/src -name '*.rs' 2>/dev/null)
+
+# The model ships inside the bundle. `default_model()` in the helper looks
+# beside its own executable first, which is why no Swift change and no
+# extra argument are needed to find it.
+MODEL_NAME   := ggml-base.en-q5_1.bin
+MODEL_SRC    ?= $(HOME)/.cache/voice-helper/models/$(MODEL_NAME)
+MODEL_URL    := https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$(MODEL_NAME)
+
+ifeq ($(CORE),rust)
+  HELPER_EXE    := voice-helper
+  HELPER_PREREQ := helper-rust
+else ifeq ($(CORE),python)
+  HELPER_EXE    := voice-desktop
+  HELPER_PREREQ := helper
+else
+  $(error CORE must be 'rust' or 'python', not '$(CORE)')
+endif
+
 DEVELOPER_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
 	| sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
 IDENTITY ?= $(if $(DEVELOPER_ID),$(DEVELOPER_ID),-)
 
-.PHONY: all app helper swift run check sign verify dmg clean
+.PHONY: all app helper helper-rust model swift run check sign verify dmg clean
 
 all: app
 
@@ -85,6 +121,24 @@ build/dist/voice-desktop/voice-desktop: helper_entry.py hooks/*.py rthooks/*.py 
 
 helper: build/dist/voice-desktop/voice-desktop
 
+# ----- helper (Rust core) ---------------------------------------------------
+
+# One binary, no dylibs, no frozen interpreter. Cargo's own staleness
+# check is finer than ours, so this always delegates rather than guarding
+# on a timestamp.
+helper-rust: model
+	cargo build --release --manifest-path $(RUST_CRATE)/Cargo.toml
+
+# Fetched rather than committed: 57 MB of weights do not belong in git,
+# and the URL is stable. Cached in ~/.cache so a clean build does not
+# re-download it.
+model:
+	@if [ ! -f "$(MODEL_SRC)" ]; then \
+		echo "downloading $(MODEL_NAME) (57 MB) → $(MODEL_SRC)"; \
+		mkdir -p "$$(dirname "$(MODEL_SRC)")"; \
+		curl -fL --progress-bar -o "$(MODEL_SRC)" "$(MODEL_URL)"; \
+	fi
+
 # ----- swift ----------------------------------------------------------------
 
 swift:
@@ -92,7 +146,7 @@ swift:
 
 # ----- bundle ---------------------------------------------------------------
 
-app: swift helper
+app: swift $(HELPER_PREREQ)
 	@rm -rf "$(BUNDLE)"
 	@mkdir -p "$(CONTENTS)/MacOS" "$(CONTENTS)/Resources"
 	cp "$(SWIFT_BIN)" "$(CONTENTS)/MacOS/$(APP_NAME)"
@@ -100,14 +154,21 @@ app: swift helper
 	cp Resources/$(APP_NAME).icns "$(CONTENTS)/Resources/"
 	cp Resources/MenuBarMark.png "$(CONTENTS)/Resources/"
 	@mkdir -p "$(HELPER_DIR)"
+ifeq ($(CORE),rust)
+	cp "$(RUST_BIN)" "$(HELPER_DIR)/$(HELPER_EXE)"
+	cp "$(MODEL_SRC)" "$(HELPER_DIR)/$(MODEL_NAME)"
+else
 	cp -R build/dist/voice-desktop/. "$(HELPER_DIR)/"
-	@echo "built $(BUNDLE) ($$(du -sh "$(BUNDLE)" | cut -f1))"
+endif
+	@echo "built $(BUNDLE) — CORE=$(CORE) ($$(du -sh "$(BUNDLE)" | cut -f1))"
 
 run: app
 	"$(CONTENTS)/MacOS/$(APP_NAME)"
 
-check: helper
-	python3 scripts/drive_helper.py ./build/dist/voice-desktop/voice-desktop serve
+# The protocol suite, not a bespoke script: it is the same set of cases CI
+# runs, and it drives whichever core is selected.
+check: $(HELPER_PREREQ)
+	cd ../.. && ./protocol/run-suite.sh $(CORE)
 
 # ----- signing --------------------------------------------------------------
 
@@ -140,6 +201,9 @@ sign: app
 		echo ""; \
 	fi
 	@echo "signing nested binaries (parallel x$(SIGN_JOBS))…"
+	@# With CORE=rust there are no nested dylibs at all — one static binary —
+	@# so both passes below find nothing and cost nothing. That is the point:
+	@# ~380 timestamped files become 2.
 	@find "$(BUNDLE)" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 \
 		| xargs -0 -P $(SIGN_JOBS) -n1 codesign --force --timestamp \
 			--options runtime --sign "$(IDENTITY)" 2>&1 \
@@ -151,7 +215,7 @@ sign: app
 		| grep -vE "replacing existing signature|is already signed" || true
 	codesign --force --timestamp --options runtime \
 		--entitlements "$(ENTITLEMENTS)" \
-		--sign "$(IDENTITY)" "$(HELPER_DIR)/voice-desktop"
+		--sign "$(IDENTITY)" "$(HELPER_DIR)/$(HELPER_EXE)"
 	codesign --force --timestamp --options runtime \
 		--entitlements "$(ENTITLEMENTS)" \
 		--sign "$(IDENTITY)" "$(BUNDLE)"

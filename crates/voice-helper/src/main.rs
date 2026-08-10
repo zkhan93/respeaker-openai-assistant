@@ -12,8 +12,8 @@
 //! `serve` proves the protocol end to end from Raneen, in hold mode.
 
 mod audio;
-mod bus;
 mod bench;
+mod bus;
 mod engine;
 mod mem;
 mod pipeline;
@@ -80,10 +80,19 @@ fn run_bench(args: &[String]) -> Result<(), String> {
     let model = positional(args, 0).ok_or("bench needs a model path")?;
     let wav = positional(args, 1).ok_or("bench needs a wav path")?;
     let repeats = flag(args, "--repeats")
-        .map(|v| v.parse::<usize>().map_err(|_| "--repeats wants a number".to_string()))
+        .map(|v| {
+            v.parse::<usize>()
+                .map_err(|_| "--repeats wants a number".to_string())
+        })
         .transpose()?
         .unwrap_or(3);
-    bench::run(&model, &wav, threads(args)?, repeats, &flag(args, "--language").unwrap_or_else(|| "en".into()))
+    bench::run(
+        &model,
+        &wav,
+        threads(args)?,
+        repeats,
+        &flag(args, "--language").unwrap_or_else(|| "en".into()),
+    )
 }
 
 fn run_serve(args: &[String]) -> Result<(), String> {
@@ -120,7 +129,9 @@ fn run_serve(args: &[String]) -> Result<(), String> {
 /// will otherwise happily take every core and make the meter stutter.
 fn threads(args: &[String]) -> Result<i32, String> {
     match flag(args, "--threads") {
-        Some(value) => value.parse().map_err(|_| "--threads wants a number".to_string()),
+        Some(value) => value
+            .parse()
+            .map_err(|_| "--threads wants a number".to_string()),
         None => Ok(std::thread::available_parallelism()
             .map(|n| (n.get() as i32 - 2).max(1))
             .unwrap_or(4)),
@@ -184,10 +195,8 @@ fn default_model() -> Result<PathBuf, String> {
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".cache/voice-helper/models/ggml-base.en-q5_1.bin"),
-        );
+        candidates
+            .push(PathBuf::from(home).join(".cache/voice-helper/models/ggml-base.en-q5_1.bin"));
     }
 
     for candidate in &candidates {

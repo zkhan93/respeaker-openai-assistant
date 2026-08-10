@@ -9,10 +9,21 @@ use std::path::Path;
 use crate::engine::Engine;
 use crate::mem::peak_rss_mb;
 
-pub fn run(model: &Path, wav: &Path, threads: i32, repeats: usize, language: &str) -> Result<(), String> {
+pub fn run(
+    model: &Path,
+    wav: &Path,
+    threads: i32,
+    repeats: usize,
+    language: &str,
+) -> Result<(), String> {
     println!("{:<26} {:>8} {:>9}", "stage", "peak RSS", "elapsed");
     println!("{}", "-".repeat(46));
-    println!("{:<26} {:>7.0} MB {:>8}", "process start", peak_rss_mb(), "-");
+    println!(
+        "{:<26} {:>7.0} MB {:>8}",
+        "process start",
+        peak_rss_mb(),
+        "-"
+    );
 
     let samples = read_wav(wav)?;
     let seconds = samples.len() as f32 / 16_000.0;
@@ -56,7 +67,10 @@ pub fn run(model: &Path, wav: &Path, threads: i32, repeats: usize, language: &st
     // `footprint` from outside catch the steady-state figure, which is
     // the number that matters for an app that idles all day.
     if std::env::var_os("BENCH_HOLD").is_some() {
-        eprintln!("holding for external measurement — pid {}", std::process::id());
+        eprintln!(
+            "holding for external measurement — pid {}",
+            std::process::id()
+        );
         std::thread::sleep(std::time::Duration::from_secs(120));
     }
     Ok(())
@@ -69,8 +83,8 @@ pub fn run(model: &Path, wav: &Path, threads: i32, repeats: usize, language: &st
 /// output. Refusing is the same instinct as AD-16 validating the audio
 /// format before the pipeline exists.
 fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
-    let mut reader =
-        hound::WavReader::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
     let spec = reader.spec();
     if spec.sample_rate != 16_000 {
         return Err(format!(

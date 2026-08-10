@@ -87,14 +87,18 @@ impl Default for EnergyDetector {
 }
 
 impl EnergyDetector {
+    /// Exposed for diagnostics and for the tests that pin the adaptation
+    /// behaviour — the floor is the whole mechanism, so it must be
+    /// observable to be checkable.
+    #[allow(dead_code)]
+    pub fn noise_floor(&self) -> f32 {
+        self.noise_floor
+    }
+
     /// dB above the floor at which speech becomes plausible…
     const FLOOR_DB: f32 = 6.0;
     /// …and at which it is certain. Between the two, probability ramps.
     const CEILING_DB: f32 = 18.0;
-
-    pub fn noise_floor(&self) -> f32 {
-        self.noise_floor
-    }
 }
 
 impl SpeechDetector for EnergyDetector {
@@ -133,7 +137,9 @@ pub enum Transition {
     Started,
     /// Frames of voice activity, so the caller can report a duration
     /// without keeping its own clock.
-    Stopped { frames: usize },
+    Stopped {
+        frames: usize,
+    },
 }
 
 /// Debounced speech/silence edges over a frame stream.
@@ -167,7 +173,9 @@ impl VoiceActivityTracker {
     /// sentence across two segments instead of truncating it.
     pub const DICTATION_SILENCE_FRAMES: usize = 8;
     /// The assistant wants to be sure a question has finished before it
-    /// answers, so it waits longer.
+    /// answers, so it waits longer. Unused until the assistant loop moves
+    /// off Python; kept because the number is a decision, not a constant.
+    #[allow(dead_code)]
     pub const ASSISTANT_SILENCE_FRAMES: usize = 15;
 
     pub fn new(detector: Box<dyn SpeechDetector>, silence_frames_required: usize) -> Self {
@@ -191,6 +199,9 @@ impl VoiceActivityTracker {
         self.detector.name()
     }
 
+    /// Whether an utterance is open. Used by the tests, and by any
+    /// indicator that wants to show speech independently of the turn.
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -358,8 +369,7 @@ mod tests {
 
     #[test]
     fn explicit_reset_does_not_emit_an_edge() {
-        let mut tracker =
-            VoiceActivityTracker::new(Box::new(Scripted::new(&[LOUD; 10])), 3);
+        let mut tracker = VoiceActivityTracker::new(Box::new(Scripted::new(&[LOUD; 10])), 3);
         let frame = [0i16; 1280];
         for _ in 0..5 {
             tracker.process(&frame);

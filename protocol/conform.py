@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """Drive any AD-15 helper through one turn and report what came back.
 
-This is the anti-drift mechanism for AD-17. Two implementations of the
-same protocol will diverge unless something keeps checking that they
-agree, and the only thing that can check both is a harness that speaks
-the protocol rather than either language.
+The anti-drift mechanism for AD-17. Two implementations of one protocol
+diverge unless something keeps checking that they agree, and the only
+thing that can check both is a harness belonging to neither.
 
-    ./conform.py --wav a.wav --helper "./voice-helper serve {model} --audio-socket {socket}" \
-                 --model ~/.cache/voice-helper/models/ggml-base.en-q5_1.bin
+See README.md in this directory for the contract being checked.
 
-    ./conform.py --wav a.wav --helper "voice-desktop serve --model base.en --audio-socket {socket}"
+    ./conform.py --wav fixtures/spike.wav \
+      --helper "…/voice-helper serve {model} --audio-socket {socket}" \
+      --model ~/.cache/voice-helper/models/ggml-base.en-q5_1.bin
 
-`{socket}` and `{model}` are substituted into the command. Exit status is
-0 when the turn completed: ready, a transcript, a clean bye, levels seen,
-and the process actually exited.
+    ./conform.py --wav fixtures/spike.wav --settle 8 \
+      --helper "voice-desktop serve --model base.en --no-sound --audio-socket {socket}"
+
+`{socket}` and `{model}` are substituted into the command.
+
+Exit status is 0 when the turn completed: `ready`, at least one
+transcript, levels seen, and a clean exit. `--expect-transcripts N` and
+`--expect-text SUBSTRING` turn it from a smoke test into a regression
+test, which is what CI runs.
 """
 
 import argparse
@@ -39,6 +45,10 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="suppress helper stderr")
     parser.add_argument("--no-arm", action="store_true",
                         help="do not send arm/disarm — for trigger modes that own their own boundaries")
+    parser.add_argument("--expect-transcripts", type=int, default=None,
+                        help="fail unless exactly N transcripts arrive")
+    parser.add_argument("--expect-text", default=None,
+                        help="fail unless this appears in a transcript (case-insensitive)")
     args = parser.parse_args()
 
     sock_path = f"/tmp/conform-{os.getpid()}.sock"
@@ -144,9 +154,27 @@ def main() -> int:
     else:
         print("  transcript : NONE")
 
-    ok = bool(transcripts) and "ready" in kinds and levels > 0 and exited.startswith("exit 0")
-    print("  RESULT     : PASS\n" if ok else "  RESULT     : FAIL\n")
-    return 0 if ok else 1
+    failures = []
+    if "ready" not in kinds:
+        failures.append("no ready event")
+    if not levels:
+        failures.append("no level events")
+    if not exited.startswith("exit 0"):
+        failures.append(f"shutdown: {exited}")
+    if args.expect_transcripts is None:
+        if not transcripts:
+            failures.append("no transcript")
+    elif len(transcripts) != args.expect_transcripts:
+        failures.append(f"expected {args.expect_transcripts} transcripts, got {len(transcripts)}")
+    if args.expect_text:
+        joined = " ".join(transcripts).lower()
+        if args.expect_text.lower() not in joined:
+            failures.append(f"expected text {args.expect_text!r} not found")
+
+    for reason in failures:
+        print(f"  ✗ {reason}")
+    print("  RESULT     : PASS\n" if not failures else "  RESULT     : FAIL\n")
+    return 0 if not failures else 1
 
 
 def rss_mb(pid: int) -> float:

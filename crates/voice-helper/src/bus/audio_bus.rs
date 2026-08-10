@@ -45,6 +45,13 @@ pub struct AudioBus {
     capacity: usize,
 }
 
+// Not every method has a caller yet. `capacity`, `available` and
+// `rewind` are the surface a disk recorder needs (ROADMAP step 11) and
+// `skip_to_latest` is what a turn-based consumer uses; all four are
+// exercised by the tests below. Deleting them now would mean rewriting
+// them — with their subtleties, like clamping a rewind to surviving
+// history — the first time a second consumer appears.
+#[allow(dead_code)]
 impl AudioBus {
     pub fn new(capacity: usize) -> Arc<Self> {
         assert!(capacity > 0, "an audio bus needs at least one slot");
@@ -99,6 +106,7 @@ pub struct AudioBusReader {
     read_pos: u64,
 }
 
+#[allow(dead_code)]
 impl AudioBusReader {
     pub fn position(&self) -> u64 {
         self.read_pos

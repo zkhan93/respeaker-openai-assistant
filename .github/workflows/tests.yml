@@ -106,6 +106,92 @@ jobs:
       - name: Run tests
         run: .venv/bin/python -m pytest
 
+  # The Rust core. Unit tests are pure and hermetic — bus, VAD state
+  # machine, tail padding, hallucination markers — and need no model and
+  # no audio hardware, so they run on any runner.
+  #
+  # whisper.cpp and the Silero C port are both built from source, so the
+  # first run is minutes. The cache keys on Cargo.lock, which is why that
+  # file is committed.
+  voice-helper:
+    name: voice-helper unit tests (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/voice-helper
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/voice-helper/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/voice-helper/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+
+      - name: Tests
+        run: cargo test --release
+
+  # Conformance: the protocol suite driven against the Rust helper.
+  #
+  # This is the anti-drift check. It is NOT a duplicate of the unit tests
+  # — it spawns a real helper, streams real audio over a real socket, and
+  # asserts on transcripts. Every case here pins a behaviour that a real
+  # bug has broken at least once (last-word truncation, VAD segmentation,
+  # false triggers on non-speech).
+  #
+  # Downloads a 57 MB model, so it is cached on the model filename.
+  conformance:
+    name: protocol conformance (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/voice-helper/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/voice-helper/Cargo.lock') }}
+
+      - name: Cache whisper model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/voice-helper/models
+          key: ggml-base.en-q5_1
+
+      - name: Download model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/voice-helper/models
+          curl -sL -o ~/.cache/voice-helper/models/ggml-base.en-q5_1.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
+
+      - name: Build helper
+        run: cargo build --release --manifest-path crates/voice-helper/Cargo.toml
+
+      - name: Run conformance suite
+        run: ./protocol/run-suite.sh rust
+
   lint:
     name: ruff
     runs-on: ubuntu-latest

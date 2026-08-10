@@ -31,6 +31,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// Something that happened. Cloneable facts, not commands.
+///
+/// Some fields have no reader yet. They are the protocol surface the
+/// architecture calls for — a disk recorder wants turn boundaries, a ZMQ
+/// bridge forwards everything — and dropping them now would mean
+/// re-deriving them later from the events they were extracted from.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Event {
     /// A turn was requested. `source` distinguishes wake word from
@@ -119,7 +125,10 @@ impl EventBus {
             // Report it — a consumer that stops receiving silently is
             // the failure this whole codebase keeps refusing to allow.
             if subscriber.sender.send(Arc::clone(&event)).is_err() {
-                eprintln!("consumer {:?} is no longer receiving events", subscriber.name);
+                eprintln!(
+                    "consumer {:?} is no longer receiving events",
+                    subscriber.name
+                );
             }
         }
     }
@@ -138,7 +147,11 @@ impl EventBus {
             .collect();
 
         for subscriber in drained {
-            let Subscriber { name, sender, handle } = subscriber;
+            let Subscriber {
+                name,
+                sender,
+                handle,
+            } = subscriber;
             drop(sender);
             if handle.join().is_err() {
                 eprintln!("consumer {name:?} panicked");

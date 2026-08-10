@@ -68,7 +68,9 @@ impl Transcription {
     ///   nonsense over a chair scrape, which no amount of marker
     ///   filtering would spot.
     pub fn is_speech(&self, min_confidence: f32) -> bool {
-        !self.text.is_empty() && !is_non_speech_marker(&self.text) && self.confidence >= min_confidence
+        !self.text.is_empty()
+            && !is_non_speech_marker(&self.text)
+            && self.confidence >= min_confidence
     }
 }
 

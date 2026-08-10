@@ -38,7 +38,9 @@ use crate::audio::{self, FrameBuffer};
 use crate::bus::audio_bus::{AudioBus, AudioBusReader, Frame};
 use crate::bus::event_bus::{Consumer, Event, EventBus};
 use crate::engine::Engine;
-use crate::pipeline::vad::{EnergyDetector, SileroDetector, SpeechDetector, Transition, VoiceActivityTracker};
+use crate::pipeline::vad::{
+    EnergyDetector, SileroDetector, SpeechDetector, Transition, VoiceActivityTracker,
+};
 use crate::pipeline::{DetectorKind, Policy, TriggerMode};
 use crate::protocol::EventWriter;
 
@@ -270,7 +272,6 @@ fn set_armed(turn: &Mutex<Turn>, events: &EventBus, armed: bool) {
     }
 }
 
-
 /// Drain the socket into the bus. Deliberately the only thing it does.
 fn ingest(mut stream: UnixStream, bus: Arc<AudioBus>, running: Arc<AtomicBool>) {
     let mut frames = FrameBuffer::default();
@@ -318,7 +319,11 @@ fn segment(
         DetectorKind::Energy => Box::new(EnergyDetector::default()),
     };
     let mut tracker = VoiceActivityTracker::new(detector, policy.silence_frames);
-    eprintln!("vad: {} / trigger: {:?}", tracker.detector_name(), policy.mode);
+    eprintln!(
+        "vad: {} / trigger: {:?}",
+        tracker.detector_name(),
+        policy.mode
+    );
     let pre_roll_samples = policy.pre_roll_frames * audio::CHUNK_SAMPLES;
     let max_samples = (policy.max_seconds * audio::SAMPLE_RATE as f32) as usize;
 
@@ -356,8 +361,7 @@ fn segment(
                 duration: match edge {
                     Transition::Started => 0.0,
                     Transition::Stopped { frames } => {
-                        frames as f32 * audio::CHUNK_SAMPLES as f32
-                            / audio::SAMPLE_RATE as f32
+                        frames as f32 * audio::CHUNK_SAMPLES as f32 / audio::SAMPLE_RATE as f32
                     }
                 },
             });
@@ -379,9 +383,7 @@ fn segment(
             // `Vad` behind a gate. The gate is checked at the edge, not
             // continuously, so enabling mid-sentence does not capture
             // half of it.
-            TriggerMode::Toggle => {
-                armed && matches!(transition, Some(Transition::Started))
-            }
+            TriggerMode::Toggle => armed && matches!(transition, Some(Transition::Started)),
         };
 
         if should_open && !collecting {
@@ -443,13 +445,7 @@ fn segment(
             pattern: "think".into(),
         });
         transcribe(
-            captured,
-            &events,
-            &engine,
-            generation,
-            &turn,
-            &policy,
-            rolling_on,
+            captured, &events, &engine, generation, &turn, &policy, rolling_on,
         );
     }
 }

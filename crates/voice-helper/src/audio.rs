@@ -98,5 +98,4 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert!(frames.iter().all(|f| f.len() == CHUNK_SAMPLES));
     }
-
 }

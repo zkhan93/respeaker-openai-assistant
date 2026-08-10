@@ -299,19 +299,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
-    /// Where the Python core lives.
+    /// Names the bundled core may go by, in preference order.
+    ///
+    /// Two implementations speak the protocol (`protocol/README.md`): the
+    /// Rust core and the Python one. `make dmg CORE=rust|python` decides
+    /// which is inside the bundle, and this shell does not care — it
+    /// spawns whichever it finds and reads the same JSON back.
+    ///
+    /// Rust first because it is the default: 61 MB resident against ~480,
+    /// and it exits cleanly rather than orphaning.
+    private static let helperNames = ["voice-helper", "voice-desktop"]
+
+    /// Where the core lives.
     ///
     /// Inside a bundle it sits in `Contents/Resources/helper/`. During
-    /// development there is no bundle, so fall back to an explicit path
-    /// in the environment — that is what `make run` sets.
+    /// development there is no bundle, so fall back to an explicit path in
+    /// the environment — that is what `make run` sets, and it is also how
+    /// you swap cores against an already-built bundle without rebuilding.
     private static func locateHelper() -> URL? {
         if let override = ProcessInfo.processInfo.environment["RANEEN_HELPER"] {
             return URL(fileURLWithPath: override)
         }
-        if let resources = Bundle.main.resourceURL {
-            let bundled = resources.appendingPathComponent("helper/voice-desktop")
-            if FileManager.default.isExecutableFile(atPath: bundled.path) {
-                return bundled
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        for name in helperNames {
+            let candidate = resources.appendingPathComponent("helper/\(name)")
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate
             }
         }
         return nil
