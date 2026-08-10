@@ -32,6 +32,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let nativeAudio =
         ProcessInfo.processInfo.environment["RANEEN_NATIVE_AUDIO"] == "1"
 
+    /// Whether a turn is open, mirrored from the helper's state events.
+    /// Only used to avoid reopening the microphone mid-sentence.
+    private var isArmed = false
+    private var restartPending = false
+    private var restartAttempts = 0
+    private var restartWork: DispatchWorkItem?
+
     private var lastTranscript = "—"
     private var peak = 0
     private var levelTicks = 0
@@ -135,14 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             socket?.send(data)
         }
         capture.onInterruption = { [weak self] in
-            // A device vanished or the default changed. Reporting beats
-            // guessing: going quiet is indistinguishable from a silent
-            // room, which is the failure AD-16 exists to make noticeable.
-            DispatchQueue.main.async {
-                self?.state = "audio device changed — restart to resume"
-                self?.show(.error)
-                self?.rebuildMenu()
-            }
+            // A device appeared, vanished, or the system default moved —
+            // plugging in AirPods is the ordinary case, not an error.
+            DispatchQueue.main.async { self?.audioDeviceChanged() }
         }
         do {
             try capture.start()
@@ -151,6 +153,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("could not start capture: %@", "\(error)")
             state = "microphone unavailable"
         }
+    }
+
+    // MARK: - Following the audio device
+
+    /// How long to wait before reopening after a configuration change.
+    ///
+    /// Core Audio posts several notifications for one device change —
+    /// connecting AirPods moves the default input *and* the default
+    /// output, and each is its own event. Reopening on the first would
+    /// mean reopening again on the next two.
+    private static let restartDebounce: TimeInterval = 0.4
+
+    /// Give up after this many consecutive failures and say so, rather
+    /// than reopening a device that is not coming back, forever.
+    private static let maxRestartAttempts = 5
+
+    /// A device changed. Follow it — unless a sentence is in flight.
+    private func audioDeviceChanged() {
+        guard audioSocket != nil else { return }
+
+        if isArmed {
+            // Reopening mid-utterance would cut the recording in half.
+            // The key is still down and the old device is still feeding
+            // us, so the honest move is to finish the sentence first.
+            NSLog("audio device changed while armed — deferring until the key is released")
+            restartPending = true
+            return
+        }
+        scheduleCaptureRestart()
+    }
+
+    private func scheduleCaptureRestart() {
+        restartPending = false
+        restartWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.restartCapture() }
+        restartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restartDebounce, execute: work)
+    }
+
+    private func restartCapture() {
+        guard let socket = audioSocket else { return }
+
+        capture?.stop()
+        capture = nil
+        startCapture(sending: socket)
+
+        if capture != nil {
+            restartAttempts = 0
+            state = "ready"
+            show(.idle)
+            if let format = capture?.inputFormat {
+                NSLog("following the new device: %.0f Hz %d ch", format.sampleRate, format.channelCount)
+            }
+        } else {
+            restartAttempts += 1
+            if restartAttempts >= Self.maxRestartAttempts {
+                state = "microphone unavailable"
+                show(.error)
+            } else {
+                // Back off rather than hammering a device that is still
+                // settling — a Bluetooth handoff takes a moment.
+                let delay = Self.restartDebounce * Double(restartAttempts * 2)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.restartCapture()
+                }
+            }
+        }
+        rebuildMenu()
     }
 
     /// Where the Python core lives.
@@ -182,9 +252,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The panel exists to answer "is it listening?" — so it
             // tracks arming, not the per-utterance cycle.
             switch pattern {
-            case "armed":    panel.show()
-            case "disarmed": panel.hide()
-            default:         break
+            case "armed":
+                isArmed = true
+                panel.show()
+            case "disarmed":
+                isArmed = false
+                panel.hide()
+                // A device changed while the key was held. Now that the
+                // sentence is finished, follow it.
+                if restartPending { scheduleCaptureRestart() }
+            default:
+                break
             }
         case .transcript(let text):
             lastTranscript = text
@@ -243,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(Self.caption(state))
         menu.addItem(Self.caption("Hold \(triggerKey.label) to talk"))
+        menu.addItem(Self.caption(micDescription))
 
         if lastTranscript != "—" {
             menu.addItem(.separator())
@@ -293,6 +372,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "q"
         )
         statusItem.menu = menu
+    }
+
+    /// Who owns the microphone, and at what rate.
+    ///
+    /// The rate is here because it is the one *observable* proof that a
+    /// device change was followed: the built-in microphone runs at
+    /// 48 kHz and AirPods at 24 kHz, so plugging them in should visibly
+    /// change this line. Without it, "followed the device" and "carried
+    /// on with the old one" look identical from the outside.
+    private var micDescription: String {
+        guard Self.nativeAudio else { return "Mic: helper (PortAudio)" }
+        guard let format = capture?.inputFormat else { return "Mic: unavailable" }
+        return String(format: "Mic: this app · %.0f kHz", format.sampleRate / 1000)
     }
 
     /// A non-interactive line. `action: nil` already makes an item

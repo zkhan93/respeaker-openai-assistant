@@ -24,6 +24,14 @@ final class AudioCapture {
     private let lock = NSLock()
     private var running = false
 
+    /// Whether a tap and observer are currently installed.
+    ///
+    /// Tracked separately from `running` because a configuration change
+    /// stops capture without removing either. Keying teardown off
+    /// `running` meant a restart skipped it and installed a *second* tap
+    /// on the same bus — every frame delivered twice, at double speed.
+    private var installed = false
+
     /// Called on Core Audio's capture thread. Must return promptly: this
     /// is a real-time context and blocking here drops audio.
     var onFrames: ((Data) -> Void)?
@@ -53,6 +61,10 @@ final class AudioCapture {
             return
         }
         lock.unlock()
+
+        // Unconditional, so restarting after a device change cannot leave
+        // the previous tap in place. Safe when nothing is installed.
+        teardown()
 
         let input = engine.inputNode
         // Ask the *node*, not the device: this is the format the tap will
@@ -104,6 +116,7 @@ final class AudioCapture {
 
         lock.lock()
         running = true
+        installed = true
         lock.unlock()
 
         NSLog(
@@ -113,11 +126,20 @@ final class AudioCapture {
     }
 
     func stop() {
+        teardown()
+    }
+
+    /// Remove the tap and observer and stop the engine. Idempotent.
+    ///
+    /// Keyed on `installed`, not `running`, so it still cleans up after a
+    /// configuration change has already flipped `running` to false.
+    private func teardown() {
         lock.lock()
-        let wasRunning = running
+        let wasInstalled = installed
+        installed = false
         running = false
         lock.unlock()
-        guard wasRunning else { return }
+        guard wasInstalled else { return }
 
         NotificationCenter.default.removeObserver(
             self, name: .AVAudioEngineConfigurationChange, object: engine
