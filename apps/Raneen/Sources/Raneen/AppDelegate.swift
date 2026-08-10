@@ -199,8 +199,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let maxRestartAttempts = 5
 
     /// A device changed. Follow it — unless a sentence is in flight.
+    ///
+    /// **Most calls here are no-ops, and that is the point.** Restarting
+    /// the engine posts an `AVAudioEngineConfigurationChange`, which
+    /// arrives as an interruption, which asked for another restart: the
+    /// microphone was reopened several times a second, which macOS shows
+    /// as its recording indicator flickering on and off. Core Audio's
+    /// device-list and default-device notifications fire liberally for the
+    /// same reason.
+    ///
+    /// So the trigger is not "something was posted", it is "the device we
+    /// should be using is not the one that is open". A self-inflicted
+    /// notification resolves to the device already running and stops here.
     private func audioDeviceChanged() {
         guard audioSocket != nil else { return }
+
+        let target = DevicePreference.resolve(.input).device
+        if let running = capture?.openedDevice, running.uid == target?.uid {
+            return
+        }
 
         if isArmed {
             // Reopening mid-utterance would cut the recording in half.

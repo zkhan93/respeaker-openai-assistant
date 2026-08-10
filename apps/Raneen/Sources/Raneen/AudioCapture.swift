@@ -43,10 +43,25 @@ final class AudioCapture {
     /// dead microphone is silent in exactly the way a quiet room is.
     var onInterruption: (() -> Void)?
 
+    private var opened: AudioDevice?
+
     var isRunning: Bool {
         lock.lock()
         defer { lock.unlock() }
         return running
+    }
+
+    /// The device currently open, or nil when capture is not running.
+    ///
+    /// Exists so the caller can tell a real device change from a
+    /// self-inflicted one. Restarting the engine posts a configuration
+    /// change, so a restart triggered by that notification restarts
+    /// forever — comparing against what is actually open is what breaks
+    /// the loop.
+    var openedDevice: AudioDevice? {
+        lock.lock()
+        defer { lock.unlock() }
+        return running ? opened : nil
     }
 
     /// The format the hardware is actually delivering, for diagnostics.
@@ -145,6 +160,7 @@ final class AudioCapture {
         lock.lock()
         running = true
         installed = true
+        opened = device ?? AudioDevice.systemDefault(.input)
         lock.unlock()
 
         NSLog(
@@ -166,6 +182,7 @@ final class AudioCapture {
         let wasInstalled = installed
         installed = false
         running = false
+        opened = nil
         lock.unlock()
         guard wasInstalled else { return }
 

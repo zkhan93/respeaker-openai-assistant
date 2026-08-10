@@ -107,6 +107,7 @@ final class EarconPlayer {
     private var format: AVAudioFormat?
     private let lock = NSLock()
     private var ready = false
+    private var opened: AudioDevice?
     private let volume: Double
 
     /// Which output to reopen on, asked afresh each time.
@@ -171,6 +172,7 @@ final class EarconPlayer {
         }
         player.play()
         format = mono
+        opened = device ?? AudioDevice.systemDefault(.output)
         ready = true
 
         NotificationCenter.default.addObserver(
@@ -196,7 +198,17 @@ final class EarconPlayer {
     }
 
     /// The output device moved. Rebuild against the new one.
+    ///
+    /// Guarded for the same reason capture is: starting this engine posts
+    /// a configuration change, so reopening on every notification reopens
+    /// forever. Only a genuinely different device is worth the churn.
     @objc private func outputChanged(_ notification: Notification) {
+        let target = deviceProvider?()
+        lock.lock()
+        let current = opened
+        lock.unlock()
+        if let current, current.uid == target?.uid { return }
+
         NSLog("earcon output device changed — reopening")
         teardown()
         // A moment for the new device to settle; a Bluetooth handoff is
@@ -212,6 +224,7 @@ final class EarconPlayer {
         let wasReady = ready
         ready = false
         format = nil
+        opened = nil
         lock.unlock()
         guard wasReady else { return }
 
