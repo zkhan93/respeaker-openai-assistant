@@ -7,11 +7,15 @@ not require a working PortAudio until an adapter is actually constructed.
 _EXPORTS = {
     "Earcon": "earcon_indicator",
     "EarconIndicator": "earcon_indicator",
+    "FormatMismatch": "pipe_audio_source",
+    "FrameFormat": "pipe_audio_source",
     "HotkeyListener": "hotkey_listener",
     "HotkeySpecError": "hotkey_listener",
     "KeyboardTextSink": "keyboard_text_sink",
+    "PipeAudioSource": "pipe_audio_source",
     "SoundDeviceSink": "sounddevice_sink",
     "SoundDeviceSource": "sounddevice_source",
+    "check_format": "pipe_audio_source",
 }
 
 __all__ = list(_EXPORTS)

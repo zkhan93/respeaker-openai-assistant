@@ -12,10 +12,12 @@ that is a runtime failure on a user's laptop today; here it is a red test.
 from __future__ import annotations
 
 import inspect
+import io
 
 import pytest
 
 from voice_core.ports.audio import AudioSink, AudioSource
+from voice_desktop.adapters.pipe_audio_source import PipeAudioSource
 from voice_desktop.adapters.sounddevice_sink import SoundDeviceSink
 from voice_desktop.adapters.sounddevice_source import SoundDeviceSource
 
@@ -24,6 +26,36 @@ def test_source_satisfies_the_audio_source_protocol():
     # runtime_checkable protocols only verify method presence, which is
     # exactly the drift we want to catch cheaply.
     assert isinstance(SoundDeviceSource(), AudioSource)
+
+
+@pytest.mark.parametrize("method", ["start", "stop", "close"])
+def test_pipe_source_signature_matches_the_port(method: str):
+    """The pipe adapter drifting from the port is the same class of bug.
+
+    It matters more here, not less: a native host feeding this adapter has
+    no other way to notice, whereas a broken sounddevice adapter fails on
+    the developer's own laptop (ROADMAP AD-16).
+    """
+    expected = inspect.signature(getattr(AudioSource, method))
+    actual = inspect.signature(getattr(PipeAudioSource, method))
+    assert list(actual.parameters) == list(expected.parameters), (
+        f"PipeAudioSource.{method} parameters drifted from the port"
+    )
+
+
+def test_every_source_adapter_agrees_on_the_frame_format():
+    """All three hosts must deliver identical frames.
+
+    The whole premise of AD-16 is that nothing downstream can tell which
+    adapter produced a frame. If these ever diverge, the VAD's 20 ms
+    sub-framing and openWakeWord's 1280-sample requirement break for one
+    host only — the hardest kind of bug to attribute.
+    """
+    shape = (16000, 1, 1280)
+    for source in (SoundDeviceSource(), PipeAudioSource(io.BytesIO())):
+        assert (source.sample_rate, source.channels, source.chunk_size) == shape, (
+            f"{type(source).__name__} disagrees about the frame format"
+        )
 
 
 def test_sink_satisfies_the_audio_sink_protocol():

@@ -795,6 +795,231 @@ but it does not say *why* the module is absent. Unreachable from Raneen itself (
 shell always uses `trigger="external"`), so left as is.
 
 
+### AD-16 — The native layer owns audio devices; the core takes bytes
+
+**Added 2026-08-08.** Triggered by an ordinary request: pick the input and output device from
+a menu the way Teams does, and have connecting or disconnecting AirPods mid-session just
+work. Chasing it exposed a boundary that was drawn correctly but implemented on the wrong
+side of the process line.
+
+**Decision.** Device enumeration, selection, hot-plug and disconnect handling move entirely
+into the native shell, per platform. The core keeps the `AudioSource` / `AudioSink` ports
+from AD-4 unchanged and gains one new adapter — `PipeAudioSource` — which receives PCM16
+frames from the host over a dedicated pipe. **`voice-core` does not change at all.** That the
+change is purely additive is the evidence the port was drawn in the right place.
+
+#### The audit that prompted it
+
+The question asked was "are we doing device-level things in core?" Answer: no.
+
+| question | result |
+| --- | --- |
+| Does `voice-core` import any audio backend? | **No.** `grep -riE "sounddevice\|pyaudio\|portaudio\|alsa\|coreaudio"` over `voice-core/src` returns docstrings only. The single non-comment `device` is `faster_whisper_engine`'s `cpu`/`cuda`, a *compute* device. |
+| Where does device code live? | `voice-desktop/adapters/sounddevice_*.py` and `voice-assistant/adapters/pyaudio_*.py` — adapters, exactly as AD-2 requires. |
+| What does `Transcriber` hold? | `audio_pipeline.create_reader()` — a cursor into an in-memory ring buffer. It has never known what a microphone is. |
+
+So the port was right. What was *legacy* is the assumption that the thing implementing the
+port must be Python. On the Pi that was correct — there is no native shell, Python **is** the
+app. On desktop it stopped being true the moment AD-15 shipped a Swift host, and we did not
+revisit it.
+
+#### The real argument: this deletes work rather than moving it
+
+A first design kept PortAudio capturing and had Swift merely *name* the device. Every piece
+of that design was a workaround for a portable C library that predates hot-plugging being
+routine, not a solution to a domain problem:
+
+| Workaround that design needed | Why | Under native capture |
+| --- | --- | --- |
+| Terminate/reinitialise PortAudio to refresh its device list | The CoreAudio backend enumerates once at `Pa_Initialize` and never refreshes, so a running helper is blind to AirPods appearing | Deleted — CoreAudio notifies |
+| Persist device *names*, exact-match before substring | PortAudio exposes indices only, and they renumber on every connect | Deleted — `kAudioDevicePropertyDeviceUID` is stable |
+| Frame watchdog to notice a dead device | PortAudio's disconnect behaviour is host-API- and version-dependent, and the common case is the callback silently ceasing | **Survives**, but only as a generic liveness check |
+| Close the output stream on default-changed | The sink pins an index at first open, so "follow system default" silently keeps playing into the old device | Deleted — native playback follows the default itself |
+| Hard timeout around `close()` on a vanished device | Unknown whether PortAudio blocks there; untestable without unplugging hardware | Deleted |
+
+Five workarounds, one survivor. That asymmetry is the whole justification.
+
+#### Measured, not assumed (2026-08-08)
+
+| question | result |
+| --- | --- |
+| Will a 24 kHz AirPods mic serve our fixed 16 kHz / mono / int16 contract? | **Yes.** `Pa_IsFormatSupported` accepts it for every device present; CoreAudio resamples underneath. Checked via `sd.check_input_settings`, which does *not* open the device and so raises no TCC prompt. |
+| Cost of a PortAudio reinit | 2.9 ms — cheap, but requires every stream in the process closed first, and the earcon sink deliberately holds one open |
+| Are device names unique? | **No.** With AirPods connected the list holds two entries both named `Zeeshan's AirPods - Find My` — one input, one output. The direction filter saves that case; two identical USB interfaces would not be distinguishable. |
+
+This is why the format contract is safe across a swap: the rate is fixed by *our request*, not
+by the hardware, so `AudioPipeline`'s VAD tracker (built from `source.sample_rate`) and
+`Transcriber`'s engine-rate assertion both keep holding.
+
+#### Who converts the sample rate: the native side. Who re-blocks: the core.
+
+Decided explicitly, because the obvious "write the converter once in Python and let every
+shell send raw hardware frames" is wrong in an interesting way.
+
+**Format conversion (rate, channels, bit depth) belongs to the native shell.**
+
+* *The port contract already fixes the format.* `AudioSource` promises PCM16 mono, and every
+  adapter honours it today only because PortAudio quietly converts on their behalf. If
+  `PipeAudioSource` were the one adapter delivering 48 kHz float32 stereo, the core would
+  grow a hardware-format conversion path existing for exactly one transport — the coupling
+  AD-4 removed. **"The core takes bytes" only stays true if the bytes are always the same
+  shape.**
+* *This is correctness-critical DSP, not glue.* 24 kHz → 16 kHz is a 2:3 ratio, not clean
+  decimation. Done naively it aliases — inaudible to a human, not to Whisper. Done properly
+  it needs a polyphase anti-aliasing filter, and in Python that means either re-adding the
+  scipy the `Makefile` deliberately excludes (`EXCLUDES := openwakeword scipy sklearn av`,
+  ~50 MB) or hand-rolling a windowed-sinc FIR on numpy. That code looks fine, passes a smoke
+  test, and silently costs accuracy.
+* *It is not written three times.* It is three bindings to resamplers Apple and Microsoft
+  already maintain and test harder than we could — `AVAudioConverter` is ~30 lines of setup.
+  PortAudio does precisely this for the Pi and the CLI already; the change makes it explicit
+  rather than accidental.
+* Bandwidth is the weakest argument but points the same way: 48 kHz float32 stereo is
+  384 KB/s against **32 KB/s**.
+
+**Re-blocking to exactly `chunk_size` (1280) belongs to the core.** It is a ring buffer, not
+signal processing — identical on every platform and unit-testable with no audio hardware.
+The decisive detail: `PipeAudioSource` needs that buffer *regardless*, because a pipe read
+returns whatever is available and never aligns to frame boundaries. So letting the shell emit
+whatever buffer sizes the OS converter naturally produces costs **zero extra code** while
+making every native shell simpler.
+
+The split is therefore: **platform-specific correctness → the platform; universal bookkeeping
+→ shared, once.**
+
+**The wire format is declared in the handshake and asserted.** A mismatch does not fail
+cleanly — it yields transcription that *almost* works, the worst class of bug to chase. If a
+shell ever sends float32 by mistake that must be a startup error, not a page of plausible
+nonsense. int16 at the source, never float32: half the bandwidth, and the core is PCM16 end
+to end.
+
+**Transport.** A dedicated file descriptor rather than base64 inside the JSON control stream
+— same cost either way, but it keeps a high-rate binary stream out of a line-oriented control
+channel a human is expected to read while debugging.
+
+#### Disconnection is the hard half, and it fails silently
+
+Worth recording because the obvious mental model is wrong. When a capture device disappears
+the bad outcome is **not** a crash: the stream still reports itself alive, nothing raises, and
+the callback simply stops firing. The ring buffer stops filling and dictation quietly does
+nothing — indistinguishable from a quiet room. Any design here is judged on whether it
+*notices*, not on how it recovers.
+
+Native capture gets an explicit device-died notification, which is the fast path. The frame
+watchdog stays as the backstop because the two fail differently: the notification catches
+device removal precisely, the watchdog catches everything else — a wedged driver, a stall,
+another app taking the device exclusively, wake-from-sleep. Frames arrive every 80 ms
+deterministically and flow whether or not dictation is armed (`audio_pipeline.start()` is
+unconditional; arming gates only the trigger), so "no frame for 1 s ⇒ capture is dead" needs
+no arm-state special-casing.
+
+**Recovery splits on the selection the user made**, which is why "System Default" must be a
+first-class choice and not `None`-by-accident — today `None` conflates *no preference* with
+*could not find it*:
+
+* **System Default** — the OS has already moved the default elsewhere. Follow it. Brief gap,
+  otherwise invisible.
+* **An explicitly chosen device** — fall back to the default and keep working, but say so
+  visibly. Dying entirely is worse; switching to a microphone in another room *without
+  saying* is worse still. Remember the preference and re-adopt when the device returns —
+  that is what makes a reconnect feel like Teams rather than like a restart.
+
+Recovery must be rate-limited; repeated failure backs off rather than hammering device-open
+every second.
+
+**Mid-utterance disconnect loses audio and no design recovers it.** Close the segment and
+transcribe what was captured — exactly as `_close_segment` already does for `max_duration`.
+Half a sentence beats nothing, and where it truncates tells the user what happened. Then
+disarm so the key is not left latched, and raise `error`.
+
+#### Earcons move to the native shell too
+
+The host already receives `{"event": "state", "pattern": "armed"}`. It can make the sound
+itself. Python synthesizing tones on behalf of a native app was always backwards, and it is
+the sole reason the output-device-follow trap above existed at all.
+
+#### ⚠️ The CLI path is not dead code. Do not delete it.
+
+**This is the part most likely to be removed by someone tidying up, so it is stated at
+length.** After this change `SoundDeviceSource`, `SoundDeviceSink` and `EarconIndicator` are
+unused *by Raneen*. They are not unused by the project.
+
+`uv run voice-desktop dictate` is the only way to exercise capture → VAD → STT → sink
+**without a native host**, and that matters for four separate reasons:
+
+1. **The development loop.** A core change is verifiable in seconds. Going through the Swift
+   app means a PyInstaller rebuild and re-sign — minutes, and ~18 s of cold start on the
+   first run after a build.
+2. **Bisecting a fault.** When dictation misbehaves, the first question is always "core or
+   shell?" The CLI answers it in one command. Delete it and every bug becomes a bug in a
+   two-process system.
+3. **Platforms with no native shell yet.** Linux and Windows have the core and nothing else.
+   Today the CLI *is* the product there.
+4. **CI.** Integration tests run headless. There is no menu bar on a build runner.
+
+`EarconIndicator` has an additional, narrower reason: **in the CLI there is no menu-bar icon,
+so sound is the only feedback channel that exists.** Removing it does not degrade the CLI, it
+blinds it — and AD-13's whole premise was that arming silently is unusable.
+
+The danger is that removal fails *quietly*. Raneen keeps working perfectly, the Swift tests
+keep passing, and the loss surfaces only the next time somebody needs to debug the core
+without a GUI. A comment is not enough protection against that, so per AD-10 this gets a
+**fitness function**: a headless CI test that drives `voice-desktop dictate` end to end
+through `SoundDeviceSource` with a synthetic device. If the CLI path rots, CI says so on the
+commit that rotted it, not six weeks later.
+
+The same reasoning protects `PyAudioSource`: the Pi has no native shell and never will.
+Three source adapters for three hosts is what a port is *for* — not duplication to be
+consolidated.
+
+#### Rejected alternatives
+
+**Swift names the device, PortAudio still opens it.** Smaller change, and it was the first
+plan. Rejected once the table above was written down: it builds all five workarounds and
+keeps two audio stacks (PortAudio *and* direct CoreAudio for enumeration) bridged by a lossy
+name→index mapping. Building it first and going native afterwards would be building
+throwaway code deliberately.
+
+**Shared memory instead of a pipe.** Overkill at 32 KB/s, and it forfeits the lifecycle
+guarantee AD-15 chose the pipe for — a pipe closes when the parent dies.
+
+**Keeping playback in Python and moving only capture.** Asymmetric for no gain; the output
+side has the same default-following problem and the same native answer.
+
+#### Known risk
+
+**Getting AVAudioEngine to emit exactly 1280-sample 16 kHz mono int16 frames.** Its tap
+delivers hardware-format buffers at whatever size it likes, so this needs `AVAudioConverter`
+plus a re-blocking buffer. Well-trodden but fiddly, and — unlike everything else here — it is
+new code rather than deleted code, so it is where the bugs will be.
+
+A small consolation: microphone TCC gets *less* strange. Today we rely on macOS attributing a
+child process's mic access to the parent bundle (verified in the AD-15 spike). If Swift opens
+the microphone, that is simply the normal case.
+
+#### Plan of record
+
+Ordered so that the risky piece is the last thing added, and so a failure is always
+attributable to one side of the pipe:
+
+- [ ] `PipeAudioSource` in `voice-desktop/adapters/`, satisfying `AudioSource` unchanged,
+      owning the accumulate-and-emit-at-`chunk_size` buffer.
+- [ ] Frame transport on a dedicated fd; `serve` gains `--audio-fd`. Format declared in the
+      handshake and asserted, so a mismatch is a startup error.
+- [ ] **Prove both with a WAV file replayed down the pipe, before any Swift audio code
+      exists.** When frames later misbehave we then already know which side is wrong.
+- [ ] Headless CI fitness function pinning the `SoundDeviceSource` CLI path (above).
+- [ ] Swift: `AVAudioEngine` capture + `AVAudioConverter` to 16 kHz mono int16 (arbitrary
+      buffer sizes — the core re-blocks).
+- [ ] Swift: device enumeration, `System Default` vs. explicit selection, persisted by
+      `DeviceUID`; input and output submenus following the `TriggerKey` pattern.
+- [ ] Swift: CoreAudio property listeners for device-list, default-changed and device-died.
+- [ ] Frame watchdog in `AudioPipeline` as the backstop, with rate-limited recovery.
+- [ ] Native earcons in Swift, driven by the existing `state` events.
+- [ ] Retire `EarconIndicator` from the *sidecar* composition path only — it stays wired for
+      the CLI.
+
+
 ### Phase 3 — Shipping
 
 - [ ] macOS `.app` bundle (py2app / Briefcase / PyInstaller — undecided, see §6).
@@ -911,6 +1136,11 @@ Risks to weigh before building the LLM variant:
 - **Not renaming** `HotwordEvent` (AD-7) — wire compatibility beats naming purity.
 - **Not creating per-OS top-level packages** (AD-1).
 - **Not moving ZMQ into core.** It is a Pi-deployment transport, not a domain concept.
+- **Not deleting the headless CLI audio path** (`SoundDeviceSource`, `SoundDeviceSink`,
+  `EarconIndicator`) once native capture lands — see the boxed warning in AD-16. They look
+  unused because Raneen stops calling them; they are the development loop, the core-vs-shell
+  bisect, the only product on Linux and Windows, and the only thing CI can run. `pytest`
+  passing is not evidence they are safe to remove.
 
 ---
 
