@@ -1020,8 +1020,27 @@ attributable to one side of the pipe:
       fails silently: the classes exist and satisfy their ports, the earcons still
       synthesize audio rather than being gutted, and `make_audio_pipeline()` with no injected
       source still builds a `SoundDeviceSource`. **DONE 2026-08-08.**
-- [ ] Swift: `AVAudioEngine` capture + `AVAudioConverter` to 16 kHz mono int16 (arbitrary
-      buffer sizes — the core re-blocks).
+- [x] **Swift: `AVAudioEngine` capture + `AVAudioConverter`** to 16 kHz mono int16
+      (`FrameConverter`, `AudioCapture`, `AudioSocket`; 63 Swift tests). **DONE 2026-08-08**,
+      behind `RANEEN_NATIVE_AUDIO=1` — see "not yet default" below.
+
+      **Transport changed to AF_UNIX.** Foundation's `Process` exposes only stdin, stdout and
+      stderr, so a Swift host cannot pass an fd without dropping to `posix_spawn`. A named
+      FIFO trades that for a worse problem: a blocking open waits for the peer, a non-blocking
+      one reports EOF *before* the writer arrives — indistinguishable from the disconnect EOF
+      is supposed to mean. `serve --audio-socket` avoids both; `--audio-fd` stays for tests.
+
+      **Two converter behaviours found by measuring, both now pinned by tests.** One call does
+      *not* return `frames × ratio` — 4800 frames at 48 kHz yields 1365 samples, not 1600 —
+      so anything sizing a buffer from the ratio drops audio intermittently. And output runs a
+      constant ~600–1160 samples behind input, a deficit that does *not* grow with duration
+      (6.8% over 2 s, 0.4% over 16 s): latency, not loss. The test asserts an absolute bound
+      rather than a percentage, because a percentage passes under either and they are opposite
+      verdicts.
+
+      **Not yet default.** Every piece is unit-tested, but "does Core Audio deliver frames
+      inside a signed bundle" is only answerable by launching the app, and defaulting to on
+      before that would risk trading a working dictation tool for an untested one.
 - [ ] Swift: device enumeration, `System Default` vs. explicit selection, persisted by
       `DeviceUID`; input and output submenus following the `TriggerKey` pattern.
 - [ ] Swift: CoreAudio property listeners for device-list, default-changed and device-died.

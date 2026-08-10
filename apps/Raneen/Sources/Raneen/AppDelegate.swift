@@ -15,6 +15,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let inserter = TextInserter()
     private lazy var panel = ListeningPanel()
     private var helper: Helper?
+    private var audioSocket: AudioSocket?
+    private var capture: AudioCapture?
+
+    /// Whether this process owns the microphone (ROADMAP AD-16).
+    ///
+    /// **Opt-in until it has been run on real hardware.** Everything under
+    /// it is unit-tested, but "does Core Audio actually deliver frames
+    /// inside a signed bundle" cannot be answered by a test — only by
+    /// launching the app. Defaulting to on before that would risk trading
+    /// a working dictation tool for an untested one; defaulting to off
+    /// costs a single environment variable.
+    ///
+    /// Turn on with `RANEEN_NATIVE_AUDIO=1`. When off, the helper opens
+    /// the microphone through PortAudio exactly as before.
+    private static let nativeAudio =
+        ProcessInfo.processInfo.environment["RANEEN_NATIVE_AUDIO"] == "1"
 
     private var lastTranscript = "—"
     private var peak = 0
@@ -55,7 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hotkey.stop()
         panel.hide()
+        // Capture first: stopping the helper closes the far end of the
+        // socket, and there is no reason to keep converting audio for a
+        // descriptor that is about to disappear.
+        capture?.stop()
         helper?.stop()
+        audioSocket?.close()
     }
 
     // MARK: - Helper
@@ -67,7 +88,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let helper = Helper(executable: executable, arguments: ["serve"])
+        var arguments = ["serve"]
+        if Self.nativeAudio {
+            // Listen *before* spawning, so the helper's connect cannot
+            // race us. It may sit in accept() for seconds while a Whisper
+            // model loads, which is why that happens off the main queue.
+            let socket = AudioSocket()
+            do {
+                try socket.listen()
+                socket.acceptInBackground()
+                self.audioSocket = socket
+                arguments += ["--audio-socket", socket.path, "--no-sound"]
+                startCapture(sending: socket)
+            } catch {
+                NSLog("native audio unavailable (%@) — letting the helper open the mic", "\(error)")
+                self.audioSocket = nil
+            }
+        }
+
+        let helper = Helper(executable: executable, arguments: arguments)
         helper.onEvent = { [weak self] event in
             // Events arrive on a background queue.
             DispatchQueue.main.async { self?.handle(event) }
@@ -78,6 +117,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             state = "helper failed: \(error.localizedDescription)"
             rebuildMenu()
+        }
+    }
+
+    /// Open the microphone here and stream frames down to the helper.
+    ///
+    /// Failure is survivable and deliberately not fatal: the menu bar says
+    /// so and the app keeps running, because a dictation tool that refuses
+    /// to launch is worse than one that cannot hear yet — the usual cause
+    /// is a microphone grant the user has not given, which they can fix
+    /// without restarting.
+    private func startCapture(sending socket: AudioSocket) {
+        let capture = AudioCapture()
+        capture.onFrames = { [weak socket] data in
+            // Core Audio's capture thread. `send` never blocks on a
+            // missing reader — it drops, which is right for audio.
+            socket?.send(data)
+        }
+        capture.onInterruption = { [weak self] in
+            // A device vanished or the default changed. Reporting beats
+            // guessing: going quiet is indistinguishable from a silent
+            // room, which is the failure AD-16 exists to make noticeable.
+            DispatchQueue.main.async {
+                self?.state = "audio device changed — restart to resume"
+                self?.show(.error)
+                self?.rebuildMenu()
+            }
+        }
+        do {
+            try capture.start()
+            self.capture = capture
+        } catch {
+            NSLog("could not start capture: %@", "\(error)")
+            state = "microphone unavailable"
         }
     }
 
