@@ -1044,8 +1044,19 @@ attributable to one side of the pipe:
 - [ ] Swift: device enumeration, `System Default` vs. explicit selection, persisted by
       `DeviceUID`; input and output submenus following the `TriggerKey` pattern.
 - [ ] Swift: CoreAudio property listeners for device-list, default-changed and device-died.
+- [x] **Following the device** — `AVAudioEngineConfigurationChange` reopens capture on the
+      new default rather than reporting an error. Deferred while a turn is open (reopening
+      mid-sentence would cut the recording in half), debounced because one device change
+      posts several notifications, and backed off on repeated failure. **DONE 2026-08-08**,
+      verified by hand across repeated AirPods connect/disconnect.
 - [ ] Frame watchdog in `AudioPipeline` as the backstop, with rate-limited recovery.
-- [ ] Native earcons in Swift, driven by the existing `state` events.
+- [x] **Native earcons in Swift**, driven by the existing `state` events. **DONE 2026-08-08.**
+      The reason they had to move: the helper picked its output device once at startup and
+      held the stream open, so connecting AirPods left it beeping into the laptop speakers
+      with no error. `AVAudioEngine` follows the system default and rebuilds on a
+      configuration change, so the tone arrives wherever you are actually listening.
+      Pitches and timings are duplicated from `earcon_indicator.py` and pinned by a test,
+      since nothing else stops two languages drifting apart.
 - [ ] Retire `EarconIndicator` from the *sidecar* composition path only — it stays wired for
       the CLI.
 

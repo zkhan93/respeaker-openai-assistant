@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var helper: Helper?
     private var audioSocket: AudioSocket?
     private var capture: AudioCapture?
+    private var earcons: EarconPlayer?
 
     /// Whether this process owns the microphone (ROADMAP AD-16).
     ///
@@ -82,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // socket, and there is no reason to keep converting audio for a
         // descriptor that is about to disappear.
         capture?.stop()
+        earcons?.close()
         helper?.stop()
         audioSocket?.close()
     }
@@ -107,6 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.audioSocket = socket
                 arguments += ["--audio-socket", socket.path, "--no-sound"]
                 startCapture(sending: socket)
+                // --no-sound above is only safe because we make the sound
+                // ourselves; opening the device now keeps the first beep
+                // from arriving late.
+                let player = EarconPlayer()
+                player.prepare()
+                earcons = player
             } catch {
                 NSLog("native audio unavailable (%@) — letting the helper open the mic", "\(error)")
                 self.audioSocket = nil
@@ -249,6 +257,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .state(let pattern):
             state = pattern
             show(StatusIcon.forPattern(pattern))
+            // Sound is ours when we own the audio devices — the helper is
+            // run with --no-sound in that case, because its output device
+            // is fixed at startup and would keep beeping into whatever was
+            // connected then (AD-16).
+            if let earcon = Earcon.forPattern(pattern) { earcons?.play(earcon) }
             // The panel exists to answer "is it listening?" — so it
             // tracks arming, not the per-utterance cycle.
             switch pattern {
