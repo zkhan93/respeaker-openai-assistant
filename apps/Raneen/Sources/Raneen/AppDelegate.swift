@@ -19,19 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var capture: AudioCapture?
     private var earcons: EarconPlayer?
 
-    /// Whether this process owns the microphone (ROADMAP AD-16).
-    ///
-    /// **Opt-in until it has been run on real hardware.** Everything under
-    /// it is unit-tested, but "does Core Audio actually deliver frames
-    /// inside a signed bundle" cannot be answered by a test — only by
-    /// launching the app. Defaulting to on before that would risk trading
-    /// a working dictation tool for an untested one; defaulting to off
-    /// costs a single environment variable.
-    ///
-    /// Turn on with `RANEEN_NATIVE_AUDIO=1`. When off, the helper opens
-    /// the microphone through PortAudio exactly as before.
-    private static let nativeAudio =
-        ProcessInfo.processInfo.environment["RANEEN_NATIVE_AUDIO"] == "1"
+    /// Kept alive so the Core Audio listeners stay registered.
+    private var deviceObservers: [Any] = []
 
     /// Whether a turn is open, mirrored from the helper's state events.
     /// Only used to avoid reopening the microphone mid-sentence.
@@ -97,30 +86,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        var arguments = ["serve"]
-        if Self.nativeAudio {
-            // Listen *before* spawning, so the helper's connect cannot
-            // race us. It may sit in accept() for seconds while a Whisper
-            // model loads, which is why that happens off the main queue.
-            let socket = AudioSocket()
-            do {
-                try socket.listen()
-                socket.acceptInBackground()
-                self.audioSocket = socket
-                arguments += ["--audio-socket", socket.path, "--no-sound"]
-                startCapture(sending: socket)
-                // --no-sound above is only safe because we make the sound
-                // ourselves; opening the device now keeps the first beep
-                // from arriving late.
-                let player = EarconPlayer()
-                player.prepare()
-                earcons = player
-            } catch {
-                NSLog("native audio unavailable (%@) — letting the helper open the mic", "\(error)")
-                self.audioSocket = nil
-            }
+        // Listen *before* spawning, so the helper's connect cannot race
+        // us. It may sit in accept() for seconds while a Whisper model
+        // loads, which is why that happens off the main queue.
+        let socket = AudioSocket()
+        do {
+            try socket.listen()
+        } catch {
+            // There is deliberately no fallback to letting the helper open
+            // the microphone. Two capture paths meant two behaviours for
+            // device selection, hot-plug and disconnect, and only one of
+            // them was ever exercised — so the other would rot silently.
+            // If we cannot own the audio, we say so rather than quietly
+            // running a different program than the one that was tested.
+            NSLog("could not create the audio socket: %@", "\(error)")
+            state = "audio unavailable — \(error)"
+            show(.error)
+            rebuildMenu()
+            return
         }
+        socket.acceptInBackground()
+        audioSocket = socket
 
+        // --no-sound is only safe because we make the sound ourselves;
+        // opening the device now keeps the first beep from arriving late.
+        let player = EarconPlayer()
+        player.deviceProvider = { DevicePreference.resolve(.output).device }
+        player.prepare(device: DevicePreference.resolve(.output).device)
+        earcons = player
+
+        startCapture(sending: socket)
+        watchForDeviceChanges()
+
+        let arguments = ["serve", "--audio-socket", socket.path, "--no-sound"]
         let helper = Helper(executable: executable, arguments: arguments)
         helper.onEvent = { [weak self] event in
             // Events arrive on a background queue.
@@ -154,12 +152,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // plugging in AirPods is the ordinary case, not an error.
             DispatchQueue.main.async { self?.audioDeviceChanged() }
         }
+        let (device, honoured) = DevicePreference.resolve(.input)
         do {
-            try capture.start()
+            try capture.start(device: device)
             self.capture = capture
+            if !honoured {
+                // The chosen microphone is not plugged in. Working on the
+                // default beats not working, but silently listening to a
+                // different device is a surprise worth surfacing.
+                state = "chosen mic unavailable — using \(device?.name ?? "the default")"
+            }
         } catch {
             NSLog("could not start capture: %@", "\(error)")
             state = "microphone unavailable"
+        }
+    }
+
+    /// Rebuild the menu, and follow the device, when the hardware changes.
+    ///
+    /// Core Audio notifies on both the device *list* and the system
+    /// defaults. The list matters because the menu would otherwise offer
+    /// devices that have gone; the defaults matter because a user who
+    /// chose "System Default" expects to move with it.
+    private func watchForDeviceChanges() {
+        deviceObservers = AudioDevice.observe { [weak self] in
+            guard let self else { return }
+            self.rebuildMenu()
+            // A device we explicitly wanted may have just come back, or
+            // the default we were following may have moved.
+            self.audioDeviceChanged()
         }
     }
 
@@ -378,6 +399,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyItem.submenu = keyMenu
         menu.addItem(keyItem)
 
+        let inputItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        inputItem.submenu = deviceMenu(.input)
+        menu.addItem(inputItem)
+
+        let outputItem = NSMenuItem(title: "Sound output", action: nil, keyEquivalent: "")
+        outputItem.submenu = deviceMenu(.output)
+        menu.addItem(outputItem)
+
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Quit Raneen",
@@ -387,17 +416,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    /// Who owns the microphone, and at what rate.
+    /// Which microphone is live, and at what rate.
     ///
-    /// The rate is here because it is the one *observable* proof that a
-    /// device change was followed: the built-in microphone runs at
-    /// 48 kHz and AirPods at 24 kHz, so plugging them in should visibly
-    /// change this line. Without it, "followed the device" and "carried
-    /// on with the old one" look identical from the outside.
+    /// The rate earns its place: it is the one *observable* proof that a
+    /// device change was actually followed — the built-in runs at 48 kHz
+    /// and AirPods at 24 kHz. Without it, "followed the device" and
+    /// "carried on with the old one" look identical from the outside.
     private var micDescription: String {
-        guard Self.nativeAudio else { return "Mic: helper (PortAudio)" }
         guard let format = capture?.inputFormat else { return "Mic: unavailable" }
-        return String(format: "Mic: this app · %.0f kHz", format.sampleRate / 1000)
+        let name = DevicePreference.resolve(.input).device?.name ?? "Unknown"
+        return String(format: "Mic: %@ · %.0f kHz", name, format.sampleRate / 1000)
+    }
+
+    /// One direction's device list: System Default first, then everything
+    /// present, with a tick against whichever is in force.
+    private func deviceMenu(_ direction: AudioDevice.Direction) -> NSMenu {
+        let menu = NSMenu()
+        let preference = DevicePreference.current(direction)
+
+        // Pinned at the top and separated, because it is not "one of the
+        // devices" — it is the choice to keep following the system, which
+        // is a different kind of answer.
+        let follow = NSMenuItem(
+            title: "System Default", action: #selector(chooseDevice(_:)), keyEquivalent: "")
+        follow.target = self
+        follow.representedObject = DeviceChoice(direction: direction, uid: nil)
+        follow.state = preference == .systemDefault ? .on : .off
+        menu.addItem(follow)
+        menu.addItem(.separator())
+
+        let devices = AudioDevice.all(direction)
+        if devices.isEmpty {
+            menu.addItem(Self.caption("No devices found"))
+            return menu
+        }
+
+        for device in devices {
+            let item = NSMenuItem(
+                title: device.name, action: #selector(chooseDevice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = DeviceChoice(direction: direction, uid: device.uid)
+            item.state = preference == .explicit(uid: device.uid) ? .on : .off
+            menu.addItem(item)
+        }
+
+        // An explicit choice for something that is not plugged in stays
+        // ticked nowhere, so say what happened rather than showing a menu
+        // with no selection at all.
+        if case .explicit = preference, !devices.contains(where: {
+            preference == .explicit(uid: $0.uid)
+        }) {
+            menu.addItem(.separator())
+            menu.addItem(Self.caption("Chosen device not connected"))
+        }
+        return menu
+    }
+
+    /// What a device menu item carries. A class because
+    /// `representedObject` is `Any?` and this has to survive the round
+    /// trip through AppKit.
+    private final class DeviceChoice: NSObject {
+        let direction: AudioDevice.Direction
+        /// `nil` means System Default.
+        let uid: String?
+
+        init(direction: AudioDevice.Direction, uid: String?) {
+            self.direction = direction
+            self.uid = uid
+        }
+
+        var preference: DevicePreference {
+            uid.map { DevicePreference.explicit(uid: $0) } ?? .systemDefault
+        }
+    }
+
+    @objc private func chooseDevice(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? DeviceChoice else { return }
+        DevicePreference.set(choice.preference, for: choice.direction)
+
+        switch choice.direction {
+        case .input:
+            // Through the same path a hardware change takes, so choosing a
+            // microphone mid-sentence defers until the key is released
+            // rather than cutting the recording in half.
+            audioDeviceChanged()
+        case .output:
+            restartEarcons()
+        }
+        rebuildMenu()
+    }
+
+    private func restartEarcons() {
+        earcons?.close()
+        let player = EarconPlayer()
+        player.deviceProvider = { DevicePreference.resolve(.output).device }
+        player.prepare(device: DevicePreference.resolve(.output).device)
+        earcons = player
     }
 
     /// A non-interactive line. `action: nil` already makes an item

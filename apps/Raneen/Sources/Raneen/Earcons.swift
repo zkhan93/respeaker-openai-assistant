@@ -109,6 +109,15 @@ final class EarconPlayer {
     private var ready = false
     private let volume: Double
 
+    /// Which output to reopen on, asked afresh each time.
+    ///
+    /// A closure rather than a stored device because the answer changes:
+    /// the user may have picked a specific speaker, or be following the
+    /// system default, and either way the right device at reopen time is
+    /// not necessarily the one we opened with. Keeping that decision in
+    /// the composition root means this type holds no preference logic.
+    var deviceProvider: (() -> AudioDevice?)?
+
     init(volume: Double = EarconPlayer.defaultVolume) {
         self.volume = volume
     }
@@ -118,10 +127,27 @@ final class EarconPlayer {
     /// Failure is not fatal and not even reported to the user: losing the
     /// beep is a downgrade, not a breakage, and the icon and panel still
     /// say what is happening.
-    func prepare() {
+    func prepare(device: AudioDevice? = nil) {
         lock.lock()
         defer { lock.unlock() }
         guard !ready else { return }
+
+        // Before reading the format, and while stopped — same reason as
+        // capture: the node reports whichever device it is bound to.
+        if let device, let unit = engine.outputNode.audioUnit {
+            var id = device.id
+            let status = AudioUnitSetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &id,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            if status != noErr {
+                NSLog("could not select output device %@ (%d)", device.name, status)
+            }
+        }
 
         // The engine's own output format — whatever the active device
         // wants. Rendering to match avoids a resample on every beep.
@@ -176,7 +202,8 @@ final class EarconPlayer {
         // A moment for the new device to settle; a Bluetooth handoff is
         // not instant, and reopening too early just fails.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            self?.prepare()
+            guard let self else { return }
+            self.prepare(device: self.deviceProvider?())
         }
     }
 

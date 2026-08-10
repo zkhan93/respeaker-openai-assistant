@@ -54,7 +54,13 @@ final class AudioCapture {
 
     // MARK: - Lifecycle
 
-    func start() throws {
+    /// Open a microphone and start delivering frames.
+    ///
+    /// - Parameter device: Which microphone. `nil` follows whatever the
+    ///   system default is, which is what "System Default" in the menu
+    ///   means. A specific device is pinned until the user says otherwise,
+    ///   even when macOS moves its own default elsewhere.
+    func start(device: AudioDevice? = nil) throws {
         lock.lock()
         if running {
             lock.unlock()
@@ -67,6 +73,28 @@ final class AudioCapture {
         teardown()
 
         let input = engine.inputNode
+
+        // Must happen while the engine is stopped, and *before* the format
+        // is read — the input node reports the format of whichever device
+        // it is currently bound to, so querying first would configure the
+        // converter for the device we are about to stop using.
+        if let device, let unit = input.audioUnit {
+            var id = device.id
+            let status = AudioUnitSetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &id,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            if status != noErr {
+                // Not fatal: falling back to the system default keeps
+                // dictation working, which beats refusing to listen
+                // because one preference could not be honoured.
+                NSLog("could not select input device %@ (%d)", device.name, status)
+            }
+        }
         // Ask the *node*, not the device: this is the format the tap will
         // deliver, and on a Mac it is usually 48 kHz float32 regardless of
         // what the microphone natively runs at.

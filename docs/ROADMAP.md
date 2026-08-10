@@ -1038,12 +1038,24 @@ attributable to one side of the pipe:
       rather than a percentage, because a percentage passes under either and they are opposite
       verdicts.
 
-      **Not yet default.** Every piece is unit-tested, but "does Core Audio deliver frames
-      inside a signed bundle" is only answerable by launching the app, and defaulting to on
-      before that would risk trading a working dictation tool for an untested one.
-- [ ] Swift: device enumeration, `System Default` vs. explicit selection, persisted by
-      `DeviceUID`; input and output submenus following the `TriggerKey` pattern.
-- [ ] Swift: CoreAudio property listeners for device-list, default-changed and device-died.
+      **Now the only path. DONE 2026-08-08** — verified by hand across repeated AirPods
+      connect/disconnect, so `RANEEN_NATIVE_AUDIO` and the silent fall-back to helper capture
+      are both gone. Two capture paths meant two behaviours for selection, hot-plug and
+      disconnect with only one of them ever exercised, so the other would have rotted
+      unnoticed. If the audio socket cannot be created the app now says so rather than
+      quietly running a different program than the one that was tested.
+- [x] **Swift: device enumeration and selection** — `AudioDevices.swift`, with Microphone
+      and Sound output submenus. Persisted by `kAudioDevicePropertyDeviceUID`, which is what
+      PortAudio could never offer: on this machine AirPods enumerate as
+      `CC-22-FE-79-B0-DF:input` and `:output`, distinguishing two devices that share a name.
+      `System Default` is a distinct choice, not the absence of one — following the system and
+      having picked something are different states, and only the first should move when
+      AirPods connect. An explicitly chosen device that is absent falls back to the default
+      *without forgetting the preference*, so it is re-adopted when it returns.
+      **DONE 2026-08-08**, 12 tests against real Core Audio (enumeration is not
+      privacy-gated, so it runs anywhere).
+- [x] **Swift: CoreAudio property listeners** for device-list and both default-changed
+      selectors, driving both the menu and capture. **DONE 2026-08-08.**
 - [x] **Following the device** — `AVAudioEngineConfigurationChange` reopens capture on the
       new default rather than reporting an error. Deferred while a turn is open (reopening
       mid-sentence would cut the recording in half), debounced because one device change
