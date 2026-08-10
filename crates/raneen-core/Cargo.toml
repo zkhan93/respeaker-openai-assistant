@@ -1,8 +1,8 @@
 [package]
-name = "voice-helper"
+name = "raneen-core"
 version = "0.1.0"
 edition = "2021"
-description = "Spike: a native replacement for `voice-desktop serve`, speaking the same newline-JSON protocol."
+description = "The Raneen core: audio in, text out. Speaks the newline-JSON helper protocol (see protocol/README.md)."
 
 [dependencies]
 # whisper.cpp bindings. Pulls and builds whisper.cpp from source, so the
@@ -13,6 +13,9 @@ serde_json = "1"
 hound = "3"
 libc = "0.2"
 silero-vad-crs = { version = "0.4", features = ["auto"] }
+ureq = "3.4.0"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+zmq = "0.10.0"
 
 [profile.release]
 # The bundle-size half of the story: LTO plus one codegen unit lets the

@@ -25,9 +25,11 @@ import threading
 import time
 
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz — what the protocol declares
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-CRATE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DEFAULT_MODEL = os.path.expanduser("~/.cache/voice-helper/models/ggml-base.en-q5_1.bin")
+# One level up from `tools/`, and the crate located from there — so a
+# tool never has to know how deep it happens to sit.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+CRATE = os.path.join(REPO, "crates", "raneen-core")
+DEFAULT_MODEL = os.path.expanduser("~/.cache/raneen/models/ggml-base.en-q5_1.bin")
 
 
 def main() -> int:
@@ -37,7 +39,7 @@ def main() -> int:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--minutes", type=float, default=0.0,
                         help="stop after N minutes; 0 runs until Ctrl-C")
-    parser.add_argument("--helper", default=os.path.join(CRATE, "target/release/voice-helper"))
+    parser.add_argument("--helper", default=os.path.join(CRATE, "target/release/raneen-core"))
     args = parser.parse_args()
 
     try:

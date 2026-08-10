@@ -113,12 +113,12 @@ jobs:
   # whisper.cpp and the Silero C port are both built from source, so the
   # first run is minutes. The cache keys on Cargo.lock, which is why that
   # file is committed.
-  voice-helper:
-    name: voice-helper unit tests (Rust)
+  raneen-core:
+    name: raneen-core unit tests (Rust)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: crates/voice-helper
+        working-directory: crates/raneen-core
     steps:
       - uses: actions/checkout@v4
 
@@ -133,8 +133,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            crates/voice-helper/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('crates/voice-helper/Cargo.lock') }}
+            crates/raneen-core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/raneen-core/Cargo.lock') }}
 
       - name: Format check
         run: cargo fmt --check
@@ -169,25 +169,25 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            crates/voice-helper/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('crates/voice-helper/Cargo.lock') }}
+            crates/raneen-core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/raneen-core/Cargo.lock') }}
 
       - name: Cache whisper model
         id: model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/voice-helper/models
+          path: ~/.cache/raneen/models
           key: ggml-base.en-q5_1
 
       - name: Download model
         if: steps.model.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ~/.cache/voice-helper/models
-          curl -sL -o ~/.cache/voice-helper/models/ggml-base.en-q5_1.bin \
+          mkdir -p ~/.cache/raneen/models
+          curl -sL -o ~/.cache/raneen/models/ggml-base.en-q5_1.bin \
             https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
 
       - name: Build helper
-        run: cargo build --release --manifest-path crates/voice-helper/Cargo.toml
+        run: cargo build --release --manifest-path crates/raneen-core/Cargo.toml
 
       - name: Run conformance suite
         run: ./protocol/run-suite.sh rust

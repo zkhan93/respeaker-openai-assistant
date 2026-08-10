@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
-use crate::engine::Engine;
 use crate::mem::peak_rss_mb;
+use crate::stt::whisper_cpp::Whisper;
 
 pub fn run(
     model: &Path,
@@ -30,7 +30,7 @@ pub fn run(
     println!("{:<26} {:>7.0} MB {:>8}", "wav loaded", peak_rss_mb(), "-");
 
     let started = std::time::Instant::now();
-    let engine = Engine::load(model, threads, language)?;
+    let engine = Whisper::load(model, threads, language)?;
     let load_time = started.elapsed();
     println!(
         "{:<26} {:>7.0} MB {:>7.2}s",
@@ -56,8 +56,12 @@ pub fn run(
         );
         if i == 1 {
             println!(
-                "\n  transcript: {:?}\n  confidence: {:.2}\n",
-                decoded.text, decoded.confidence
+                "\n  transcript: {:?}\n  confidence: {}\n",
+                decoded.text,
+                decoded
+                    .confidence
+                    .map(|c| format!("{c:.2}"))
+                    .unwrap_or_else(|| "n/a".into()),
             );
         }
     }

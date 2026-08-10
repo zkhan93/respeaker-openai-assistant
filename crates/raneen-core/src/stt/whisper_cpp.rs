@@ -1,15 +1,20 @@
-//! The transcription engine, behind the narrowest surface that works.
+//! Local whisper.cpp — a [`Decoder`], and nothing more.
 //!
-//! This is the Rust side of ROADMAP AD-15's bet: the protocol is the
-//! boundary, so a native engine can replace the Python helper without
-//! the Swift app noticing. Everything here is what `voice_core.stt`
-//! does in Python — load a model once, transcribe many segments.
+//! Turn buffering, the worker thread and the one-`complete`-per-`end_turn`
+//! guarantee all live in [`super::buffered`], shared with the remote
+//! engine. What is left here is the part that is genuinely about
+//! whisper.cpp: loading a ggml model, the tail padding it needs, and
+//! reading token probabilities back out.
+//!
+//! `bench` uses [`Whisper::transcribe`] directly, because a benchmark
+//! wants to time a decode and not a thread handoff.
 
 use std::path::Path;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-const SAMPLE_RATE: usize = 16_000;
+use super::{Decoder, Transcription};
+use crate::audio::SAMPLE_RATE;
 
 /// Silence appended to every segment before decoding.
 ///
@@ -41,68 +46,13 @@ fn pad_tail(samples: &[f32]) -> Vec<f32> {
     padded
 }
 
-/// A decoded segment, with how sure the model was about it.
-#[derive(Debug, Clone)]
-pub struct Transcription {
-    pub text: String,
-    /// Mean per-token probability, 0.0..=1.0.
-    ///
-    /// The second line of defence, after the VAD. A VAD decides whether
-    /// *something* was there; this decides whether whisper actually
-    /// recognised it. Confident speech sits around 0.7–0.9; text
-    /// invented over noise scores far lower, because the model had no
-    /// good candidate at any position.
-    pub confidence: f32,
-}
-
-impl Transcription {
-    /// Whether this looks like real speech rather than a hallucination.
-    ///
-    /// Two independent checks, because they catch different failures:
-    ///
-    /// * A **non-speech marker** — `[BLANK_AUDIO]`, `(music)`, `[SOUND]`.
-    ///   whisper.cpp emits these deliberately, and they are not text the
-    ///   user said. Confidence does not catch them: the model is often
-    ///   *very* sure the audio was blank.
-    /// * **Low confidence** — the "Y darukinida." case. Well-formed
-    ///   nonsense over a chair scrape, which no amount of marker
-    ///   filtering would spot.
-    pub fn is_speech(&self, min_confidence: f32) -> bool {
-        !self.text.is_empty()
-            && !is_non_speech_marker(&self.text)
-            && self.confidence >= min_confidence
-    }
-}
-
-/// True when the text is nothing but bracketed annotations.
-///
-/// Whole-string, not substring: "[BLANK_AUDIO]" is a marker, but "press
-/// the [tab] key" is something a user dictated and must survive.
-fn is_non_speech_marker(text: &str) -> bool {
-    let mut depth = 0i32;
-    let mut outside = String::new();
-    for c in text.chars() {
-        match c {
-            '[' | '(' => depth += 1,
-            ']' | ')' => depth = (depth - 1).max(0),
-            _ if depth == 0 => outside.push(c),
-            _ => {}
-        }
-    }
-    // Nothing but brackets, whitespace and punctuation was said.
-    outside
-        .chars()
-        .all(|c| c.is_whitespace() || c.is_ascii_punctuation())
-}
-
-pub struct Engine {
+pub struct Whisper {
     ctx: WhisperContext,
     threads: i32,
     language: String,
 }
 
-impl Engine {
-    /// Load a ggml model. Slow (hundreds of ms) and done exactly once.
+impl Whisper {
     /// Load a ggml model.
     ///
     /// `language` is `"auto"`, or a code like `"en"` / `"hi"` / `"es"`.
@@ -195,9 +145,9 @@ impl Engine {
         }
 
         let confidence = if token_count == 0 {
-            0.0
+            None
         } else {
-            (probability_sum / token_count as f64) as f32
+            Some((probability_sum / token_count as f64) as f32)
         };
 
         Ok(Transcription {
@@ -207,49 +157,23 @@ impl Engine {
     }
 }
 
+impl Decoder for Whisper {
+    fn name(&self) -> &str {
+        // Distinguishable from the Python helper's `faster-whisper` at a
+        // glance: this string reaches the menu bar and `which-core.sh`,
+        // and telling the two cores apart is what it is for.
+        "whisper-rs"
+    }
+
+    fn decode(&self, samples: &[i16]) -> Result<Transcription, String> {
+        let floats: Vec<f32> = samples.iter().map(|s| *s as f32 / 32768.0).collect();
+        self.transcribe(&floats)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn spoken(text: &str, confidence: f32) -> Transcription {
-        Transcription {
-            text: text.to_string(),
-            confidence,
-        }
-    }
-
-    #[test]
-    fn confident_speech_survives() {
-        assert!(spoken("Kubernetes deployments need better observability.", 0.82).is_speech(0.5));
-    }
-
-    #[test]
-    fn blank_audio_markers_are_rejected_however_confident() {
-        // whisper is often *very* sure the audio was blank, so a
-        // confidence gate alone would let this straight through.
-        assert!(!spoken("[BLANK_AUDIO]", 0.99).is_speech(0.5));
-        assert!(!spoken("(upbeat music)", 0.95).is_speech(0.5));
-        assert!(!spoken("[ Silence ]", 0.9).is_speech(0.5));
-    }
-
-    #[test]
-    fn low_confidence_nonsense_is_rejected() {
-        // The live-session case: well-formed text invented over a chair
-        // scrape. No marker to spot, so only confidence catches it.
-        assert!(!spoken("Y darukinida.", 0.31).is_speech(0.5));
-    }
-
-    #[test]
-    fn brackets_inside_real_speech_survive() {
-        // The regression this filter could easily cause: dictating a
-        // sentence that happens to contain brackets.
-        assert!(spoken("press the [tab] key to continue", 0.78).is_speech(0.5));
-    }
-
-    #[test]
-    fn empty_text_is_not_speech() {
-        assert!(!spoken("", 0.9).is_speech(0.5));
-    }
 
     #[test]
     fn tail_padding_is_appended_as_silence() {

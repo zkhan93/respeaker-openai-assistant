@@ -8,17 +8,25 @@
 # doing. Talk in sentences with pauses between them; each pause longer
 # than ~640 ms should close a segment and produce its own transcript.
 #
-#   ./scripts/try-live.sh [seconds] [silero|energy]
+#   ./tools/try-live.sh [seconds] [silero|energy]
 set -euo pipefail
 
 SECONDS_TO_RECORD="${1:-12}"
 VAD="${2:-silero}"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
-MODEL="$HOME/.cache/voice-helper/models/ggml-base.en-q5_1.bin"
+# Everything is derived from the repo root, which is one level up from
+# `tools/`. The previous version walked up from inside the crate and
+# reached for `$HERE/scripts/conform.py` — a path that stopped existing
+# the day the harness moved to `protocol/`, and nothing noticed because a
+# script nobody runs in CI cannot fail visibly.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CORE="$REPO/crates/raneen-core/target/release/raneen-core"
+MODEL="$HOME/.cache/raneen/models/ggml-base.en-q5_1.bin"
 WAV="/tmp/live-take.wav"
 
-[ -x "$HERE/target/release/voice-helper" ] || { echo "build first: cargo build --release"; exit 1; }
+[ -x "$CORE" ] || {
+  echo "build first: cargo build --release --manifest-path crates/raneen-core/Cargo.toml"
+  exit 1
+}
 [ -f "$MODEL" ] || { echo "model missing: $MODEL"; exit 1; }
 
 echo "Recording ${SECONDS_TO_RECORD}s from the default microphone."
@@ -43,12 +51,12 @@ with wave.open(path, "wb") as out:
 PY
 
 echo
-python3 "$HERE/scripts/conform.py" \
+python3 "$REPO/protocol/conform.py" \
   --wav "$WAV" --settle 10 --no-arm --quiet \
-  --helper "$HERE/target/release/voice-helper serve {model} --audio-socket {socket} --trigger vad --vad $VAD" \
+  --helper "$CORE serve {model} --audio-socket {socket} --trigger vad --vad $VAD" \
   --model "$MODEL"
 
-echo "  recording kept at $WAV — rerun against it with:"
-echo "    python3 scripts/conform.py --wav $WAV --settle 10 --no-arm --quiet \\"
-echo "      --helper \"./target/release/voice-helper serve {model} --audio-socket {socket} --trigger vad --vad energy\" \\"
+echo "  recording kept at $WAV — rerun against it with the other detector:"
+echo "    python3 protocol/conform.py --wav $WAV --settle 10 --no-arm --quiet \\"
+echo "      --helper \"$CORE serve {model} --audio-socket {socket} --trigger vad --vad energy\" \\"
 echo "      --model $MODEL"

@@ -308,7 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ///
     /// Rust first because it is the default: 61 MB resident against ~480,
     /// and it exits cleanly rather than orphaning.
-    private static let helperNames = ["voice-helper", "voice-desktop"]
+    private static let helperNames = ["raneen-core", "voice-desktop"]
 
     /// Where the core lives.
     ///

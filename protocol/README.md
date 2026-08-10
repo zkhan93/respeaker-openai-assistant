@@ -4,7 +4,7 @@
 audio that proves it, and the harness that checks any implementation against it.
 
 That is the point. There are two implementations of this protocol — Rust
-(`crates/voice-helper`) and Python (`packages/voice-desktop`) — and the only
+(`crates/raneen-core`) and Python (`packages/voice-desktop`) — and the only
 thing that can hold both honest is a spec and a harness that belong to neither.
 The spec used to live in a docstring inside one of them, which made the newer
 implementation a guess at the older one's behaviour.
@@ -49,6 +49,7 @@ lifecycle guarantee a pipe buys and a socket does not.
 | --- | --- |
 | `ready` | `engine`, `model`, `sample_rate`, `audio{sample_rate,channels,sample_width,chunk_size}`, `capture` = `"host"` \| `"helper"` |
 | `state` | `pattern` — `armed` \| `listen` \| `think` \| `disarmed` \| `off` \| `error` |
+| `partial` | `text` — provisional, revised by later partials, superseded by `transcript` |
 | `transcript` | `text` |
 | `level` | `peak` (0–32767), `rms` (4 per frame) |
 | `error` | `message` |
@@ -59,6 +60,22 @@ lifecycle guarantee a pipe buys and a socket does not.
 `disarmed`/`off`. Publishing the closing state before `think` flashes the
 indicator backwards; publishing none at all leaves it stuck lit. Both have
 happened — see [LEARNINGS.md](../docs/LEARNINGS.md).
+
+**`partial` is additive and optional.** Only a streaming engine emits it, and
+a host that ignores the line behaves exactly as one that never saw it — Raneen
+needed no change when it was introduced. Two rules for anyone consuming it:
+
+* **Never treat a partial as the transcript.** It is what the engine could see
+  so far; the final decode also sees the tail, and for whisper the tail changes
+  the beginning. Text that lands in a document comes from `transcript`, always.
+* Partials are unfiltered. Confidence gating and non-speech-marker rejection
+  apply to the final only, because filtering provisional text would make a live
+  caption stutter for no benefit.
+
+`ready.engine` names which engine is answering — `whisper-rs` for the local
+model, `openai-api@<host>` for a remote service, `openai-api@<host>+whisper-rs`
+when a local fallback is armed behind it. It is the fastest way to tell what is
+actually transcribing when a remote setup misbehaves.
 
 ### Audio
 
@@ -91,8 +108,8 @@ check both.
 ```bash
 # Rust
 python3 protocol/conform.py --wav protocol/fixtures/spike.wav --quiet \
-  --helper "crates/voice-helper/target/release/voice-helper serve {model} --audio-socket {socket}" \
-  --model ~/.cache/voice-helper/models/ggml-base.en-q5_1.bin
+  --helper "crates/raneen-core/target/release/raneen-core serve {model} --audio-socket {socket}" \
+  --model ~/.cache/raneen/models/ggml-base.en-q5_1.bin
 
 # Python
 python3 protocol/conform.py --wav protocol/fixtures/spike.wav --quiet --settle 8 \
@@ -121,3 +138,21 @@ output varies by installed voice — a fixture that differs per machine cannot p
 a regression.
 
 All fixtures are 16 kHz mono PCM16, matching the contract exactly.
+
+---
+
+## Stand-in services — `doubles/`
+
+Two fake servers, so the remote and streaming engines are testable with **no
+network, no API key and no GPU box** — which is what lets them run in CI.
+
+| | Speaks | Checks |
+| --- | --- | --- |
+| `doubles/fake-stt-server.py` | `POST /v1/audio/transcriptions` | multipart framing, WAV container, declared sample rate, that no key is demanded |
+| `doubles/fake-realtime-server.py` | OpenAI Realtime over WebSocket | upgrade handshake, `session.update` (including `turn_detection: null`), base64 PCM16 appends, commit — then answers with deltas so `partial` gets exercised |
+
+Both are stdlib only. `fake-realtime-server.py` implements just enough of
+RFC 6455 to serve one client, and asserts the RFC's own worked example for
+`Sec-WebSocket-Accept` at startup: a wrong magic GUID otherwise surfaces as a
+key mismatch reported *by the client*, which reads like a bug in the code under
+test rather than in the fixture. It cost an hour once.

@@ -8,8 +8,8 @@ thing that can check both is a harness belonging to neither.
 See README.md in this directory for the contract being checked.
 
     ./conform.py --wav fixtures/spike.wav \
-      --helper "…/voice-helper serve {model} --audio-socket {socket}" \
-      --model ~/.cache/voice-helper/models/ggml-base.en-q5_1.bin
+      --helper "…/raneen-core serve {model} --audio-socket {socket}" \
+      --model ~/.cache/raneen/models/ggml-base.en-q5_1.bin
 
     ./conform.py --wav fixtures/spike.wav --settle 8 \
       --helper "voice-desktop serve --model base.en --no-sound --audio-socket {socket}"

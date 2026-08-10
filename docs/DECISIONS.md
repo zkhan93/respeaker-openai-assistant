@@ -1055,7 +1055,7 @@ Risks to weigh before building the LLM variant:
 
 ### AD-17 (provisional) — A native helper is viable; the protocol held
 
-**Spike, 2026-08-09.** `crates/voice-helper/` — Rust + whisper.cpp behind AD-15's
+**Spike, 2026-08-09.** `crates/raneen-core/` — Rust + whisper.cpp behind AD-15's
 newline-JSON protocol. **Not a decision yet**: this records what was measured so the
 decision can be made on numbers rather than intuition.
 
@@ -1127,7 +1127,7 @@ polyglot repo and unambiguous about which toolchain owns it.
 
 The spike shipped a single-consumer pipeline: socket → buffer → STT → stdout. That is all
 hold-mode dictation needs, and it is **not** enough for always-on operation, disk logging, or
-the Pi. `voice_core.bus` was ported (`crates/voice-helper/src/bus/`, 11 tests) and `serve`
+the Pi. `voice_core.bus` was ported (`crates/raneen-core/src/bus/`, 11 tests) and `serve`
 rebuilt on it.
 
 The property that matters: **always-on and hotkey are the same pipeline with a different
@@ -1162,7 +1162,7 @@ as it does on the desktop.
 
 #### VAD and the trigger modes, 2026-08-09
 
-`--trigger hold|vad|toggle` (`crates/voice-helper/src/pipeline/`, 27 tests). Verified against a
+`--trigger hold|vad|toggle` (`crates/raneen-core/src/pipeline/`, 27 tests). Verified against a
 synthesised two-sentence fixture: `vad` mode produced two transcripts with no hotkey at all,
 states cycling `listen → think → off` per sentence, while `hold` is unchanged.
 
@@ -1223,6 +1223,122 @@ arriving after audio stopped was never acted on — no frame, no evaluation, tur
 With a real mic frames keep arriving and it never shows; it would have surfaced as a hang only
 when the stream stalled, which is the worst possible time to find it. Turn logic now runs on
 every loop iteration, frame or timeout.
+
+### AD-18 — STT is a frame-level trait, so streaming is not a second pipeline
+
+**Decided 2026-08-09**, when remote transcription became a requirement rather than an option.
+
+**The forcing fact:** local whisper is not viable on a Pi 4B. That was tried; the Pi ran against
+a remote whisper on another machine. So remote STT is not a convenience for dictation — it is
+the Pi's *only* path, and therefore load-bearing for "one core, both products".
+
+Two consequences that look like implementation detail and are not:
+
+**1. The trait takes frames, not segments.** The obvious signature is
+`transcribe(segment) -> text`. It is a dead end: a streaming service holds one connection, takes
+audio continuously with no segment boundary, and answers with *many* events — interim results
+that get revised, then a final. Chopping that into repeated `transcribe()` calls discards the
+two things streaming exists for. So `Stt` is `begin_turn` / `push` / `end_turn` / `cancel`, with
+results arriving through a `TranscriptSink`, and **batch is the degenerate case** — it buffers
+on `push` and decodes on `end_turn`. Nothing above the trait branches on which kind it is, which
+is the same rule that keeps one core serving the Pi and the Mac.
+
+Whisper itself cannot stream — fixed 30 s window, non-causal encoder, no state to advance frame
+by frame. That is *why* losing 35 ms from the tail corrupted the first word. Making it look like
+streaming means re-decoding a growing window on a timer with LocalAgreement, which is a property
+of one adapter and invisible from everywhere else. **Invariant: partials are for the eyes, the
+final is for the document** — a partial is never promoted, because the full decode sees the tail.
+
+**2. Batch is universal; streaming is fragmented.** Self-hosted projects advertising
+"OpenAI-compatible" mean the REST endpoint `POST /v1/audio/transcriptions`. Verified against
+`speaches`, LocalAI, whisper.cpp server, and the hwdsl2 images — the WhisperLive image
+explicitly offers "WebSocket streaming **and** an OpenAI-compatible REST API" as two separate
+surfaces. Nobody has standardised on OpenAI Realtime. So one ~200-line client covers OpenAI's
+cloud, the user's own server and most of the self-hosted world, while streaming arrives as one
+implementation per provider. That asymmetry is the argument for the trait, not against it.
+
+**Hand-rolled and synchronous, on purpose.** `ureq` plus forty lines of multipart. There is no
+official OpenAI Rust SDK (the plausible-looking crates are community, and one advertises that it
+"mirrors the official SDK's namespacing"), and every one of them is `tokio`-based. The core has
+no async runtime anywhere; adding one for a single POST per utterance would undo the memory
+story. Cost of TLS: **binary 2.2 MB → 3.4 MB**, against a 60 MB bundle.
+
+**Three smaller decisions, each of which had a wrong default available:**
+
+* `confidence` is `Option<f32>`. OpenAI's `json` response carries no logprobs, so a remote engine
+  genuinely does not know. Forcing a number makes it fail every gate or pass every one, and both
+  are lies. `None` passes — refusing to emit speech we cannot score is the failure mode that
+  silently deletes what the user said, which is the same instinct that set `min_confidence` to 0.
+* **An API key is required only for `api.openai.com`.** The Python engine raises before it looks
+  at `base_url` ([`openai_engine.py:110`](../packages/voice-core/src/voice_core/stt/openai_engine.py)),
+  so it cannot be pointed at a keyless LAN server at all. That server is the Pi's only viable
+  STT, so this bug blocks the whole path.
+* **Fallback is a `Decoder` wrapping two `Decoder`s.** Composition at the decode seam, so
+  `Buffered` and everything above are unaware. Raneen already ships `base.en`, so a network
+  failure costs accuracy rather than the sentence. A Pi with no local model reports the failure
+  loudly instead — an appliance with no screen must say it did not hear you.
+
+**One worker, not a pool.** Ordering, not throughput. Under VAD triggering sentence *n+1* is
+spoken while *n* is in flight; concurrent decodes returning out of order would put the user's
+words in their document backwards. Locally a pool buys nothing anyway (whisper already uses every
+thread). Remotely the cost is real and bounded, and nothing is lost — the audio was buffered the
+moment it arrived. Same trade the `EventBus` makes with one thread per consumer.
+
+**Verified end to end without a network, key or GPU box.** `protocol/doubles/fake-stt-server.py` validates
+what actually went on the wire — multipart framing, WAV container, declared sample rate — and the
+suite grew two cases: a keyless self-hosted server with no local model anywhere (**10 MB RSS**,
+the Pi profile), and a dead endpoint falling back to local (full transcript recovered). Five
+conformance cases now, all passing, with the local ones byte-identical to before the refactor.
+
+#### OpenAI Realtime, 2026-08-09 — the trait's shape paid for itself
+
+`--stt realtime` (`crates/raneen-core/src/stt/realtime.rs`). Scoped to OpenAI deliberately: the
+survey above found streaming is four incompatible protocols, so supporting "streaming" in general
+is not a thing one can do — you support *providers*. This is one.
+
+**Nothing above the trait changed to add it.** `Realtime` implements `Stt` directly rather than
+`Decoder`; the segmenter, the policy, the event bus and the protocol were untouched. That is the
+return on making the trait frame-level a day earlier instead of shipping batch-only and
+retrofitting.
+
+* **`turn_detection: null`.** OpenAI will endpoint on silence if allowed, and in `vad` mode that
+  might be better — but in `hold` mode the *key* owns the boundary, and a service cutting on a
+  pause chops a held paragraph in two, which is the bug AD-12 exists to prevent. One `Policy`
+  must mean one thing across engines or there are two cores again. Audio is only sent while a
+  turn is open, so an idle connection transmits nothing.
+* **One pump thread, `read` with a 50 ms timeout.** A TLS stream cannot be split for concurrent
+  read and write — the record layer is shared state — so the usual two-thread split is unsound
+  here. One thread services the outbound queue and the socket in turn. `push` uses `try_send` on
+  a bounded channel: blocking there would stall the segment thread, which is the coupling this
+  whole change removed.
+* **`TURN_TIMEOUT` is the stuck-indicator guard.** Every `end_turn` owes the sink exactly one
+  `complete`. A service that accepts a commit and never answers would otherwise leave the
+  indicator lit with no transcript and no error — both failure modes at once. Fifteen seconds,
+  then the turn fails loudly. Same instinct as `Turn::collecting`.
+* **No fallback, and that is structural.** `Fallback` composes `Decoder`s and a streaming engine
+  never holds a whole segment to hand on. Documented rather than papered over: reliability lives
+  in `--stt remote` (batch, with fallback) or `--stt local`.
+* **base64 hand-rolled**, ~20 lines, tested against RFC 4648's vectors including all three
+  padding cases. Same trade as the multipart encoder.
+
+**The URL scheme picks the engine** — `http(s)://` batch, `ws(s)://` streaming — so the two can
+never be configured into disagreement. Default models differ per endpoint because the catalogues
+do: `whisper-1` is batch-only and has no realtime counterpart.
+
+**`protocol/doubles/fake-realtime-server.py`** is a stdlib WebSocket server (no `pip install` in CI). It
+proved the whole path: three `partial` events then the final, `rate: 16000` and
+`turn_detection: null` confirmed in the session config, 186,880 bytes received = exactly 5.84 s of
+PCM16, 9 MB RSS. Six conformance cases now.
+
+Cost with TLS *and* WebSocket: **binary 2.2 MB → 3.6 MB**. `rustls` is shared with `ureq`; only
+`webpki-roots` and `getrandom` duplicate.
+
+**One fixture bug worth recording, because the symptom lied.** The fake server had RFC 6455's
+magic GUID subtly wrong — hyphen one character off, `…-95CA-5AB0DC85B11A` instead of
+`…-95CA-C5AB0DC85B11`. It surfaced as `Key mismatch in "Sec-WebSocket-Accept"` reported *by the
+client*, which reads as a bug in the code under test. The fixture now asserts the RFC's worked
+example at startup, so the next person gets an assertion in the fixture rather than a false
+accusation against the product.
 
 ---
 

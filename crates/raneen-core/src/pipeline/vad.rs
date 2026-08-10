@@ -31,6 +31,28 @@
 //! worth having.
 
 /// Anything that can judge whether a frame contains speech.
+/// Construct the detector a `Policy` asked for.
+///
+/// Shared because there are now two callers — the segmenter and the
+/// always-on recorder — and they must degrade the same way. Each gets its
+/// **own instance**: a detector holds per-utterance state (Silero an LSTM),
+/// so sharing one between two independently-segmenting consumers would
+/// have each corrupting the other's idea of where speech began.
+pub fn build(kind: crate::pipeline::DetectorKind) -> Box<dyn SpeechDetector> {
+    match kind {
+        crate::pipeline::DetectorKind::Silero => match SileroDetector::new() {
+            Ok(silero) => Box::new(silero),
+            // Degrade loudly rather than dying: recording with a worse
+            // detector beats a helper that will not start.
+            Err(e) => {
+                eprintln!("silero unavailable ({e}); falling back to the energy detector");
+                Box::new(EnergyDetector::default())
+            }
+        },
+        crate::pipeline::DetectorKind::Energy => Box::new(EnergyDetector::default()),
+    }
+}
+
 pub trait SpeechDetector: Send {
     fn name(&self) -> &str;
 

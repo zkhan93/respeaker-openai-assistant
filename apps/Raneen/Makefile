@@ -1,28 +1,27 @@
-# Raneen — Swift menu-bar shell around the Python core.
+# Raneen — Swift menu-bar shell around the Rust core.
 #
 # The whole bundle is assembled by script rather than by Xcode: layout,
 # Info.plist and signing are all reviewable as text, and a clean checkout
 # builds the same thing without anyone opening an IDE.
 #
-#   make app     build the helper and the .app
+#   make app     build the core and the .app
 #   make run     run it (foreground, so you see helper logs)
-#   make check   drive the helper's protocol and report pass/fail
+#   make check   run the conformance suite (IMPL=rust|python)
 #   make sign    codesign with a Developer ID (needs IDENTITY=...)
 #   make dmg     package the signed app
 #   make clean
 #
-# WHICH CORE:  CORE=rust (default) | CORE=python
+# THE BUNDLED CORE IS RUST, ALWAYS.
 #
-#   make dmg                 Rust core   — ~60 MB bundle, ~65 MB resident
-#   make dmg CORE=python     Python core — ~187 MB bundle, ~480 MB resident
+# The PyInstaller path was deleted 2026-08-10 (ROADMAP step 10). It froze
+# `voice-desktop` into ~380 files and 187 MB, against one 4 MB static
+# binary, and it was the source of the worst packaging bugs this project
+# had — see LEARNINGS.md for the two hook fixes it needed to work at all.
 #
-# Both speak the same protocol (see protocol/README.md), so the Swift shell
-# is identical either way. Python stays buildable deliberately: it is the
-# reference implementation and the other half of the conformance suite.
-
-# Which core to bundle. Rust by default since 2026-08-09 — verified in the
-# real app, and 61 MB against the Python helper's ~480.
-CORE        ?= rust
+# **This did not delete the Python reference implementation.** That runs
+# from source, and `make check IMPL=python` still conformance-tests it —
+# which is the drift protection, and the reason the harness exists. What
+# went away is the *packaging*, not the second implementation.
 
 APP_NAME    := Raneen
 BUNDLE      := build/$(APP_NAME).app
@@ -46,80 +45,33 @@ ENTITLEMENTS:= Resources/entitlements.plist
 #   make dmg IDENTITY="Developer ID Application: ACME (TEAMID)"
 # ----- core selection -------------------------------------------------------
 
-RUST_CRATE   := ../../crates/voice-helper
-RUST_BIN     := $(RUST_CRATE)/target/release/voice-helper
+RUST_CRATE   := ../../crates/raneen-core
+RUST_BIN     := $(RUST_CRATE)/target/release/raneen-core
 RUST_SOURCES := $(shell find $(RUST_CRATE)/src -name '*.rs' 2>/dev/null)
 
 # The model ships inside the bundle. `default_model()` in the helper looks
 # beside its own executable first, which is why no Swift change and no
 # extra argument are needed to find it.
 MODEL_NAME   := ggml-base.en-q5_1.bin
-MODEL_SRC    ?= $(HOME)/.cache/voice-helper/models/$(MODEL_NAME)
+MODEL_SRC    ?= $(HOME)/.cache/raneen/models/$(MODEL_NAME)
 MODEL_URL    := https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$(MODEL_NAME)
 
-ifeq ($(CORE),rust)
-  HELPER_EXE    := voice-helper
-  HELPER_PREREQ := helper-rust
-else ifeq ($(CORE),python)
-  HELPER_EXE    := voice-desktop
-  HELPER_PREREQ := helper
-else
-  $(error CORE must be 'rust' or 'python', not '$(CORE)')
-endif
+HELPER_EXE := raneen-core
+
+# Which implementation `make check` conformance-tests — a separate question
+# from what gets bundled, and conflating the two in one `CORE` variable is
+# what made it look as though deleting the packaging would delete the
+# reference implementation too.
+IMPL ?= rust
 
 DEVELOPER_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
 	| sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
 IDENTITY ?= $(if $(DEVELOPER_ID),$(DEVELOPER_ID),-)
 
-.PHONY: all app helper helper-rust model swift run check sign verify dmg clean
+.PHONY: all app helper-rust model swift run check sign verify dmg clean
 
 all: app
 
-# ----- helper (Python core, frozen) -----------------------------------------
-
-# Packaging-time exclusions. These are NOT dependency changes: voice-desktop
-# still declares voice-core[whisper,piper,hotword,openai], and
-# `voice-desktop dictate --wake-word` still works when run from source. They
-# only say "this bundle does not ship that code path".
-#
-# openwakeword + its scipy/scikit-learn tail (~50 MB): Raneen drives the
-# helper with trigger="external" — the hotkey is a Swift keypress, never a
-# wake word — so the whole hotword stack is dead weight here. Excluding it
-# needs the lazy import in voice_desktop.app; module-scope, PyInstaller
-# follows it no matter what is listed below. openwakeword is excluded
-# explicitly as well as its two big deps, so that a build which *does* need
-# it fails loudly at import rather than deep inside a half-present package.
-#
-# av (PyAV, ~44 MB of bundled FFmpeg): faster-whisper uses it only in
-# `decode_audio`, for reading audio *files*. We always hand it raw PCM
-# numpy arrays (voice_core/stt/faster_whisper_engine.py), so nothing in
-# this bundle can reach a decode. But faster_whisper/audio.py does
-# `import av` at module scope and __init__ re-exports it, so dropping the
-# module alone would break `from faster_whisper import WhisperModel` —
-# hence the stub runtime hook below, and hence `make check` after any
-# faster-whisper bump.
-EXCLUDES := openwakeword scipy sklearn av
-
-# The Python sources are prerequisites too. Without them, editing
-# voice_core or voice_desktop leaves the frozen helper untouched and the
-# bundle silently ships the previous build — which presents as a fix that
-# "didn't work" and costs an hour before anyone suspects the Makefile.
-HELPER_SOURCES := $(shell find ../../packages/voice-core/src \
-                                ../../packages/voice-desktop/src -name '*.py' 2>/dev/null)
-
-build/dist/voice-desktop/voice-desktop: helper_entry.py hooks/*.py rthooks/*.py $(HELPER_SOURCES)
-	cd .. && cd .. && uv run --package voice-desktop pyinstaller \
-		--noconfirm --clean --onedir \
-		--name voice-desktop \
-		--additional-hooks-dir apps/$(APP_NAME)/hooks \
-		--runtime-hook apps/$(APP_NAME)/rthooks/rthook-stub-av.py \
-		$(foreach m,$(EXCLUDES),--exclude-module $(m)) \
-		--distpath apps/$(APP_NAME)/build/dist \
-		--workpath apps/$(APP_NAME)/build/work \
-		--specpath apps/$(APP_NAME)/build \
-		apps/$(APP_NAME)/helper_entry.py
-
-helper: build/dist/voice-desktop/voice-desktop
 
 # ----- helper (Rust core) ---------------------------------------------------
 
@@ -146,7 +98,7 @@ swift:
 
 # ----- bundle ---------------------------------------------------------------
 
-app: swift $(HELPER_PREREQ)
+app: swift helper-rust
 	@rm -rf "$(BUNDLE)"
 	@mkdir -p "$(CONTENTS)/MacOS" "$(CONTENTS)/Resources"
 	cp "$(SWIFT_BIN)" "$(CONTENTS)/MacOS/$(APP_NAME)"
@@ -154,21 +106,17 @@ app: swift $(HELPER_PREREQ)
 	cp Resources/$(APP_NAME).icns "$(CONTENTS)/Resources/"
 	cp Resources/MenuBarMark.png "$(CONTENTS)/Resources/"
 	@mkdir -p "$(HELPER_DIR)"
-ifeq ($(CORE),rust)
 	cp "$(RUST_BIN)" "$(HELPER_DIR)/$(HELPER_EXE)"
 	cp "$(MODEL_SRC)" "$(HELPER_DIR)/$(MODEL_NAME)"
-else
-	cp -R build/dist/voice-desktop/. "$(HELPER_DIR)/"
-endif
-	@echo "built $(BUNDLE) — CORE=$(CORE) ($$(du -sh "$(BUNDLE)" | cut -f1))"
+	@echo "built $(BUNDLE) — two files ($$(du -sh "$(BUNDLE)" | cut -f1))"
 
 run: app
 	"$(CONTENTS)/MacOS/$(APP_NAME)"
 
 # The protocol suite, not a bespoke script: it is the same set of cases CI
 # runs, and it drives whichever core is selected.
-check: $(HELPER_PREREQ)
-	cd ../.. && ./protocol/run-suite.sh $(CORE)
+check: helper-rust
+	cd ../.. && ./protocol/run-suite.sh $(IMPL)
 
 # ----- signing --------------------------------------------------------------
 
@@ -201,9 +149,11 @@ sign: app
 		echo ""; \
 	fi
 	@echo "signing nested binaries (parallel x$(SIGN_JOBS))…"
-	@# With CORE=rust there are no nested dylibs at all — one static binary —
-	@# so both passes below find nothing and cost nothing. That is the point:
-	@# ~380 timestamped files become 2.
+	@# There are no nested dylibs at all now — one static binary — so both
+	@# passes below find nothing and cost nothing. That is the point: the
+	@# frozen-Python bundle had ~380 files to timestamp individually, which
+	@# is why the parallel workaround and the retry exist. Kept because they
+	@# cost nothing and a future dependency could reintroduce dylibs.
 	@find "$(BUNDLE)" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 \
 		| xargs -0 -P $(SIGN_JOBS) -n1 codesign --force --timestamp \
 			--options runtime --sign "$(IDENTITY)" 2>&1 \

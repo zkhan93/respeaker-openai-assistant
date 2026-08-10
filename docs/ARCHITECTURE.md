@@ -20,7 +20,7 @@ flowchart TB
     end
 
     subgraph CORE["CORE — owns turning sound into text"]
-        RUST["Rust · crates/voice-helper<br/><b>AudioBus → VAD → Trigger →<br/>Segmenter → Whisper → EventBus</b><br/><i>no device code · no UI · no product policy</i>"]
+        RUST["Rust · crates/raneen-core<br/><b>AudioBus → VAD → Trigger →<br/>Segmenter → Whisper → EventBus</b><br/><i>no device code · no UI · no product policy</i>"]
     end
 
     subgraph CONSUME["CONSUMERS — own what the text is for"]
@@ -88,7 +88,7 @@ a disk recorder, a ZMQ bridge. Adding one adds a `Consumer`, never a mode.
 | Device I/O, hot-plug, resampling | native per platform | `apps/Raneen` (Swift), `packages/voice-*/adapters` (Python) | `AD-16` — platform APIs already solve it |
 | Hotkey capture, text insertion | native | `apps/Raneen` | needs an event tap; `CGEvent` can suppress one key, `pynput` cannot |
 | Indicators (menu bar, LED, earcons) | native | shell | the indicator lives where the user looks |
-| **Audio bus, VAD, segmentation, STT** | **Rust** | **`crates/voice-helper`** | hot path; memory and startup dominate |
+| **Audio bus, VAD, segmentation, STT** | **Rust** | **`crates/raneen-core`** | hot path; memory and startup dominate |
 | Conversation / agent loop | Python | `packages/voice-core/conversation` | LangGraph has no Rust equivalent, and shouldn't |
 | Tools, MCP, music control | Python | `packages/voice-assistant/agent` | ecosystem lives there |
 | Config, orchestration, packaging | per app | composition roots | `AD-2` — only the root knows both a port and a concrete type |
@@ -102,21 +102,32 @@ layer where the ecosystem lives.
 ## 4. Repo layout
 
 ```
-protocol/                OWNED BY NO TOOLCHAIN
+protocol/                OWNED BY NO TOOLCHAIN — everything here ASSERTS
   README.md              the wire contract — the spec's only authority
   conform.py             drives ANY implementation; the anti-drift harness
   run-suite.sh           the suite CI runs
+  zmq-check.py           always-on recording + concurrent dictation
   fixtures/*.wav         shared conformance audio
+  doubles/               stand-in services, so tests need no network or key
+
+tools/                   HUMAN-FACING — nothing here asserts
+  zmq-watch.py           watch what a running core publishes
+  which-core.sh          which core is the running app actually using
+  try-live.sh, live.py   the real microphone, not a fixture
 
 crates/
-  voice-helper/          Rust — THE CORE
+  raneen-core/          Rust — THE CORE
     src/bus/             AudioBus (ring + cursors), EventBus (fan-out)
     src/pipeline/        VAD detectors, tracker, TriggerMode, Policy
-    src/engine.rs        whisper.cpp wrapper
+    src/stt/             the frame-level Stt trait + local/remote/realtime
+    src/broadcast/       ZMQ publisher + the always-on recorder
     src/serve.rs         protocol loop — the composition root
 
 apps/
   Raneen/                Swift — macOS shell
+    Resources/           Info.plist, entitlements, the icon, brand assets
+
+examples/                for CONSUMERS of the wire format, not core developers
 
 packages/                Python — uv workspace (`members = ["packages/*"]`)
   voice-core/            ports, conversation layer, (legacy pipeline)
@@ -125,13 +136,38 @@ packages/                Python — uv workspace (`members = ["packages/*"]`)
   alt-alexa-music-mcp/   music tools
 ```
 
+**Scripts are filed by what they do, not by who wrote them.** The dividing
+question is *does it assert?* Something with a pass/fail is part of the contract
+and belongs in `protocol/`, where CI runs it. Something a person reads is a tool.
+Something aimed at a consumer of the ZMQ format is an example.
+
+This was not free to learn. Tools lived in three places — `protocol/`,
+`apps/Raneen/scripts/`, `crates/raneen-core/scripts/` — sorted by authorship, and
+when `conform.py` moved to `protocol/` both `try-live.sh` and this document kept
+pointing at the old path. Neither broke visibly, because **a script nobody runs
+in CI cannot fail loudly.** The split above is what stops that recurring.
+
 **`crates/` is top-level, not under `packages/`,** because `packages/*` is a
 `uv` workspace glob and a Cargo crate there breaks `uv sync`.
 
-**On the name `voice-helper`:** it is the core *code* but a helper *process* —
-it always runs as a child of a shell. The name describes its runtime role, which
-is still accurate. Renaming it `voice-core` would collide with the Python package
-of that name, so the rename waits for a reason better than tidiness.
+**On the name `raneen-core`.** Raneen is the **product brand** — the family, not
+the macOS app. `apps/Raneen` is one shell within it; the Pi appliance and the CLI
+are others. So naming the shared core after the brand is correct, and naming it
+after any single shell would not be.
+
+It was `voice-helper` until 2026-08-09, from the spike where it genuinely was a
+helper: a drop-in for `voice-desktop serve`, ~700 lines, no buses, one consumer.
+Once it grew the buses, the VAD and the segmentation policy that name described
+its *runtime role* rather than what it is. Prose still calls it "the helper"
+where that role is the point — it does run as a child process of a shell — but
+the artefact is the core.
+
+**Consequence to apply consistently.** The Python packages still use the older
+`voice-*` prefix (`voice-core`, `voice-desktop`, `voice-assistant`). Bringing
+them under the brand is right eventually, but `AD-3` warns why not yet: systemd
+units, the `voice-assistant` CLI entry point and the Pi deployment docs all
+reference those names, and renaming a running deployment buys nothing today.
+Do it when the Pi moves onto this core, not before.
 
 **Why `protocol/` is top-level and owned by nobody.** There are two
 implementations of this contract. The spec's authority used to be a *Python
@@ -150,7 +186,7 @@ that checks it.
 **Do not split the Rust crate into a workspace yet.**
 
 A five-crate split (`voice-protocol` / `voice-core` / `voice-stt` / `voice-helper`
-/ `voice-pi`) has been sketched. It is premature: the entire Rust core is ~1,400
+/ `voice-pi`) was sketched before the rename. It is premature: the entire Rust core is ~1,400
 lines and produces **one binary**. Crate boundaries buy an enforced dependency
 direction and separate compilation; module boundaries already give the structure,
 and `src/bus/` + `src/pipeline/` having no device dependency is currently
@@ -318,7 +354,7 @@ FIFO (non-blocking open reports EOF before the writer arrives — indistinguisha
 from a real disconnect), **not** base64 in the control stream.
 
 Because the protocol is language-neutral, it is also the **anti-drift mechanism**:
-`crates/voice-helper/scripts/conform.py` drives *any* implementation, so Rust and
+`protocol/conform.py` drives *any* implementation, so Rust and
 Python can be held to the same fixtures. It has already caught a real divergence.
 
 ---

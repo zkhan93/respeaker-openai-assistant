@@ -4,7 +4,7 @@
 //!
 //! ```text
 //!   socket ──> AudioBus ──┬──> level cursor    ──> protocol `level`
-//!                         ├──> segment cursor  ──> STT ──> EventBus
+//!                         ├──> segment cursor  ──> Stt ──> EventBus
 //!                         └──> (recorder cursor, when it exists)
 //!
 //!   EventBus ──┬──> ProtocolConsumer   (stdout JSON — the host)
@@ -26,6 +26,19 @@
 //!
 //! `wake_word` is the missing fourth. It is the same shape as `vad` and
 //! waits only on a Rust wake-word detector.
+//!
+//! ## The segmenter does not own audio any more
+//!
+//! It used to buffer the turn itself and call `transcribe()` inline. Now
+//! it pushes frames at an [`Stt`] and signals boundaries; the engine owns
+//! the buffer and answers through a sink, on its own thread. Two things
+//! fall out of that:
+//!
+//! * A decode no longer blocks the VAD, the trigger logic, or the next
+//!   turn. That was survivable at 0.28 s locally and is not survivable
+//!   against a network round trip — and the Pi has no local model.
+//! * A streaming engine slots in without the segmenter noticing, because
+//!   `push`/`end_turn` is already the shape a WebSocket wants.
 
 use std::io::{BufRead, Read};
 use std::os::unix::net::UnixStream;
@@ -35,14 +48,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::audio::{self, FrameBuffer};
+use crate::broadcast::publisher::{ZmqEvents, ZmqPublisher};
+use crate::broadcast::recorder;
 use crate::bus::audio_bus::{AudioBus, AudioBusReader, Frame};
 use crate::bus::event_bus::{Consumer, Event, EventBus};
-use crate::engine::Engine;
-use crate::pipeline::vad::{
-    EnergyDetector, SileroDetector, SpeechDetector, Transition, VoiceActivityTracker,
-};
-use crate::pipeline::{DetectorKind, Policy, TriggerMode};
+use crate::pipeline::vad::{Transition, VoiceActivityTracker};
+use crate::pipeline::{Policy, TriggerMode};
 use crate::protocol::EventWriter;
+use crate::stt::{self, Stt, SttSpec, TranscriptSink, Transcription, TurnId};
 
 /// How long a cursor waits before looping to re-check shutdown.
 const POLL: Duration = Duration::from_millis(200);
@@ -62,6 +75,7 @@ impl Consumer for ProtocolConsumer {
     fn on_event(&mut self, event: &Event) {
         match event {
             Event::State { pattern } => self.writer.state(pattern),
+            Event::Partial { text } => self.writer.partial(text),
             Event::Transcript { text, .. } => self.writer.transcript(text),
             Event::TranscriptionFailed { message, seconds } => {
                 // The duration goes in the message rather than being
@@ -80,51 +94,156 @@ impl Consumer for ProtocolConsumer {
 
 /// Whether a turn is open, and where its audio starts.
 ///
-/// The samples themselves are *not* here — they live in the AudioBus,
-/// and the segment cursor reads them out. That is the difference between
-/// this and the pre-bus version: audio is no longer owned by whoever
-/// happened to be recording it, so a second consumer can have it too.
+/// The samples themselves are *not* here — they live in the AudioBus and
+/// in whichever engine is collecting. That is the difference between this
+/// and the pre-bus version: audio is no longer owned by whoever happened
+/// to be recording it, so a second consumer can have it too.
 #[derive(Default)]
 struct Turn {
     armed: bool,
     /// Whether the segmenter has actually opened a segment for the
     /// current turn.
     ///
-    /// Exists so `disarm` knows whether anybody is going to publish the
-    /// closing states. Arm and disarm inside one poll interval leaves the
-    /// segmenter having never noticed, and without this the host is left
-    /// showing `armed` forever — a stuck indicator, which is the exact
-    /// failure mode this codebase keeps refusing to ship.
+    /// Read by two parties. `disarm` uses it to know whether anybody is
+    /// going to publish the closing states — arm and disarm inside one
+    /// poll interval leaves the segmenter having never noticed, and
+    /// without this the host is left showing `armed` forever. The sink
+    /// uses it to decide whether a finished decode should close the
+    /// indicator at all.
     collecting: bool,
     /// Bumped on every arm/disarm so a segment in flight can tell it has
-    /// been superseded. AD-11's `drop_stale`, in embryo.
+    /// been superseded. AD-11's `drop_stale`.
     generation: u64,
 }
 
-pub fn run(model: &Path, socket_path: &Path, threads: i32, policy: Policy) -> Result<(), String> {
-    let writer = Arc::new(EventWriter::new());
+/// Turns engine results into protocol events.
+///
+/// This is where transcription re-joins the pipeline after leaving the
+/// segment thread. It runs on whatever thread the engine finished on, so
+/// everything it touches is shared state behind a lock.
+struct EventSink {
+    events: Arc<EventBus>,
+    turn: Arc<Mutex<Turn>>,
+    policy: Policy,
+}
 
-    // Load before connecting: a model that fails should report an error
-    // the host can show, not leave Raneen's accept() waiting on a helper
-    // that is about to die.
-    let engine = Arc::new(Engine::load(model, threads, &policy.language)?);
-    let model_name = model
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
+impl TranscriptSink for EventSink {
+    fn partial(&self, _turn: TurnId, text: &str) {
+        // Deliberately not gated on confidence or markers: a partial is
+        // provisional by definition and will be replaced. Filtering it
+        // would make live text stutter for no benefit, since the final
+        // gets the full check.
+        self.events.publish(Event::Partial {
+            text: text.to_string(),
+        });
+    }
+
+    fn complete(&self, turn: TurnId, result: Result<Transcription, String>, seconds: f32) {
+        let (generation, collecting) = {
+            let state = self.turn.lock().unwrap_or_else(|e| e.into_inner());
+            (state.generation, state.collecting)
+        };
+
+        let stale = generation != turn;
+        if stale {
+            eprintln!("segment finished after a newer turn began (gen {turn} -> {generation})");
+        }
+
+        // AD-11's warning, restated: under a hotkey the next trigger is
+        // the next sentence, so dropping on staleness would lose it.
+        // Dictation therefore sets `drop_stale = false`; a turn-based
+        // assistant wants the opposite.
+        if !(stale && self.policy.drop_stale) {
+            match result {
+                Ok(decoded) if decoded.is_speech(self.policy.min_confidence) => {
+                    self.events.publish(Event::Transcript {
+                        text: decoded.text,
+                        seconds,
+                    });
+                }
+                // Rejected, and *said so* rather than dropped in silence.
+                // This is the one place where discarding text is correct,
+                // so it is also the one place where a log line is the only
+                // way to tell a working filter from a broken microphone.
+                Ok(decoded) if !decoded.text.is_empty() => eprintln!(
+                    "rejected {seconds:.1}s as non-speech (confidence {}): {:?}",
+                    decoded
+                        .confidence
+                        .map(|c| format!("{c:.2}"))
+                        .unwrap_or_else(|| "n/a".into()),
+                    decoded.text
+                ),
+                Ok(_) => {}
+                Err(message) => {
+                    self.events
+                        .publish(Event::TranscriptionFailed { message, seconds });
+                }
+            }
+        }
+
+        // Close the indicator only when nobody is collecting.
+        //
+        // One rule covering three cases that used to need their own
+        // handling: a normal close (nobody collecting — close it), a
+        // length-forced cut that rolled into a continuation (still
+        // collecting — the user never stopped talking, so saying they did
+        // would be a lie), and a stale result arriving while a newer turn
+        // is live (that turn already published `listen`).
+        if !collecting {
+            self.events.publish(Event::State {
+                pattern: self.policy.mode.idle_pattern().into(),
+            });
+        }
+    }
+}
+
+pub fn run(
+    spec: &SttSpec,
+    socket_path: &Path,
+    policy: Policy,
+    zmq_endpoint: Option<&str>,
+) -> Result<(), String> {
+    let writer = Arc::new(EventWriter::new());
 
     let events = Arc::new(EventBus::new());
     events.subscribe(Box::new(ProtocolConsumer {
         writer: Arc::clone(&writer),
     }));
-    // A DiskRecorder subscribes here, and takes its own AudioBus reader
-    // for the audio half. Neither the pipeline nor the protocol changes.
+
+    // Bound before anything else that could fail late: an endpoint
+    // already in use should be a startup error, not a recorder that
+    // silently publishes into nothing all day.
+    let publisher = match zmq_endpoint {
+        Some(endpoint) => {
+            let publisher = Arc::new(ZmqPublisher::bind(endpoint)?);
+            events.subscribe(Box::new(ZmqEvents::new(Arc::clone(&publisher))));
+            Some(publisher)
+        }
+        None => None,
+    };
+
+    let turn = Arc::new(Mutex::new(Turn::default()));
+
+    // Built before connecting: an engine that cannot start — a missing
+    // model, a URL with no key — should report an error the host can
+    // show, not leave Raneen's accept() waiting on a helper that is about
+    // to die. Note this reaches the network for a remote engine only when
+    // the first segment arrives, so a server that is down does not block
+    // startup; it surfaces as a failed turn, which is what the fallback
+    // is for.
+    let (stt, model_label) = stt::build(
+        spec,
+        Arc::new(EventSink {
+            events: Arc::clone(&events),
+            turn: Arc::clone(&turn),
+            policy: policy.clone(),
+        }),
+    )?;
 
     let bus = AudioBus::new(crate::bus::audio_bus::DEFAULT_CAPACITY);
     let stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("could not connect to {}: {e}", socket_path.display()))?;
 
-    let turn = Arc::new(Mutex::new(Turn::default()));
     let running = Arc::new(AtomicBool::new(true));
 
     // Socket -> AudioBus. Does nothing else, so a slow consumer can
@@ -157,20 +276,83 @@ pub fn run(model: &Path, socket_path: &Path, threads: i32, policy: Policy) -> Re
             .map_err(|e| format!("could not spawn the level thread: {e}"))?;
     }
 
+    // Always-on recording, on its own cursor. Independent of the
+    // segmenter in every way that matters: its own detector, its own
+    // pre-roll, no engine. So the hotkey keeps dictating while this runs,
+    // and neither can stall the other.
+    let recorder = publisher.as_ref().map(|publisher| {
+        let mut cursor = bus.create_reader();
+        let publisher = Arc::clone(publisher);
+        let events = Arc::clone(&events);
+        let running = Arc::clone(&running);
+        let detector = crate::pipeline::vad::build(policy.detector);
+        let silence_frames = policy.silence_frames;
+        std::thread::Builder::new()
+            .name("audio:recorder".into())
+            .spawn(move || {
+                recorder::run(
+                    &mut cursor,
+                    detector,
+                    publisher,
+                    events,
+                    running,
+                    silence_frames,
+                )
+            })
+    });
+    let recorder = match recorder {
+        Some(Ok(handle)) => Some(handle),
+        Some(Err(e)) => return Err(format!("could not spawn the recorder thread: {e}")),
+        None => None,
+    };
+
+    // The format, republished for subscribers that join late.
+    //
+    // Fast at first, then settling down. PUB/SUB has no replay *and* a
+    // subscriber's subscription takes a moment to reach the publisher —
+    // ZeroMQ's slow-joiner problem — so anything sent in the first
+    // instants after a consumer connects is genuinely lost. A flat 30 s
+    // interval means a consumer that starts alongside the core waits half
+    // a minute to learn the sample rate, and a consumer that assumes
+    // instead of waiting records chipmunks.
+    if let Some(publisher) = publisher.as_ref() {
+        let publisher = Arc::clone(publisher);
+        let running = Arc::clone(&running);
+        std::thread::Builder::new()
+            .name("zmq:meta".into())
+            .spawn(move || {
+                let mut published = 0u32;
+                while running.load(Ordering::Relaxed) {
+                    publisher.meta();
+                    published += 1;
+                    // 2 s for the first few, then 30 s forever.
+                    let interval = if published <= 5 { 10 } else { 150 };
+                    for _ in 0..interval {
+                        if !running.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                }
+            })
+            .map_err(|e| format!("could not spawn the meta thread: {e}"))?;
+    }
+
     // Segmentation, on its own cursor.
     let segmenter = {
         let mut cursor = bus.create_reader();
         let turn = Arc::clone(&turn);
         let running = Arc::clone(&running);
         let events = Arc::clone(&events);
-        let engine = Arc::clone(&engine);
+        let stt = Arc::clone(&stt);
+        let policy = policy.clone();
         std::thread::Builder::new()
             .name("audio:segment".into())
-            .spawn(move || segment(&mut cursor, turn, running, events, engine, policy))
+            .spawn(move || segment(&mut cursor, turn, running, events, stt, policy))
             .map_err(|e| format!("could not spawn the segment thread: {e}"))?
     };
 
-    writer.ready("whisper-rs", model_name);
+    writer.ready(stt.name(), &model_label);
 
     // Commands on the main thread. EOF means Raneen died, and honouring
     // it is the whole reason AD-15 chose a pipe over a socket.
@@ -187,11 +369,20 @@ pub fn run(model: &Path, socket_path: &Path, threads: i32, policy: Policy) -> Re
     }
 
     // Shutdown, in dependency order: stop producing, let the segmenter
-    // finish what it holds, then drain consumers. Bounded at every step
-    // — an unbounded join is exactly the bug that leaves the Python
-    // helper orphaned for hours.
+    // finish what it holds, drain the engine, then drain consumers.
+    //
+    // `stt.finish()` sits before `events.shutdown()` on purpose. A decode
+    // still in flight has audio the user already spoke; letting it
+    // complete into a live bus is the difference between quitting and
+    // silently eating the last sentence. Bounded at every step — an
+    // unbounded join is exactly the bug that leaves the Python helper
+    // orphaned for hours.
     running.store(false, Ordering::Relaxed);
     let _ = segmenter.join();
+    if let Some(recorder) = recorder {
+        let _ = recorder.join();
+    }
+    stt.finish();
     events.shutdown();
     writer.bye();
     Ok(())
@@ -233,9 +424,9 @@ fn handle(line: &str, writer: &EventWriter, turn: &Mutex<Turn>, events: &EventBu
 ///
 /// `armed` is published here because it must be immediate — it is the
 /// user's confirmation that the key landed. The closing pair, `think`
-/// then `disarmed`, belongs to the segmenter: only it knows when the
-/// audio has been decoded, and publishing `disarmed` here would put it
-/// *before* `think` on the wire and flash the indicator backwards.
+/// then `disarmed`, belongs to the segmenter and the sink: only they know
+/// when the audio has been decoded, and publishing `disarmed` here would
+/// put it *before* `think` on the wire and flash the indicator backwards.
 fn set_armed(turn: &Mutex<Turn>, events: &EventBus, armed: bool) {
     let nobody_is_collecting = {
         let mut state = turn.lock().unwrap_or_else(|e| e.into_inner());
@@ -293,49 +484,41 @@ fn ingest(mut stream: UnixStream, bus: Arc<AudioBus>, running: Arc<AtomicBool>) 
     eprintln!("audio stream ended");
 }
 
-/// Collect frames while armed, transcribe on disarm.
+/// Decide when turns open and close, and feed the engine.
 ///
-/// Reads from its own cursor, so it competes with nobody. On arm it
-/// skips the backlog — that audio is the silence before the press — and
-/// then rewinds deliberately for pre-roll.
+/// Reads from its own cursor, so it competes with nobody. Holds only the
+/// pre-roll window — the turn's audio belongs to the engine the moment
+/// the turn opens.
 fn segment(
     cursor: &mut AudioBusReader,
     turn: Arc<Mutex<Turn>>,
     running: Arc<AtomicBool>,
     events: Arc<EventBus>,
-    engine: Arc<Engine>,
+    stt: Arc<dyn Stt>,
     policy: Policy,
 ) {
-    let detector: Box<dyn SpeechDetector> = match policy.detector {
-        DetectorKind::Silero => match SileroDetector::new() {
-            Ok(silero) => Box::new(silero),
-            // Degrade loudly rather than dying: dictation with a worse
-            // detector beats a helper that will not start.
-            Err(e) => {
-                eprintln!("silero unavailable ({e}); falling back to the energy detector");
-                Box::new(EnergyDetector::default())
-            }
-        },
-        DetectorKind::Energy => Box::new(EnergyDetector::default()),
-    };
+    let detector = crate::pipeline::vad::build(policy.detector);
     let mut tracker = VoiceActivityTracker::new(detector, policy.silence_frames);
     eprintln!(
-        "vad: {} / trigger: {:?}",
+        "vad: {} / trigger: {:?} / stt: {}",
         tracker.detector_name(),
-        policy.mode
+        policy.mode,
+        stt.name()
     );
     let pre_roll_samples = policy.pre_roll_frames * audio::CHUNK_SAMPLES;
     let max_samples = (policy.max_seconds * audio::SAMPLE_RATE as f32) as usize;
 
-    // One buffer for both jobs. While idle it is a rolling window of the
-    // recent past, capped at the pre-roll budget; when a turn opens it
-    // simply stops being trimmed, so the pre-roll is *already in it*.
+    // The rolling window of the recent past, kept only while idle. When a
+    // turn opens it is handed to the engine as pre-roll and cleared —
+    // from then on frames go straight through, and this segmenter never
+    // holds the turn's audio at all.
     //
-    // This is why there is no rewind here: in `vad` mode the segmenter
-    // must read every frame to run the detector, so it can never be
-    // parked far enough behind for a cursor rewind to mean anything.
-    let mut samples: Vec<i16> = Vec::new();
+    // There is no cursor rewind here: in `vad` mode the segmenter must
+    // read every frame to run the detector, so it can never be parked far
+    // enough behind for a rewind to mean anything.
+    let mut pre_roll: Vec<i16> = Vec::new();
     let mut collecting = false;
+    let mut collected = 0usize;
     let mut generation = 0u64;
 
     while running.load(Ordering::Relaxed) {
@@ -367,10 +550,6 @@ fn segment(
             });
         }
 
-        if let Some(frame) = &frame {
-            samples.extend_from_slice(frame);
-        }
-
         let (armed, current_generation) = {
             let state = turn.lock().unwrap_or_else(|e| e.into_inner());
             (state.armed, state.generation)
@@ -390,6 +569,18 @@ fn segment(
             collecting = true;
             generation = current_generation;
             turn.lock().unwrap_or_else(|e| e.into_inner()).collecting = true;
+
+            stt.begin_turn(generation);
+            // The pre-roll is the turn's first audio. A key press is an
+            // exact instant and needs little; the VAD only reports
+            // "started" after its threshold, so without this the
+            // recording begins ~240 ms into the first word.
+            collected = pre_roll.len();
+            if !pre_roll.is_empty() {
+                stt.push(&pre_roll);
+                pre_roll.clear();
+            }
+
             events.publish(Event::Triggered {
                 source: if policy.mode == TriggerMode::Hold {
                     "hotkey".into()
@@ -404,10 +595,19 @@ fn segment(
             }
         }
 
+        if let Some(frame) = &frame {
+            if collecting {
+                stt.push(frame);
+                collected += frame.len();
+            } else {
+                pre_roll.extend_from_slice(frame);
+            }
+        }
+
         if !collecting {
             // Idle: keep only enough history to serve as pre-roll.
-            if samples.len() > pre_roll_samples {
-                samples.drain(..samples.len() - pre_roll_samples);
+            if pre_roll.len() > pre_roll_samples {
+                pre_roll.drain(..pre_roll.len() - pre_roll_samples);
             }
             continue;
         }
@@ -418,7 +618,7 @@ fn segment(
         let host_stopped = policy.mode == TriggerMode::Hold && !armed;
         // AD-11: a forced cut transcribes. Returning without decoding is
         // what silently ate 30 s of speech before it was made a policy.
-        let too_long = samples.len() >= max_samples;
+        let too_long = collected >= max_samples;
 
         if !(vad_stopped || host_stopped || too_long) {
             continue;
@@ -440,90 +640,25 @@ fn segment(
             );
         }
 
-        let captured = std::mem::take(&mut samples);
         events.publish(Event::State {
             pattern: "think".into(),
         });
-        transcribe(
-            captured, &events, &engine, generation, &turn, &policy, rolling_on,
-        );
-    }
-}
+        stt.end_turn();
 
-#[allow(clippy::too_many_arguments)]
-fn transcribe(
-    samples: Vec<i16>,
-    events: &EventBus,
-    engine: &Engine,
-    generation: u64,
-    turn: &Mutex<Turn>,
-    policy: &Policy,
-    rolling_on: bool,
-) {
-    let seconds = samples.len() as f32 / audio::SAMPLE_RATE as f32;
-    if samples.is_empty() {
-        // Still closes the indicator. An early return here left it lit
-        // on `think` forever whenever a turn caught no audio at all.
-        eprintln!("turn captured no audio");
-        events.publish(Event::State {
-            pattern: policy.mode.idle_pattern().into(),
-        });
-        return;
-    }
-
-    let floats: Vec<f32> = samples.iter().map(|s| *s as f32 / 32768.0).collect();
-    let started = std::time::Instant::now();
-    let result = engine.transcribe(&floats);
-
-    // AD-11's `drop_stale`, and its warning: under a hotkey the next
-    // trigger is the next sentence, so dropping on staleness would lose
-    // it. Only *log* the overlap here; the policy belongs to the caller
-    // and arrives with the trigger modes that need it.
-    let now = turn.lock().unwrap_or_else(|e| e.into_inner()).generation;
-    let stale = now != generation;
-    if stale {
-        eprintln!("segment finished after a newer turn began (gen {generation} -> {now})");
-        // AD-11: dictation sets `drop_stale = false` precisely because
-        // under VAD triggering the next trigger is just the next
-        // sentence, and dropping it loses real speech.
-        if policy.drop_stale {
-            events.publish(Event::State {
-                pattern: policy.mode.idle_pattern().into(),
-            });
-            return;
+        if rolling_on {
+            // The continuation carries the same generation: it is the
+            // same turn, so a result from either half is equally current.
+            // `collecting` stays true, which is what tells the sink not
+            // to return the indicator to idle — the user never stopped.
+            stt.begin_turn(generation);
+            collected = 0;
         }
     }
 
-    match result {
-        Ok(decoded) if decoded.is_speech(policy.min_confidence) => {
-            eprintln!(
-                "transcribed {seconds:.1}s in {:.2}s (confidence {:.2})",
-                started.elapsed().as_secs_f32(),
-                decoded.confidence
-            );
-            events.publish(Event::Transcript {
-                text: decoded.text,
-                seconds,
-            });
-        }
-        // Rejected, and *said so* rather than dropped in silence. This is
-        // the one place where discarding text is correct, so it is also
-        // the one place where a log line is the only way to tell a
-        // working filter from a broken microphone.
-        Ok(decoded) => eprintln!(
-            "rejected {seconds:.1}s as non-speech (confidence {:.2}): {:?}",
-            decoded.confidence, decoded.text
-        ),
-        Err(message) => {
-            events.publish(Event::TranscriptionFailed { message, seconds });
-        }
-    }
-    // A rolling cut is not the end of the turn — the next segment is
-    // already collecting, so returning the indicator to idle here would
-    // say the user had stopped talking when they had not.
-    if !rolling_on {
-        events.publish(Event::State {
-            pattern: policy.mode.idle_pattern().into(),
-        });
+    // The stream ended or the host quit with a turn still open. Cancel
+    // rather than transcribe: `finish` is about to drain work the user
+    // asked for, and half an utterance nobody closed is not that.
+    if collecting {
+        stt.cancel();
     }
 }

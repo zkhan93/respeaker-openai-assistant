@@ -49,6 +49,18 @@ pub enum Event {
         source: String,
         duration: f32,
     },
+    /// Provisional text for a turn still in progress, superseded by every
+    /// later `Partial` and finally by the `Transcript`.
+    ///
+    /// **Never promote one of these to a transcript.** A partial is what
+    /// the engine could see so far; the final decode sees the tail, and
+    /// for whisper the tail changes the beginning (LEARNINGS.md). Partials
+    /// are for the eyes — a live caption, or an agent that wants a head
+    /// start — and the transcript is what lands in the document.
+    ///
+    /// Engines that cannot produce these never publish one, so a consumer
+    /// may simply ignore the variant.
+    Partial { text: String },
     /// A segment was transcribed. The event a dictation sink, a disk
     /// logger and a conversation manager all want, for different reasons.
     Transcript { text: String, seconds: f32 },

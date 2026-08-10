@@ -62,6 +62,14 @@ impl EventWriter {
         self.send(json!({"event": "state", "pattern": pattern}));
     }
 
+    /// Provisional text, from a streaming engine or a live-decoding local
+    /// one. Additive: a host that does not know this event ignores the
+    /// line and behaves exactly as before, which is why Raneen needed no
+    /// change to keep working when it was introduced.
+    pub fn partial(&self, text: &str) {
+        self.send(json!({"event": "partial", "text": text}));
+    }
+
     pub fn transcript(&self, text: &str) {
         self.send(json!({"event": "transcript", "text": text}));
     }
