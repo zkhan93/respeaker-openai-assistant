@@ -27,9 +27,19 @@ Commands (host → helper)::
     {"cmd": "ping"}                 liveness check
     {"cmd": "quit"}                 orderly shutdown
 
+**Audio may flow either way round.** By default the helper opens the
+microphone itself. Given ``--audio-fd``, the host owns the device instead
+and writes raw PCM16 frames down that descriptor — see ROADMAP AD-16 for
+why device enumeration, hot-plug and disconnect belong to the native
+layer. The control stream below is unchanged in both cases; only
+``ready``'s ``capture`` field says which is in force.
+
 Events (helper → host)::
 
-    {"event": "ready", "engine": ..., "model": ..., "sample_rate": ...}
+    {"event": "ready", "engine": ..., "model": ..., "sample_rate": ...,
+     "audio": {"sample_rate": 16000, "channels": 1,
+               "sample_width": 2, "chunk_size": 1280},
+     "capture": "host" | "helper"}
     {"event": "state", "pattern": "armed"}      indicator patterns
     {"event": "transcript", "text": ...}
     {"event": "level", "peak": 0-32767}         mic activity, for a meter
@@ -235,31 +245,106 @@ def command_loop(
                 logger.exception("shutdown hook failed")
 
 
-def serve(settings, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None) -> bool:
-    """Run the pipeline as a helper process. Blocks until the host quits."""
+def open_audio_pipe(fd: int, declared: Optional[dict] = None, on_eof=None):
+    """Build a :class:`PipeAudioSource` from a host-supplied descriptor.
+
+    The format is validated **before** the pipeline exists, so a host that
+    got its converter wrong sees a startup error rather than a page of
+    plausible-looking nonsense (ROADMAP AD-16).
+
+    Unbuffered on purpose: a buffered reader would sit on bytes waiting to
+    fill its buffer, delaying every frame by however long the host takes
+    to send the next one.
+    """
+    import os
+
+    from .adapters.pipe_audio_source import DEFAULT_FORMAT, PipeAudioSource, check_format
+
+    check_format(declared or {})
+    stream = os.fdopen(fd, "rb", buffering=0)
+    return PipeAudioSource(stream, fmt=DEFAULT_FORMAT, on_eof=on_eof)
+
+
+def serve(
+    settings,
+    stdin: Optional[TextIO] = None,
+    stdout: Optional[TextIO] = None,
+    audio_fd: Optional[int] = None,
+    audio_format: Optional[dict] = None,
+) -> bool:
+    """Run the pipeline as a helper process. Blocks until the host quits.
+
+    Args:
+        settings: Desktop settings.
+        stdin: Command stream. Defaults to the process's.
+        stdout: Event stream. Defaults to the process's.
+        audio_fd: File descriptor the host writes PCM16 frames to. When
+            ``None`` the helper opens the microphone itself, which is the
+            pre-AD-16 behaviour and still what a host without native
+            capture gets.
+        audio_format: The host's declared frame format, validated against
+            what the core requires. Omitted fields mean the default.
+    """
+    from .adapters.pipe_audio_source import DEFAULT_FORMAT
     from .app import run
 
     writer = JsonLineWriter(stdout)
     stopping = threading.Event()
 
+    #: The controller only exists once the pipeline is live, but the audio
+    #: pipe can die before that — so shutdown is routed through here rather
+    #: than closing over a name that may not be bound yet.
+    live: dict[str, Any] = {}
+    stop_requested = threading.Event()
+
+    def _stop_run() -> None:
+        stopping.set()
+        stop_requested.set()
+        controller = live.get("controller")
+        if controller is not None:
+            controller.stop()
+
+    audio_source = None
+    if audio_fd is not None:
+
+        def _audio_ended() -> None:
+            # The pipe closing is the host saying capture has ended. Going
+            # quiet instead would be indistinguishable from a silent room,
+            # so it is reported and then acted on.
+            #
+            # Terminal by contract: during a device swap the host simply
+            # pauses writing and leaves the descriptor open. EOF means the
+            # host itself is finished.
+            writer.send("error", message="audio pipe closed by the host")
+            _stop_run()
+
+        audio_source = open_audio_pipe(audio_fd, audio_format, on_eof=_audio_ended)
+
     def _on_ready(controller) -> None:
+        live["controller"] = controller
+        if stop_requested.is_set():
+            # The audio pipe died while the model was still loading.
+            controller.stop()
+            return
+
         writer.send(
             "ready",
             engine=settings.stt_engine,
             model=settings.stt_params.get("model"),
             sample_rate=settings.sample_rate,
+            # What the core requires of the frame stream. Declared even
+            # when we opened the microphone ourselves, so a host can
+            # verify rather than assume before it starts converting.
+            audio=DEFAULT_FORMAT.as_dict(),
+            capture="host" if audio_fd is not None else "helper",
         )
-
-        def _shutdown() -> None:
-            stopping.set()
-            controller.stop()
 
         # Both loops need threads of their own: run() blocks in the
         # detection loop the moment this returns.
         threading.Thread(
             target=command_loop,
             args=(controller, writer),
-            kwargs={"stream": stdin, "on_exit": _shutdown},
+            kwargs={"stream": stdin, "on_exit": _stop_run},
             daemon=True,
             name="sidecar-commands",
         ).start()
@@ -278,6 +363,7 @@ def serve(settings, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = N
             trigger="external",
             extra_indicator=JsonIndicator(writer),
             on_ready=_on_ready,
+            audio_source=audio_source,
         )
     finally:
         stopping.set()

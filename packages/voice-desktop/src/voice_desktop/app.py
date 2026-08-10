@@ -42,6 +42,7 @@ from voice_core.ports import (
     StdoutTextSink,
     TextSink,
 )
+from voice_core.ports.audio import AudioSource
 from voice_core.stt import make_stt_engine
 from voice_core.tts import make_tts_engine
 
@@ -59,8 +60,9 @@ def make_audio_pipeline(
     settings: DesktopSettings,
     event_bus: Optional[EventBus] = None,
     silence_threshold: Optional[int] = None,
+    source: Optional[AudioSource] = None,
 ) -> AudioPipeline:
-    """Build the capture pipeline on a sounddevice source.
+    """Build the capture pipeline, defaulting to a sounddevice source.
 
     Args:
         settings: Desktop settings.
@@ -68,13 +70,22 @@ def make_audio_pipeline(
         silence_threshold: Override the end-of-speech threshold. Dictation
             passes a shorter one — see
             :attr:`DesktopSettings.vad_silence_threshold_dictation`.
+        source: Where frames come from. ``None`` opens the microphone
+            directly through PortAudio, which is what the CLI wants.
+
+            A native host passes a
+            :class:`~.adapters.pipe_audio_source.PipeAudioSource` instead:
+            it already owns device enumeration, selection and disconnect
+            handling, and the core is better off not having a second
+            opinion about which microphone is live (ROADMAP AD-16).
     """
-    source = SoundDeviceSource(
-        device_name=settings.input_device,
-        sample_rate=settings.sample_rate,
-        channels=settings.channels,
-        chunk_size=settings.chunk_size,
-    )
+    if source is None:
+        source = SoundDeviceSource(
+            device_name=settings.input_device,
+            sample_rate=settings.sample_rate,
+            channels=settings.channels,
+            chunk_size=settings.chunk_size,
+        )
     return AudioPipeline(
         source,
         event_bus=event_bus,
@@ -356,6 +367,7 @@ def run(
     hotkey: Optional[str] = None,
     extra_indicator: Optional[Indicator] = None,
     on_ready: Optional[Callable[[Controller], None]] = None,
+    audio_source: Optional[AudioSource] = None,
 ) -> bool:
     """Run the desktop voice loop until interrupted.
 
@@ -381,6 +393,10 @@ def run(
         on_ready: Called once with a :class:`Controller` after the
             pipeline is live. Required by ``external``, where it is the
             only way anything can start a turn.
+        audio_source: Where frames come from. ``None`` opens the
+            microphone directly. A native host passes a
+            :class:`~.adapters.pipe_audio_source.PipeAudioSource` — see
+            :func:`make_audio_pipeline`.
 
     Returns:
         ``True`` on a clean shutdown, ``False`` if startup failed.
@@ -418,6 +434,7 @@ def run(
         settings,
         event_bus,
         silence_threshold=(settings.vad_silence_threshold_dictation if dictating else None),
+        source=audio_source,
     )
     # ----- how state is shown -----
     # A composite so the terminal narration and the sound are independent

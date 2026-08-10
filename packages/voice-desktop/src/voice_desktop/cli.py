@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -223,6 +224,20 @@ def serve(
         help="Play a tone when dictation arms and disarms. Pass --no-sound if the "
         "host application provides its own audible feedback.",
     ),
+    audio_fd: int = typer.Option(
+        -1,
+        "--audio-fd",
+        help="File descriptor the host writes raw PCM16 frames to. Omit to have the "
+        "helper open the microphone itself. A host that owns the device this way "
+        "also owns device selection, hot-plug and disconnect (ROADMAP AD-16).",
+    ),
+    audio_format: str = typer.Option(
+        "",
+        "--audio-format",
+        help='JSON declaring the frame format the host will send, e.g. \'{"sample_rate": '
+        "16000, \"channels\": 1}'. Validated at startup; omitted fields mean the core's "
+        "defaults. Only meaningful with --audio-fd.",
+    ),
 ) -> None:
     """Run the core as a helper process for a native UI.
 
@@ -230,6 +245,7 @@ def serve(
     Not meant to be run by hand — see ``voice_desktop/sidecar.py`` for
     the protocol. Logging goes to stderr so stdout stays parseable.
     """
+    from .adapters.pipe_audio_source import FormatMismatch
     from .sidecar import serve as run_sidecar
 
     settings = DesktopSettings.from_env()
@@ -246,7 +262,33 @@ def serve(
     if model:
         settings.stt_params["model"] = model
 
-    raise typer.Exit(0 if run_sidecar(settings) else 1)
+    declared = None
+    if audio_format:
+        try:
+            declared = json.loads(audio_format)
+        except ValueError as exc:
+            typer.secho(f"--audio-format is not valid JSON: {exc}", fg="red", err=True)
+            raise typer.Exit(2) from exc
+        if not isinstance(declared, dict):
+            typer.secho("--audio-format must be a JSON object", fg="red", err=True)
+            raise typer.Exit(2)
+
+    if audio_fd < 0 and declared is not None:
+        typer.secho("--audio-format has no effect without --audio-fd", fg="yellow", err=True)
+
+    try:
+        ok = run_sidecar(
+            settings,
+            audio_fd=audio_fd if audio_fd >= 0 else None,
+            audio_format=declared,
+        )
+    except FormatMismatch as exc:
+        # Startup, before a frame is read. A near-miss format would
+        # otherwise decode to plausible nonsense (ROADMAP AD-16).
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(2) from exc
+
+    raise typer.Exit(0 if ok else 1)
 
 
 def main() -> None:

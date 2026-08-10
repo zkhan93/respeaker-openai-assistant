@@ -235,3 +235,169 @@ def test_text_sink_satisfies_the_port():
     from voice_core.ports.text_sink import TextSink
 
     assert isinstance(JsonTextSink(JsonLineWriter(io.StringIO())), TextSink)
+
+
+# ----- host-owned capture (AD-16) -------------------------------------------
+#
+# `run()` is replaced throughout this section: exercising it for real means
+# loading a Whisper model, and what is under test is the wiring — which
+# source `serve` builds, and what it tells the host about the format.
+
+
+def fake_run(captured: dict, ready_with=None):
+    """Stand in for ``app.run``, recording its kwargs.
+
+    When ``ready_with`` is given it is handed to ``on_ready`` the way the
+    real run does once the pipeline is live.
+    """
+
+    def _run(settings, **kwargs):
+        captured.update(kwargs)
+        on_ready = kwargs.get("on_ready")
+        if ready_with is not None and on_ready is not None:
+            on_ready(ready_with)
+        return True
+
+    return _run
+
+
+def test_without_an_audio_fd_the_helper_opens_the_microphone_itself(monkeypatch):
+    """The pre-AD-16 path, and still what a host without native capture gets."""
+    import voice_desktop.app as app_module
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    captured: dict = {}
+    monkeypatch.setattr(app_module, "run", fake_run(captured))
+    serve(DesktopSettings(), stdin=io.StringIO(""), stdout=io.StringIO())
+
+    assert captured["audio_source"] is None
+
+
+def test_an_audio_fd_makes_the_host_the_capture_owner(monkeypatch):
+    import os
+
+    import voice_desktop.app as app_module
+    from voice_desktop.adapters.pipe_audio_source import PipeAudioSource
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    read_fd, write_fd = os.pipe()
+    captured: dict = {}
+    monkeypatch.setattr(app_module, "run", fake_run(captured))
+    serve(DesktopSettings(), stdin=io.StringIO(""), stdout=io.StringIO(), audio_fd=read_fd)
+
+    assert isinstance(captured["audio_source"], PipeAudioSource)
+    os.close(write_fd)
+
+
+def test_ready_declares_the_frame_format_the_core_requires(monkeypatch):
+    """So a host can verify before it starts converting, not after.
+
+    Declared even when the helper opened the microphone itself — a host
+    should never have to infer the contract from a working transcript.
+    """
+    import voice_desktop.app as app_module
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    out = io.StringIO()
+    monkeypatch.setattr(app_module, "run", fake_run({}, ready_with=FakeController()))
+    serve(DesktopSettings(), stdin=io.StringIO(""), stdout=out)
+
+    ready = next(e for e in events(out) if e["event"] == "ready")
+    assert ready["audio"] == {
+        "sample_rate": 16000,
+        "channels": 1,
+        "sample_width": 2,
+        "chunk_size": 1280,
+    }
+    assert ready["capture"] == "helper"
+
+
+def test_ready_says_who_owns_capture(monkeypatch):
+    import os
+
+    import voice_desktop.app as app_module
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    read_fd, write_fd = os.pipe()
+    out = io.StringIO()
+    monkeypatch.setattr(app_module, "run", fake_run({}, ready_with=FakeController()))
+    serve(DesktopSettings(), stdin=io.StringIO(""), stdout=out, audio_fd=read_fd)
+
+    ready = next(e for e in events(out) if e["event"] == "ready")
+    assert ready["capture"] == "host"
+    os.close(write_fd)
+
+
+def test_a_mismatched_declared_format_fails_before_the_pipeline_exists(monkeypatch):
+    """Startup, not mid-session.
+
+    A near-miss format decodes to plausible nonsense rather than erroring,
+    so this must fail while the message can still be read.
+    """
+    import os
+
+    import voice_desktop.app as app_module
+    from voice_desktop.adapters.pipe_audio_source import FormatMismatch
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    read_fd, write_fd = os.pipe()
+    captured: dict = {}
+    monkeypatch.setattr(app_module, "run", fake_run(captured))
+
+    with pytest.raises(FormatMismatch, match="sample_rate"):
+        serve(
+            DesktopSettings(),
+            stdin=io.StringIO(""),
+            stdout=io.StringIO(),
+            audio_fd=read_fd,
+            audio_format={"sample_rate": 48000},
+        )
+
+    assert captured == {}, "run() must not be reached with an unusable format"
+    os.close(read_fd)
+    os.close(write_fd)
+
+
+def test_the_audio_pipe_closing_is_reported_and_stops_the_run(monkeypatch):
+    """Capture death must be audible to the host.
+
+    Without this the pipeline simply goes quiet, which is indistinguishable
+    from a silent room — the failure AD-16 is built around.
+    """
+    import os
+
+    import voice_desktop.app as app_module
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    audio_r, audio_w = os.pipe()
+    # A real command stream, held open. An exhausted stdin would make
+    # command_loop hit EOF instantly and close the writer, so the error
+    # would be dropped for a reason that has nothing to do with audio.
+    cmd_r, cmd_w = os.pipe()
+    controller = FakeController()
+    out = io.StringIO()
+
+    def _run(settings, **kwargs):
+        kwargs["on_ready"](controller)
+        kwargs["audio_source"].start(lambda frame: None)
+        os.close(audio_w)  # capture dies
+        for _ in range(300):
+            if controller.stopped:
+                break
+            threading.Event().wait(0.01)
+        os.close(cmd_w)  # then the host shuts down normally
+        return True
+
+    monkeypatch.setattr(app_module, "run", _run)
+    with os.fdopen(cmd_r, "r") as commands:
+        serve(DesktopSettings(), stdin=commands, stdout=out, audio_fd=audio_r)
+
+    assert controller.stopped, "the run was not stopped when capture died"
+    errors = [e for e in events(out) if e["event"] == "error"]
+    assert any("audio pipe closed" in e["message"] for e in errors), errors
