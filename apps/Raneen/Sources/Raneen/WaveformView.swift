@@ -19,6 +19,11 @@ import AppKit
 /// Amplitude is scaled with a square root rather than linearly. Real
 /// meters are compressive because hearing is: linear scaling makes
 /// ordinary speech look timid and wastes the top of the range on shouts.
+///
+/// Bars are brand orange on the panel's black. The previous white-on-
+/// translucent-grey was hard to see for an unavoidable reason: the panel
+/// sampled whatever was behind it, so the background was never a known
+/// colour and the contrast changed with the wallpaper.
 final class WaveformView: NSView {
 
     /// Thin bars, and enough of them to read as a wave rather than as a
@@ -28,6 +33,14 @@ final class WaveformView: NSView {
     /// Peak that maps to full height, before the square-root curve.
     /// Measured speech on the built-in mic peaks around 2–10k.
     static let fullScaleLevel: CGFloat = 8000
+
+    /// Brand orange on the panel's black, deliberately the same colour
+    /// the menu-bar mark turns while recording.
+    ///
+    /// Reusing `StatusIcon.brandColor` rather than restating the hex is
+    /// the point: the two indicators are saying the same thing in two
+    /// places, and they should not be able to drift into two oranges.
+    static let barColor = StatusIcon.brandColor
 
     private var targets: [CGFloat]
     private var current: [CGFloat]
@@ -111,7 +124,7 @@ final class WaveformView: NSView {
         // their width — dots, not slivers.
         let minHalf = barWidth / 2
 
-        NSColor.white.withAlphaComponent(0.95).setFill()
+        Self.barColor.setFill()
 
         for (index, value) in current.enumerated() {
             let half = minHalf + value * (maxHalf - minHalf)

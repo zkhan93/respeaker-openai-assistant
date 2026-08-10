@@ -57,15 +57,26 @@ final class ListeningPanel: NSPanel {
         // completely ordinary thing to do.
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: Self.size))
-        container.material = .hudWindow
-        container.blendingMode = .behindWindow
-        container.state = .active
+        // Solid black rather than a blurred HUD material.
+        //
+        // `NSVisualEffectView` is translucent by design — it samples
+        // whatever is behind the panel, so the bars sat on a mid-grey
+        // that shifted with the wallpaper, and white-on-grey is barely a
+        // contrast at all. A fixed background means the wave has one
+        // known colour to stand against no matter what it floats over.
+        let container = NSView(frame: NSRect(origin: .zero, size: Self.size))
         container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.black.cgColor
         // Half the height gives a capsule: the short sides become full
         // semicircles rather than merely rounded corners.
         container.layer?.cornerRadius = Self.size.height / 2
         container.layer?.masksToBounds = true
+        // A black capsule on a black background — a dark terminal, a
+        // full-screen editor — would be an invisible window with bars
+        // floating in mid-air. The hairline keeps its shape readable
+        // without being noticeable against anything lighter.
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         container.autoresizingMask = [.width, .height]
 
         // Tight insets: at this size the capsule's rounded ends already

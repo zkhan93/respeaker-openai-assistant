@@ -66,3 +66,33 @@ final class WaveformViewTests: XCTestCase {
         XCTAssertEqual(value(10000), 1.0)
     }
 }
+
+// MARK: - Contrast (the panel is black; the bars must be seen against it)
+
+extension WaveformViewTests {
+
+    /// One colour for "recording", used in both places it is shown.
+    /// Restating the hex here instead would let the menu-bar mark and the
+    /// panel drift into two different oranges.
+    func testBarsUseTheSameBrandColourAsTheMenuBarMark() {
+        XCTAssertEqual(WaveformView.barColor, StatusIcon.brandColor)
+    }
+
+    /// The reason this change was made: white on translucent grey was
+    /// barely visible. Contrast against black is what makes the wave
+    /// readable at a glance, which is the panel's entire job.
+    func testBarsContrastStronglyWithTheBlackPanel() {
+        let bars = WaveformView.barColor.usingColorSpace(.sRGB)!
+        // WCAG relative luminance.
+        func channel(_ c: CGFloat) -> CGFloat {
+            c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        let luminance =
+            0.2126 * channel(bars.redComponent)
+            + 0.7152 * channel(bars.greenComponent)
+            + 0.0722 * channel(bars.blueComponent)
+        // Against black, contrast ratio is (L + 0.05) / 0.05.
+        let ratio = (luminance + 0.05) / 0.05
+        XCTAssertGreaterThan(ratio, 4.5, "the bars would not stand out against the panel")
+    }
+}
