@@ -42,7 +42,6 @@ from voice_core.ports.indicator import Indicator
 from voice_desktop.app import make_audio_pipeline
 from voice_desktop.settings import DesktopSettings
 
-
 # ----- the adapters still exist and still fit -------------------------------
 
 

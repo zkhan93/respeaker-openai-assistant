@@ -231,6 +231,13 @@ def serve(
         "helper open the microphone itself. A host that owns the device this way "
         "also owns device selection, hot-plug and disconnect (ROADMAP AD-16).",
     ),
+    audio_socket: str = typer.Option(
+        "",
+        "--audio-socket",
+        help="Path to an AF_UNIX socket the host is listening on, carrying raw PCM16 "
+        "frames. What a Swift host uses, since Foundation's Process cannot hand a "
+        "child an arbitrary descriptor. Ignored if --audio-fd is given.",
+    ),
     audio_format: str = typer.Option(
         "",
         "--audio-format",
@@ -273,13 +280,21 @@ def serve(
             typer.secho("--audio-format must be a JSON object", fg="red", err=True)
             raise typer.Exit(2)
 
-    if audio_fd < 0 and declared is not None:
-        typer.secho("--audio-format has no effect without --audio-fd", fg="yellow", err=True)
+    host_owns_capture = audio_fd >= 0 or bool(audio_socket)
+    if not host_owns_capture and declared is not None:
+        typer.secho(
+            "--audio-format has no effect without --audio-fd or --audio-socket",
+            fg="yellow",
+            err=True,
+        )
+    if audio_fd >= 0 and audio_socket:
+        typer.secho("--audio-fd takes precedence; ignoring --audio-socket", fg="yellow", err=True)
 
     try:
         ok = run_sidecar(
             settings,
             audio_fd=audio_fd if audio_fd >= 0 else None,
+            audio_socket=audio_socket or None,
             audio_format=declared,
         )
     except FormatMismatch as exc:

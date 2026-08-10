@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import tempfile
 import threading
 
 import pytest
@@ -54,6 +56,18 @@ class ExplodingStream(io.StringIO):
 
 def events(stream) -> list[dict]:
     return [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+
+
+def short_socket_path() -> str:
+    """A socket path under the AF_UNIX length limit.
+
+    ``sun_path`` is 104 bytes on macOS and 108 on Linux, and pytest's
+    ``tmp_path`` alone can exceed that. Worth knowing outside the tests
+    too: a host that puts its socket somewhere deep gets ``AF_UNIX path
+    too long`` rather than anything about audio.
+    """
+    directory = tempfile.mkdtemp(dir="/tmp")
+    return os.path.join(directory, "a.sock")
 
 
 def drive(commands: str):
@@ -401,3 +415,83 @@ def test_the_audio_pipe_closing_is_reported_and_stops_the_run(monkeypatch):
     assert controller.stopped, "the run was not stopped when capture died"
     errors = [e for e in events(out) if e["event"] == "error"]
     assert any("audio pipe closed" in e["message"] for e in errors), errors
+
+
+def test_an_audio_socket_also_makes_the_host_the_capture_owner(monkeypatch):
+    """A Swift host's route in.
+
+    Foundation's Process exposes only stdin/stdout/stderr, so a native
+    host cannot pass an arbitrary descriptor; AF_UNIX avoids that without
+    a FIFO's open semantics (ROADMAP AD-16).
+    """
+    import socket
+
+    import voice_desktop.app as app_module
+    from voice_desktop.adapters.pipe_audio_source import PipeAudioSource
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    path = short_socket_path()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(1)
+
+    captured: dict = {}
+    monkeypatch.setattr(app_module, "run", fake_run(captured))
+    serve(DesktopSettings(), stdin=io.StringIO(""), stdout=io.StringIO(), audio_socket=path)
+
+    assert isinstance(captured["audio_source"], PipeAudioSource)
+    listener.close()
+
+
+def test_frames_flow_over_the_audio_socket(monkeypatch):
+    """The transport, proven end to end without any native code."""
+    import socket
+
+    import voice_desktop.app as app_module
+    from voice_desktop.settings import DesktopSettings
+    from voice_desktop.sidecar import serve
+
+    payload = bytes(range(256)) * 20  # 5120 bytes = exactly 2 frames
+    path = short_socket_path()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(1)
+
+    received: list[bytes] = []
+    got_two = threading.Event()
+
+    def host():
+        conn, _ = listener.accept()
+        for offset in range(0, len(payload), 333):  # deliberately ragged
+            conn.sendall(payload[offset : offset + 333])
+
+    def _run(settings, **kwargs):
+        kwargs["on_ready"](FakeController())
+        source = kwargs["audio_source"]
+
+        def on_frame(frame):
+            received.append(frame)
+            if len(received) >= 2:
+                got_two.set()
+
+        source.start(on_frame)
+        got_two.wait(5.0)
+        return True
+
+    threading.Thread(target=host, daemon=True).start()
+    monkeypatch.setattr(app_module, "run", _run)
+    serve(DesktopSettings(), stdin=io.StringIO(""), stdout=io.StringIO(), audio_socket=path)
+
+    assert len(received) == 2
+    assert b"".join(received) == payload, "audio changed crossing the socket"
+    listener.close()
+
+
+def test_a_missing_audio_socket_fails_fast_and_says_where(tmp_path):
+    """Loudly, rather than waiting forever for a host that will never arrive."""
+    from voice_desktop.sidecar import open_audio_socket
+
+    path = str(tmp_path / "nobody-is-listening.sock")
+    with pytest.raises(RuntimeError, match="could not connect"):
+        open_audio_socket(path, timeout=0.2)

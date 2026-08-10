@@ -265,12 +265,78 @@ def open_audio_pipe(fd: int, declared: Optional[dict] = None, on_eof=None):
     return PipeAudioSource(stream, fmt=DEFAULT_FORMAT, on_eof=on_eof)
 
 
+#: How long to keep retrying the audio socket. The host binds and listens
+#: *before* spawning us, so this normally succeeds first try — the retry
+#: only covers losing the race on a heavily loaded machine.
+AUDIO_CONNECT_TIMEOUT_S = 5.0
+
+
+def open_audio_socket(
+    path: str,
+    declared: Optional[dict] = None,
+    on_eof=None,
+    timeout: float = AUDIO_CONNECT_TIMEOUT_S,
+):
+    """Connect to a host's AF_UNIX audio socket and wrap it as a source.
+
+    **Why a socket and not a descriptor.** Foundation's ``Process``
+    exposes only stdin, stdout and stderr — a Swift host cannot hand a
+    child an arbitrary fd without dropping to ``posix_spawn`` and
+    reimplementing process lifecycle. A named FIFO avoids that but brings
+    its own trap: a blocking open waits for the peer, while a
+    non-blocking one reports EOF before the writer arrives, which is
+    indistinguishable from the disconnect EOF is supposed to mean.
+
+    AF_UNIX has neither problem. ``connect`` fails fast and loudly when
+    nobody is listening, EOF means exactly what it means everywhere else,
+    and — unlike a TCP port — it triggers no macOS firewall prompt, which
+    is the same reason AD-15 chose a pipe over ZMQ.
+
+    ``--audio-fd`` stays for hosts that *can* pass descriptors, and for
+    tests, where a plain ``os.pipe()`` is simpler than a rendezvous.
+
+    **Keep the path short.** ``sun_path`` is 104 bytes on macOS and 108 on
+    Linux. A host that puts its socket somewhere deep fails with
+    ``AF_UNIX path too long``, which says nothing about audio and is
+    consequently baffling. ``/tmp/<something-short>.sock`` is safe.
+    """
+    import socket
+    import time
+
+    from .adapters.pipe_audio_source import DEFAULT_FORMAT, PipeAudioSource, check_format
+
+    check_format(declared or {})
+
+    deadline = time.monotonic() + timeout
+    last: Optional[Exception] = None
+    while True:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+            break
+        except OSError as exc:
+            sock.close()
+            last = exc
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"could not connect to the host's audio socket at {path!r} "
+                    f"within {timeout:.0f}s: {exc}"
+                ) from last
+            time.sleep(0.05)
+
+    logger.info("connected to host audio socket at %s", path)
+    # buffering=0 for the same reason the fd path is unbuffered: a
+    # buffered reader would sit on bytes waiting to fill, delaying frames.
+    return PipeAudioSource(sock.makefile("rb", buffering=0), fmt=DEFAULT_FORMAT, on_eof=on_eof)
+
+
 def serve(
     settings,
     stdin: Optional[TextIO] = None,
     stdout: Optional[TextIO] = None,
     audio_fd: Optional[int] = None,
     audio_format: Optional[dict] = None,
+    audio_socket: Optional[str] = None,
 ) -> bool:
     """Run the pipeline as a helper process. Blocks until the host quits.
 
@@ -284,6 +350,10 @@ def serve(
             capture gets.
         audio_format: The host's declared frame format, validated against
             what the core requires. Omitted fields mean the default.
+        audio_socket: Path to an AF_UNIX socket the host is listening on,
+            as an alternative to ``audio_fd``. This is what a Swift host
+            uses — see :func:`open_audio_socket`. Ignored when
+            ``audio_fd`` is given.
     """
     from .adapters.pipe_audio_source import DEFAULT_FORMAT
     from .app import run
@@ -304,8 +374,9 @@ def serve(
         if controller is not None:
             controller.stop()
 
+    host_owns_capture = audio_fd is not None or audio_socket is not None
     audio_source = None
-    if audio_fd is not None:
+    if host_owns_capture:
 
         def _audio_ended() -> None:
             # The pipe closing is the host saying capture has ended. Going
@@ -318,7 +389,10 @@ def serve(
             writer.send("error", message="audio pipe closed by the host")
             _stop_run()
 
-        audio_source = open_audio_pipe(audio_fd, audio_format, on_eof=_audio_ended)
+        if audio_fd is not None:
+            audio_source = open_audio_pipe(audio_fd, audio_format, on_eof=_audio_ended)
+        else:
+            audio_source = open_audio_socket(audio_socket, audio_format, on_eof=_audio_ended)
 
     def _on_ready(controller) -> None:
         live["controller"] = controller
@@ -336,7 +410,7 @@ def serve(
             # when we opened the microphone ourselves, so a host can
             # verify rather than assume before it starts converting.
             audio=DEFAULT_FORMAT.as_dict(),
-            capture="host" if audio_fd is not None else "helper",
+            capture="host" if host_owns_capture else "helper",
         )
 
         # Both loops need threads of their own: run() blocks in the
