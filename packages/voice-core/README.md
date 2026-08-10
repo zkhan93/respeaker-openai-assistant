@@ -22,8 +22,10 @@ voice_core.ports  ←  implemented by adapters  ←  wired together by an app's 
 `voice_core` must never import from `voice_assistant` or `voice_desktop`. This is
 enforced by a test in `tests/test_boundaries.py`.
 
-See [`docs/ROADMAP.md`](../../docs/ROADMAP.md) (AD-1 … AD-10) for the decisions and
-the rationale behind them.
+See [`docs/DECISIONS.md`](../../docs/DECISIONS.md) (`AD-1`…`AD-18`) for the
+decisions and the rationale behind them, and
+[`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) for how this package sits
+next to the Rust core.
 
 ## Importing
 

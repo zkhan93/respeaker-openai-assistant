@@ -2,7 +2,7 @@
 
 How the pieces fit, where the boundaries are, and which language owns what.
 
-- **Why each boundary is where it is** → [DECISIONS.md](DECISIONS.md) (`AD-1`…`AD-17`)
+- **Why each boundary is where it is** → [DECISIONS.md](DECISIONS.md) (`AD-1`…`AD-18`)
 - **What happens next** → [ROADMAP.md](ROADMAP.md)
 - **Facts that cost us something to find** → [LEARNINGS.md](LEARNINGS.md)
 
