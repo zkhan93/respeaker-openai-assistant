@@ -7,7 +7,7 @@ import AppKit
 /// that the helper launches from inside a bundle, that the microphone
 /// grant reaches a child process, and that an event tap can suppress a
 /// key — not to be the real UI.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private let hotkey = HotkeyTap()
@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Kept alive so the Core Audio listeners stay registered.
     private var deviceObservers: [Any] = []
+
+    /// Held rather than rebuilt so they can be filled in on open.
+    private let inputMenu = NSMenu()
+    private let outputMenu = NSMenu()
 
     /// Whether a turn is open, mirrored from the helper's state events.
     /// Only used to avoid reopening the microphone mid-sentence.
@@ -42,6 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        inputMenu.delegate = self
+        outputMenu.delegate = self
         show(.starting)
         rebuildMenu()
 
@@ -324,15 +330,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .level(let value):
             peak = value
             panel.update(peak: value)
-            // Log a sample periodically. A microphone that reads zero
-            // from inside a bundle is the failure this spike exists to
-            // catch — TCC attributing the child process to something
-            // other than us — and it is otherwise indistinguishable from
-            // a muted input.
+            // **Deliberately returns without rebuilding the menu.**
+            // Level arrives 12.5 times a second and changes nothing the
+            // menu shows. Rebuilding anyway was survivable while the menu
+            // was static text; once it grew device submenus it meant
+            // enumerating every Core Audio device twice a frame — around
+            // a thousand IPC round trips a second to coreaudiod, which is
+            // enough to make the whole machine feel slow.
             levelTicks += 1
             if Self.debugLogging && levelTicks % 12 == 0 {
                 NSLog("mic peak %d", value)
+                rebuildMenu()  // the debug bar is the only thing that moves
             }
+            return
         case .error(let message):
             state = "error: \(message)"
             show(.error)
@@ -416,12 +426,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyItem.submenu = keyMenu
         menu.addItem(keyItem)
 
+        // Submenus are populated when they are opened, not when the menu
+        // is built — see `menuNeedsUpdate`. Enumerating Core Audio here
+        // would put a device scan on a path that runs constantly.
         let inputItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
-        inputItem.submenu = deviceMenu(.input)
+        inputItem.submenu = inputMenu
         menu.addItem(inputItem)
 
         let outputItem = NSMenuItem(title: "Sound output", action: nil, keyEquivalent: "")
-        outputItem.submenu = deviceMenu(.output)
+        outputItem.submenu = outputMenu
         menu.addItem(outputItem)
 
         menu.addItem(.separator())
@@ -439,16 +452,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// device change was actually followed — the built-in runs at 48 kHz
     /// and AirPods at 24 kHz. Without it, "followed the device" and
     /// "carried on with the old one" look identical from the outside.
+    /// AppKit is about to show a submenu: this is the moment its contents
+    /// need to be true, and the only moment.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === inputMenu {
+            populate(menu, .input)
+        } else if menu === outputMenu {
+            populate(menu, .output)
+        }
+    }
+
+    /// Read from what capture actually opened rather than re-resolving the
+    /// preference. Resolving means enumerating every Core Audio device,
+    /// and this line is rebuilt far more often than devices change — it is
+    /// also more truthful, since it reports the device in use rather than
+    /// the one we would pick if we opened now.
     private var micDescription: String {
-        guard let format = capture?.inputFormat else { return "Mic: unavailable" }
-        let name = DevicePreference.resolve(.input).device?.name ?? "Unknown"
-        return String(format: "Mic: %@ · %.0f kHz", name, format.sampleRate / 1000)
+        guard let format = capture?.inputFormat, let device = capture?.openedDevice else {
+            return "Mic: unavailable"
+        }
+        return String(format: "Mic: %@ · %.0f kHz", device.name, format.sampleRate / 1000)
     }
 
     /// One direction's device list: System Default first, then everything
     /// present, with a tick against whichever is in force.
-    private func deviceMenu(_ direction: AudioDevice.Direction) -> NSMenu {
-        let menu = NSMenu()
+    ///
+    /// Filled in on open rather than on every menu rebuild. A submenu
+    /// nobody is looking at does not need to be accurate, and enumerating
+    /// Core Audio is expensive enough that doing it speculatively was
+    /// making the machine feel slow.
+    private func populate(_ menu: NSMenu, _ direction: AudioDevice.Direction) {
+        menu.removeAllItems()
         let preference = DevicePreference.current(direction)
 
         // Pinned at the top and separated, because it is not "one of the
@@ -465,7 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let devices = AudioDevice.all(direction)
         if devices.isEmpty {
             menu.addItem(Self.caption("No devices found"))
-            return menu
+            return
         }
 
         for device in devices {
@@ -486,7 +520,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(.separator())
             menu.addItem(Self.caption("Chosen device not connected"))
         }
-        return menu
     }
 
     /// What a device menu item carries. A class because
