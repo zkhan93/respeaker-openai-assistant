@@ -1014,7 +1014,12 @@ attributable to one side of the pipe:
       an `AudioBusReader`; and `serve --audio-fd` driven as a real subprocess — opening no
       microphone at all — reports `capture=host` and peaks of **19660**, exactly
       `0.6 × 32767`, so samples cross the process boundary intact. **DONE 2026-08-08.**
-- [ ] Headless CI fitness function pinning the `SoundDeviceSource` CLI path (above).
+- [x] **Headless CI fitness function** pinning the CLI path — `test_cli_path_fitness.py`.
+      Cannot drive real PortAudio (no microphone in CI, and a synthetic device needs
+      per-platform setup more fragile than the thing under test), so it pins what actually
+      fails silently: the classes exist and satisfy their ports, the earcons still
+      synthesize audio rather than being gutted, and `make_audio_pipeline()` with no injected
+      source still builds a `SoundDeviceSource`. **DONE 2026-08-08.**
 - [ ] Swift: `AVAudioEngine` capture + `AVAudioConverter` to 16 kHz mono int16 (arbitrary
       buffer sizes — the core re-blocks).
 - [ ] Swift: device enumeration, `System Default` vs. explicit selection, persisted by
