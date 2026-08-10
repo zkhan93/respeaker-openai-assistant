@@ -1167,6 +1167,181 @@ Risks to weigh before building the LLM variant:
 * **Latency roughly doubles** (~300–500 ms for a short correction locally, on top of
   Whisper). Argues for correcting only provisional text in the background.
 
+### AD-17 (provisional) — A native helper is viable; the protocol held
+
+**Spike, 2026-08-09.** `crates/voice-helper/` — Rust + whisper.cpp behind AD-15's
+newline-JSON protocol. **Not a decision yet**: this records what was measured so the
+decision can be made on numbers rather than intuition.
+
+Run against the same 5.8 s fixture, same machine, `say`-synthesised speech:
+
+| stage | Python (`base.en` int8, CT2) | Rust (`base.en` q5_1, whisper.cpp) |
+| --- | --- | --- |
+| process start | 34 MB | **6 MB** |
+| model loaded | 386 MB | **70 MB** |
+| peak, during inference | 576 MB | **224 MB** |
+| **steady state, model resident** | ~576 MB | **88–97 MB** |
+| model load time | 0.79 s | **0.05–0.10 s** |
+| inference, 5.8 s audio | 0.56 s | **0.27–0.34 s** |
+| binary | 187 MB bundle | **1.1 MB** + 57 MB model |
+| transcript | *(reference)* | **byte-identical** |
+
+The steady-state row is the one that matters and it is not visible in peak RSS: whisper.cpp's
+compute buffers (~200 MB of conv/encode/decode scratch) are allocated per *state*, and
+`Engine::transcribe` creates the state per call — so they are returned the moment the call
+ends. Holding one state alive between segments would have kept the peak as the floor.
+
+**Five things the spike found that a paper design would not have.**
+
+1. **whisper.cpp drops the last word when audio ends on speech.** "…more than raw speed."
+   came back as "…more than raw". 0.5 s of trailing silence fixes it completely. CTranslate2
+   does not behave this way, so the Python helper never needed the padding — **a straight
+   port would have started silently truncating every utterance.** It bites hardest in `hold`
+   mode, where the key is released on the last word by definition. Now
+   `engine::pad_tail`, with tests.
+2. **Losing 35 ms from the *tail* corrupted the *first* word.** "Kubernetes deployments" →
+   "Cuba needs deployment need". Whisper encodes the whole clip jointly, so tail loss is not
+   a tail-local problem. This is independent evidence for AD-11's "max-duration transcribes
+   rather than discards" — a truncated segment is not merely shorter, it is *differently
+   wrong*, at the other end.
+3. **`serve` and `bench` produce byte-identical output** once fed identical audio. That is
+   the protocol path proven, not asserted — the first mismatch chased was a bug in the test
+   harness (dropping a partial frame), not the helper.
+4. **Pre-roll is not optional and does not come for free.** AD-12's 3 frames / 240 ms is
+   reimplemented in `serve::Recording`; the ring is maintained whether or not armed.
+5. **`cargo test` does not refresh `target/release/<bin>`.** Ten minutes were lost measuring
+   a stale binary that still showed the bug just fixed. Build explicitly before benchmarking.
+
+**Model choice is not runtime choice.** The first run used `ggml-base.bin` — the *multilingual*
+f16 model — and mis-transcribed "Kubernetes" while using 154/305 MB. Switching to `base.en`
+q5_1 fixed accuracy *and* dropped 84 MB. Any future comparison must pin the model, or it
+measures the wrong variable.
+
+**Not done, and load-bearing before this could replace the Python helper:** VAD (AD-12's
+`vad`/`toggle`/`wake_word` modes — `hold` was chosen precisely because it needs none),
+AD-11's segmentation policy (`continuous`, `drop_stale`, max-duration), AD-13 earcons,
+AD-14's engine selection and `transcription_failed` surfacing. Silero VAD should be adopted
+*during* that port rather than after — whisper.cpp already carries it as an 864 KB ggml model
+through the same runtime, so it costs no new dependency, and porting `webrtcvad` forward
+first would mean migrating twice.
+
+**Explicitly still open:** whisper.cpp selects CPU ISA at *compile* time, which is the
+SIGILL / `STATUS_ILLEGAL_INSTRUCTION` bug cluster at the top of OpenWhispr's issue tracker.
+CTranslate2 dispatches at *runtime* (`CT2_FORCE_CPU_ISA` is present in the shipped dylib).
+Moot on macOS arm64; a shipping blocker the day a Rust helper targets x86 Windows or Linux,
+where it needs multi-variant binaries plus a launcher probe. **Do not ship the Rust helper
+off-arm64 without solving this** — it is the single most expensive mistake available here,
+and someone else has already made it publicly.
+
+**Where the crate lives, and why not `packages/`.** `packages/*` is a `uv` workspace glob;
+a Cargo crate there breaks `uv sync`. Top-level `crates/` is idiomatic for Rust in a
+polyglot repo and unambiguous about which toolchain owns it.
+
+#### The buses, 2026-08-09 — what made it a core rather than a helper
+
+The spike shipped a single-consumer pipeline: socket → buffer → STT → stdout. That is all
+hold-mode dictation needs, and it is **not** enough for always-on operation, disk logging, or
+the Pi. `voice_core.bus` was ported (`crates/voice-helper/src/bus/`, 11 tests) and `serve`
+rebuilt on it.
+
+The property that matters: **always-on and hotkey are the same pipeline with a different
+trigger** (AD-7, AD-12), and **disk logging is another consumer, not another mode**. Neither
+is a branch in the pipeline. Three things follow immediately:
+
+* `AudioBusReader::rewind()` **is** pre-roll. It replaced the ad-hoc `VecDeque` the spike
+  used — the same mechanism the Python side already had, rediscovered by need.
+* Level metering deliberately does **not** go on the EventBus. At 12.5/s it would drown every
+  consumer that only wanted to know a sentence finished. It stays on its own `AudioBus`
+  cursor, which is where `voice_core` also puts it.
+* Ordering is structural rather than configured. One thread per `Consumer` gives per-consumer
+  FIFO for free, so Python's `order_key` has no counterpart to get wrong. Frames are
+  `Arc<[i16]>` and events `Arc<Event>`, so fan-out is refcounts rather than copies.
+
+**Two stuck-indicator bugs the refactor surfaced**, both the same shape — a state machine with
+an exit that publishes nothing:
+
+1. `disarm` published `disarmed` itself, so the host saw it *before* the segmenter's `think`
+   and flashed the indicator backwards. The closing pair now belongs to the segmenter, which
+   is the only thing that knows when decoding finished. `arm` stays immediate, because that
+   one is the user's confirmation the key landed.
+2. Arm and disarm inside one poll interval left the segmenter having never opened a segment,
+   so nothing ever published `disarmed`. `Turn::collecting` now records whether anybody owes
+   the closing states. A turn that captured no audio at all closes too.
+
+**Still missing before this can serve the Pi** — and none of it is architectural, which is the
+point of doing the buses first: device capture via `cpal` (the Pi opens ALSA itself — the
+protocol's `capture: "host" | "helper"` field already anticipates this), a ZMQ consumer, and an
+LED indicator consumer. The agent layer does not move: LangGraph stays Python on the Pi exactly
+as it does on the desktop.
+
+#### VAD and the trigger modes, 2026-08-09
+
+`--trigger hold|vad|toggle` (`crates/voice-helper/src/pipeline/`, 27 tests). Verified against a
+synthesised two-sentence fixture: `vad` mode produced two transcripts with no hotkey at all,
+states cycling `listen → think → off` per sentence, while `hold` is unchanged.
+
+**Silero is not free through whisper.cpp here, but it is nearly free elsewhere.** whisper-rs
+0.14.4 vendors a whisper.cpp without the `whisper_vad_*` API — verified, no such symbols in the
+generated bindings. Rather than add an ONNX runtime, the detector comes from `silero-vad-crs`:
+a C port with the **weights compiled into the binary** and no runtime dependency at all, so the
+one-static-binary property survives. Cost: **binary 1.1 MB → 2.1 MB**, RSS unchanged within
+measurement noise (65–90 MB across every run, dominated by whisper's compute buffers).
+
+**Two VADs, two jobs — they are complementary, not alternatives.** whisper.cpp's `--vad` is
+*the same Silero model* (`ggml-silero-v5.1.2.bin`), but it runs over a **finished clip** to trim
+non-speech before decoding, which is a fix for hallucination-on-silence and decode cost. Ours
+runs over a **live stream** to decide when a turn opens and closes. Wanting one is not a reason
+to skip the other, and the batch one is still an open item — whisper-rs 0.16 exists and should
+be checked for the API.
+
+**Measured, on a fixture of door-slam → rattling keys → one real sentence:**
+
+| detector | turns opened | whisper runs on noise |
+| --- | --- | --- |
+| `energy` | **3** | **2 wasted** |
+| `silero` | **1** | **0** |
+
+Both transcribed the sentence correctly. The difference is the two phantom turns: each one wakes
+the model, burns CPU, and — this is the part that matters for dictation — hands whisper a segment
+of pure noise, which is precisely the condition under which it hallucinates text into the user's
+document. That is the argument for carrying a neural detector, and it is why `Policy::dictation`
+defaults to `silero`.
+
+The detector is a **trait**, so both ship. `--vad energy` remains for comparison and as the
+automatic fallback if Silero fails to initialise — degrade loudly rather than refuse to start:
+
+* `SpeechDetector::speech_probability()` returns `0.0..=1.0`, not a boolean. `webrtcvad` could
+  only ever answer yes/no, which is why the Python tracker has nothing but frame counting to
+  work with. A probability buys hysteresis — enter at 0.6, exit at 0.35, and a frame between
+  them *holds the current state* instead of voting. Silero natively emits exactly this, so it
+  drops in with no change anywhere else.
+* The noise floor adapts asymmetrically: fast toward quiet, slow toward loud, so a long
+  utterance cannot drag the floor up until it stops hearing itself. Floored at 60 — the same
+  number `ActivityMeter` uses, because two components disagreeing about what silence is would
+  show a dancing meter next to an idle detector.
+* Honest limitation: energy cannot tell a voice from a slammed door of equal loudness. For
+  hotkey dictation that barely matters; for always-on it is the thing Silero fixes. The
+  expensive part — the state machine, AD-11's policy, AD-12's boundary ownership — is
+  identical either way and is what got built.
+
+**AD-11 landed as a `Policy` struct**, caller-supplied exactly as the decision requires:
+`continuous`, `drop_stale`, `max_seconds`, `pre_roll_frames`, `silence_frames`.
+`Policy::dictation(mode)` sets `drop_stale = false` and pre-roll to 3 frames for `hold` (a key
+press is exact) or 10 for `vad` (the detector reports late). A max-duration cut **transcribes
+and rolls into the next segment**, and deliberately does *not* return the indicator to idle —
+saying the user stopped talking when they had not.
+
+**A bug the conformance harness caught that a live microphone would have hidden.** The close
+condition sat behind `let Some(frame) = cursor.read(POLL) else { continue }`, so a `disarm`
+arriving after audio stopped was never acted on — no frame, no evaluation, turn open forever.
+With a real mic frames keep arriving and it never shows; it would have surfaced as a hang only
+when the stream stalled, which is the worst possible time to find it. Turn logic now runs on
+every loop iteration, frame or timeout.
+
+---
+
+
+
 ## 6. Open questions
 
 

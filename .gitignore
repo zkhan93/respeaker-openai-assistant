@@ -69,3 +69,6 @@ htmlcov/
 # Swift/PyInstaller build output for the macOS app
 apps/*/build/
 apps/*/.build/
+
+# Rust helper spike
+crates/*/target/
