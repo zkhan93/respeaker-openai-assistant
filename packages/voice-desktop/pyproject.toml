@@ -34,6 +34,7 @@ voice-desktop = "voice_desktop.cli:main"
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.21.0",
     "pytest>=8.0.0",
 ]
 

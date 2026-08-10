@@ -65,3 +65,7 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Swift/PyInstaller build output for the macOS app
+apps/*/build/
+apps/*/.build/

@@ -213,6 +213,42 @@ def dictate(
     raise typer.Exit(0 if ok else 1)
 
 
+@app.command()
+def serve(
+    engine: str = typer.Option("", "--engine", "-e", help="STT engine. See `dictate --help`."),
+    model: str = typer.Option("", "--model", "-m", help="Model for the chosen engine."),
+    sound: bool = typer.Option(
+        True,
+        "--sound/--no-sound",
+        help="Play a tone when dictation arms and disarms. Pass --no-sound if the "
+        "host application provides its own audible feedback.",
+    ),
+) -> None:
+    """Run the core as a helper process for a native UI.
+
+    Speaks newline-delimited JSON: commands on stdin, events on stdout.
+    Not meant to be run by hand — see ``voice_desktop/sidecar.py`` for
+    the protocol. Logging goes to stderr so stdout stays parseable.
+    """
+    from .sidecar import serve as run_sidecar
+
+    settings = DesktopSettings.from_env()
+    # Earcons stay ON here. They were disabled at first on the theory
+    # that a host UI should own all feedback and a helper holding an
+    # output device would get in its way — both speculative, and the
+    # observable result was a hotkey that armed silently. The tone code
+    # is already written, tuned and tested (AD-13); reimplementing it in
+    # the host would duplicate the mic-bleed tradeoff analysis for no
+    # gain. Revisit only if the host genuinely needs to own the timing.
+    settings.sound = settings.sound and sound
+    if engine:
+        settings.use_stt_engine(engine)
+    if model:
+        settings.stt_params["model"] = model
+
+    raise typer.Exit(0 if run_sidecar(settings) else 1)
+
+
 def main() -> None:
     app()
 

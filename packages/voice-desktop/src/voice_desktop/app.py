@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from voice_core.bus.event_bus import (
     EventBus,
@@ -30,7 +30,6 @@ from voice_core.bus.event_bus import (
 )
 from voice_core.conversation.echo_engine import EchoReplyEngine
 from voice_core.conversation.manager import ConversationManager
-from voice_core.hotword.detector import HotwordDetector, ensure_model
 from voice_core.pipeline.capture import AudioPipeline
 from voice_core.pipeline.detection_service import VoiceDetectionService
 from voice_core.pipeline.speaker import SpeakerManager
@@ -49,6 +48,9 @@ from voice_core.tts import make_tts_engine
 from .adapters.sounddevice_sink import SoundDeviceSink
 from .adapters.sounddevice_source import SoundDeviceSource
 from .settings import DesktopSettings
+
+if TYPE_CHECKING:
+    from voice_core.hotword.detector import HotwordDetector
 
 logger = logging.getLogger(__name__)
 
@@ -162,13 +164,20 @@ def check_audio(settings: DesktopSettings) -> bool:
 #: ``toggle``     same as ``vad``, but starts paused; the hotkey enables
 #:                and disables listening.
 #: ``hold``       listening only while the hotkey is held down.
+#: ``external``   nothing in this process starts a turn; a host application
+#:                does, through the controller handed to ``on_ready``.
 #:
 #: ``vad`` and ``toggle`` are the same machinery with a different initial
 #: state — both let the VAD decide where utterances end, so text flows
 #: sentence by sentence. ``hold`` is the one that is genuinely different:
 #: there the human owns both boundaries, so a pause for breath does not
 #: end the utterance and the transcript arrives when the key comes up.
-TRIGGERS = ("wake_word", "vad", "toggle", "hold")
+#:
+#: ``external`` is ``hold`` with the key press arriving from somewhere
+#: else entirely — a native UI running this process as a helper. Same
+#: boundary ownership, same ``ManualTrigger``; only the thing pressing it
+#: differs, which is exactly the seam AD-7 was built for.
+TRIGGERS = ("wake_word", "vad", "toggle", "hold", "external")
 
 
 def _hotkey_bindings(
@@ -265,6 +274,8 @@ def _how_to_start(trigger: str, hotkey: str, hotword_model: str) -> str:
     """One line telling the user what to actually do, given the trigger."""
     if trigger == "wake_word":
         return f"say {hotword_model!r} to start a turn"
+    if trigger == "external":
+        return "waiting for the host application to start a turn"
     if trigger == "hold":
         return f"hold {hotkey} to talk"
     if trigger == "toggle":
@@ -274,12 +285,77 @@ def _how_to_start(trigger: str, hotkey: str, hotword_model: str) -> str:
     return "just start speaking"
 
 
+class Controller:
+    """Handle a host application uses to drive an ``external`` run.
+
+    Handed to ``run(on_ready=...)`` once the pipeline is live. Every
+    method is safe to call from any thread and is a no-op when it doesn't
+    apply, so a UI can send whatever the user did without tracking state
+    that this process already tracks.
+    """
+
+    def __init__(
+        self,
+        trigger: ManualTrigger,
+        indicator: Indicator,
+        stop: Callable[[], None],
+        pipeline: Optional[AudioPipeline] = None,
+    ):
+        self._trigger = trigger
+        self._indicator = indicator
+        self._stop = stop
+        self._pipeline = pipeline
+
+    def create_reader(self):
+        """An independent cursor over the captured audio.
+
+        For a level meter or a waveform: the host wants to show that the
+        microphone is live, and the ring buffer supports as many readers
+        as anyone wants without disturbing the transcriber's.
+        """
+        if self._pipeline is None:
+            raise RuntimeError("no audio pipeline attached to this controller")
+        return self._pipeline.create_reader()
+
+    @property
+    def is_armed(self) -> bool:
+        return self._trigger.is_active
+
+    def arm(self) -> bool:
+        """Begin a turn. ``False`` if one was already open."""
+        if not self._trigger.begin():
+            return False
+        self._indicator.set_pattern("armed")
+        return True
+
+    def disarm(self) -> bool:
+        """End the open turn. ``False`` if none was open."""
+        if not self._trigger.end():
+            return False
+        self._indicator.set_pattern("disarmed")
+        return True
+
+    def toggle(self) -> bool:
+        """Arm if idle, disarm if armed. Returns the new armed state."""
+        if self._trigger.is_active:
+            self.disarm()
+        else:
+            self.arm()
+        return self._trigger.is_active
+
+    def stop(self) -> None:
+        """Ask the run loop to shut down."""
+        self._stop()
+
+
 def run(
     settings: DesktopSettings,
     mode: str = "assistant",
     text_sink: Optional[TextSink] = None,
     trigger: Optional[str] = None,
     hotkey: Optional[str] = None,
+    extra_indicator: Optional[Indicator] = None,
+    on_ready: Optional[Callable[[Controller], None]] = None,
 ) -> bool:
     """Run the desktop voice loop until interrupted.
 
@@ -299,7 +375,12 @@ def run(
             default. Under ``vad`` and ``toggle`` it pauses and resumes;
             under ``hold`` it is the talk key. Pass ``"none"`` to bind
             nothing (not valid with ``hold``, which would then have no way
-            to start).
+            to start). Ignored by ``external``.
+        extra_indicator: An extra :class:`Indicator` to drive alongside
+            the built-in ones — how a host UI receives state.
+        on_ready: Called once with a :class:`Controller` after the
+            pipeline is live. Required by ``external``, where it is the
+            only way anything can start a turn.
 
     Returns:
         ``True`` on a clean shutdown, ``False`` if startup failed.
@@ -313,12 +394,22 @@ def run(
 
     dictating = mode == "dictation"
     wake_word = trigger == "wake_word"
-    held = trigger == "hold"
+    external = trigger == "external"
+    # Same boundary ownership as hold — a human decides both ends. Only
+    # the source of the press differs.
+    held = trigger in ("hold", "external")
 
+    if external and on_ready is None:
+        raise ValueError("trigger 'external' needs on_ready — nothing else can start a turn")
+
+    if external:
+        hotkey = ""
     if hotkey is None:
         hotkey = settings.hotkey_hold if held else settings.hotkey_toggle
     if hotkey.lower() in ("none", ""):
-        if held:
+        # 'external' shares `held`'s boundary semantics but not this
+        # requirement — there the host process is what starts a turn.
+        if trigger == "hold":
             raise ValueError("trigger 'hold' needs a hotkey — nothing else can start a turn")
         hotkey = ""
 
@@ -348,7 +439,7 @@ def run(
         except Exception:
             logger.warning("could not set up audible feedback — continuing silently")
             earcons = None
-    indicator: Indicator = CompositeIndicator(LoggingIndicator(), earcons)
+    indicator: Indicator = CompositeIndicator(LoggingIndicator(), earcons, extra_indicator)
 
     # ----- what starts a turn -----
     hotword_detector: Optional[HotwordDetector] = None
@@ -357,6 +448,14 @@ def run(
     hotkey_listener = None
 
     if wake_word:
+        # Imported here, not at module scope, for the reason
+        # ``voice_core.hotword``'s docstring gives: openWakeWord (and its
+        # scipy/scikit-learn tail, ~50 MB) is an optional extra, and a
+        # push-to-talk-only build should never touch it. Module-scope this
+        # was the one line forcing the whole hotword stack into every
+        # frozen bundle — see the excludes in apps/VoiceBar/Makefile.
+        from voice_core.hotword.detector import HotwordDetector, ensure_model
+
         available, hotword_path = ensure_model(settings.hotword_model)
         if not available:
             logger.error(
@@ -374,6 +473,8 @@ def run(
             threshold=settings.hotword_threshold,
         )
     elif held:
+        # 'external' included: the trigger is the same, only the thing
+        # pressing it lives in another process.
         manual_trigger = ManualTrigger(event_bus)
     else:
         # 'toggle' is 'vad' that starts paused. Same trigger, same
@@ -512,6 +613,25 @@ def run(
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+
+    if on_ready is not None:
+        controller = Controller(
+            manual_trigger if manual_trigger is not None else ManualTrigger(event_bus),
+            indicator,
+            detection.stop,
+            audio_pipeline,
+        )
+        try:
+            # Called before detection.start() blocks, so the host can be
+            # listening for commands the moment audio is live.
+            on_ready(controller)
+        except Exception:
+            logger.exception("on_ready callback failed")
+            audio_pipeline.stop()
+            transcriber.shutdown()
+            event_bus.shutdown()
+            audio_pipeline.cleanup()
+            return False
 
     try:
         # Blocks in its own read loop; the signal handler calls stop().

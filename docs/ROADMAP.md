@@ -634,6 +634,167 @@ inference is not. Privacy: everything dictated goes to OpenAI — for a dictatio
 potentially everything the user writes by voice. Cost per minute, and no offline use.
 
 
+### AD-15 — Native Swift shell, Python core as a child process
+
+**Added 2026-08-06.** Decided against a PyObjC menu bar, and against a full Swift rewrite.
+
+**Decision.** The macOS app is Swift + AppKit (`apps/Raneen/`). The Python core runs as a
+child process and speaks **newline-delimited JSON over stdin/stdout** — `voice-desktop serve`,
+implemented in `voice_desktop/sidecar.py`.
+
+**Not ZMQ**, despite the Pi already having a broadcaster. A TCP listener makes macOS ask the
+user to allow incoming network connections on every launch, which is an alarming prompt for a
+dictation tool. A pipe needs no port, cannot collide with a second instance, and closes when
+the parent dies — process lifecycle for free. ZMQ stays right for the Pi, where consumers
+genuinely live on other machines.
+
+**Not a full Swift rewrite,** though WhisperKit on the Neural Engine and a ~30 MB bundle are
+genuinely attractive. It would reimplement AD-11 through AD-14 — the segmentation policy,
+boundary ownership, pre-roll, prompt context — and the Pi would keep the Python version, so
+two implementations of the same behaviour would drift. The boundary is drawn at the
+*protocol* precisely so a native engine can replace the helper later without touching the UI.
+
+**What Swift buys immediately.** A `CGEventTap` can suppress one specific key while passing
+everything else through. pynput can only suppress *all* keys or none, which is why AD-12 had
+to default to bare modifiers — the only keys that type nothing on their own. With a tap, any
+key is bindable. Longer term it also unblocks §5c: Input Method Kit is Objective-C/Swift
+only, and holding a marked-text range is the one way to do Apple-style live revision.
+
+**`trigger="external"`** joins the trigger list: `hold`'s boundary semantics with the press
+arriving from another process, via a `Controller` handed to `on_ready`. Same `ManualTrigger`,
+same `boundary_source="hotkey"` — exactly the seam AD-7 was built for.
+
+#### Spike results, 2026-08-06
+
+Ran before building any real UI, because the risk was in the native dependencies, not the
+UI code. All measured, not assumed:
+
+| question | result |
+|---|---|
+| Does the stack survive PyInstaller? | Yes, after two fixes (below) |
+| Helper size | 287 MB frozen; bundle 288 MB |
+| Cold start to `ready` | ~3 s warm, ~18 s first run after a build |
+| Does the bundle launch the helper? | Yes, from `Contents/Resources/helper/` |
+| **Does the mic work from the child process?** | **Yes** — non-zero peaks, TCC attributes the child to the parent bundle |
+| Helper lifecycle | Dies with the parent (EOF ⇒ shutdown) |
+| Accessibility | Must be granted to the new bundle ID; the terminal's grant does not carry |
+
+**Two packaging bugs, both consequences of earlier decisions.**
+
+1. *`webrtcvad-wheels`.* We switched to the fork because the original imports `pkg_resources`,
+   which setuptools 81 removed. The fork installs the module as `webrtcvad` but registers
+   metadata under its own name, so pyinstaller-hooks-contrib's `copy_metadata("webrtcvad")`
+   raises and aborts the build. Fixed with a local hook that shadows it.
+2. *Lazy registries are invisible to a bundler.* `voice_core.stt` resolves engines through
+   `"module:Class"` strings and `voice_desktop.adapters` uses PEP 562 `__getattr__`. Static
+   analysis cannot see through either, so no engine module was collected and the frozen binary
+   died with `ModuleNotFoundError` on the first transcription. Fixed with hooks that
+   `collect_submodules` whole packages, so adding an engine cannot silently break the bundle.
+
+**A third bug worth remembering:** a frozen binary has no interpreter to re-launch, so
+multiprocessing spawns children by re-executing *the app itself* with Python's arguments.
+Our entry point is a Typer CLI, which parsed `-B -c ...` as its own flags and died — and the
+child inherited stdin, stealing the command stream so the parent saw instant EOF. Fixed with
+`multiprocessing.freeze_support()` as the first statement in `helper_entry.py`. Nothing of
+ours uses multiprocessing; ctranslate2's resource tracker does.
+
+**Confirmed by a live run, 2026-08-06:** the hotkey tap installs, suppresses, and drives the
+helper end to end. The log also showed AD-12 working under real speech — two VAD stops during
+a 7.84 s hold were correctly ignored and the whole utterance went to Whisper as one segment.
+
+#### Signing, 2026-08-06
+
+`Developer ID Application: NEXUSCRAFT LABS LLP (JZ9GK56X46)` created and installed, valid to
+2031. The bundle now signs with a full chain (Developer ID → Developer ID CA → Apple Root),
+a secure timestamp, and hardened runtime; `codesign --verify --deep --strict` passes and the
+frozen Python still loads, so the entitlements are right — `disable-library-validation` being
+the load-bearing one.
+
+**`--timestamp` costs a network round trip per file, and there are ~380.** Sequentially that
+was **11m40s**, and it died partway through on a transient timestamp-server error, leaving a
+half-signed bundle whose verification failure looks exactly like a code problem. Now
+parallelised (`xargs -P 6`) with a second pass to absorb transient failures: **21 seconds**.
+
+Two things that will bite anyone repeating this: the first `codesign` after importing a key
+raises a SecurityAgent dialog that must be answered **Always Allow** (otherwise it asks ~380
+times), and `spctl` reporting `rejected / source=Unnotarized Developer ID` is expected until
+notarisation, not a signing failure.
+
+**Still open:** notarisation has not been run.
+
+#### Text insertion — direct typing, 2026-08-07
+
+**Decision.** Transcripts go straight into the focused application via `CGEvent`
+(`apps/Raneen/Sources/Raneen/TextInserter.swift`). Chosen over the floating-panel model
+so the loop actually closes now; the panel remains the path to §5c live revision and can slot
+in later without changing the protocol.
+
+This replaces the Python `KeyboardTextSink` for the bundled app — the helper emits transcripts
+over the protocol and the host types them. `keyboardSetUnicodeString` delivers arbitrary text
+in one event regardless of keyboard layout, where pynput had to send characters individually.
+
+Three things that silently corrupt output if you get them wrong:
+
+* **`CGEventSource(stateID: .privateState)`**, not the combined session state. An event built
+  from the shared state inherits whatever modifiers are physically held — and under
+  hold-to-talk a modifier very likely *is* held, so the target app would receive ⌥-decorated
+  keystrokes instead of text.
+* **Chunk on `Character` boundaries**, not UTF-16 indices. A long string in one event is
+  silently truncated or dropped by some applications, but naive chunking cuts an emoji's
+  surrogate pair in half and neither half is valid text. 12 tests in
+  `Tests/RaneenTests/` pin this; `swift test` runs them.
+* **Serialise posting on its own queue.** Two transcripts arriving close together must not
+  interleave their chunks, and a long paragraph must not block the main thread.
+
+A "Type at cursor" menu toggle exists so dictation can be watched without it landing in
+whatever happens to be focused.
+
+#### Trimming the bundle, 2026-08-07
+
+**288 MB → 187 MB (−101 MB, 35%).** Four packaging-time excludes in `apps/Raneen/Makefile`
+(`EXCLUDES`), no dependency changes: `voice-desktop` still declares
+`voice-core[whisper,piper,hotword,openai]` and `dictate --wake-word` still works from source.
+
+| excluded | size | why it was reachable | why it is not needed |
+|---|---|---|---|
+| `scipy` | 34 MB | `openwakeword` dep | Raneen triggers by hotkey |
+| `sklearn` | 16 MB | `openwakeword` dep | ditto |
+| `openwakeword` | ~1 MB | `hotword` extra | ditto |
+| `av` (PyAV) | 44 MB | faster-whisper dep | decodes audio *files*; we pass PCM arrays |
+
+**The excludes alone did nothing** — two module-scope imports kept dragging the whole hotword
+stack in regardless of what the bundler was told to drop. `voice_desktop.app` imported
+`HotwordDetector` at the top even though it only constructs one inside `if wake_word:`, and
+`voice_core.pipeline.detection_service` imported it purely for a type annotation on a
+parameter that is documented as accepting `None`. Both are now lazy / `TYPE_CHECKING`, which
+is what `voice_core.hotword`'s docstring asked for all along. Worth generalising: an extra is
+only really optional if *nothing* imports it at module scope, and nothing enforces that today.
+
+**PyAV needed a stub, not just an exclude.** `faster_whisper/audio.py` does a plain
+`import av` at module scope and `__init__` re-exports `decode_audio`, so dropping the module
+breaks `from faster_whisper import WhisperModel` — before any of the unreachable decoding code
+runs. `rthooks/rthook-stub-av.py` registers a module in `sys.modules` that raises a message
+naming the cause on any attribute access. Every `av.` reference in faster-whisper is inside
+`decode_audio`'s body, so the stub is only reachable by actually calling the file-decode path.
+This one is worth re-checking on a faster-whisper bump; `make check` covers it.
+
+**Verified, not assumed:** `scripts/drive_helper.py` against the trimmed helper reaches
+`ready`, delivers non-zero mic levels (peak 2992), and returns a transcript — all six checks
+pass. Warm cold-start also dropped **3.4 s → 1.1 s**, since importing openWakeWord (and scipy
+and scikit-learn behind it) was roughly a second of every launch.
+
+**Not touched.** `onnxruntime` is now the single largest item at **59 MB**, but faster-whisper
+and piper both require it, so it stays until the engine choice changes. `collect_submodules`
+over-collection (the AD-15 hook) turned out not to be a factor: `voice_core` has no `agent`
+module — the deepagents/langgraph work lives in `voice_core.conversation.agent_engine`, which
+imports lazily, and the bundle contains no langchain code.
+
+**Known rough edge:** a frozen build asked for `--trigger wake_word` dies with a bare
+`ModuleNotFoundError: No module named 'openwakeword'` after opening the audio device. Loud,
+but it does not say *why* the module is absent. Unreachable from Raneen itself (the Swift
+shell always uses `trigger="external"`), so left as is.
+
+
 ### Phase 3 — Shipping
 
 - [ ] macOS `.app` bundle (py2app / Briefcase / PyInstaller — undecided, see §6).

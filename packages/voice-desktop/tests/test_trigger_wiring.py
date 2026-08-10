@@ -24,7 +24,15 @@ from voice_desktop.settings import DesktopSettings
 
 
 def test_all_triggers_are_named():
-    assert set(TRIGGERS) == {"wake_word", "vad", "toggle", "hold"}
+    assert set(TRIGGERS) == {"wake_word", "vad", "toggle", "hold", "external"}
+
+
+def test_external_requires_a_way_to_be_driven():
+    """Without on_ready nothing could ever start a turn."""
+    from voice_desktop.app import run
+
+    with pytest.raises(ValueError, match="needs on_ready"):
+        run(DesktopSettings(), mode="dictation", trigger="external")
 
 
 @pytest.mark.parametrize("mode", ["assistant", "dictation"])
@@ -65,6 +73,13 @@ def test_each_trigger_says_what_to_do():
 
 def test_vad_without_a_hotkey_does_not_promise_one():
     assert _how_to_start("vad", "", "alexa") == "just start speaking"
+
+
+def test_external_does_not_tell_the_user_to_speak():
+    """Nothing happens until the host arms it — 'just start speaking' is a lie."""
+    line = _how_to_start("external", "", "alexa")
+    assert "host" in line
+    assert "just start speaking" not in line
 
 
 # ----- what the key is bound to ----------------------------------------------

@@ -1,14 +1,24 @@
 """Voice detection service - reusable orchestration loop for hotword + voice activity detection."""
 
+from __future__ import annotations
+
 import logging
 import signal
 import time
 from datetime import datetime
-from typing import Dict
+from typing import TYPE_CHECKING, Dict
 
 from ..bus.event_bus import EventBus, HotwordEvent
-from ..hotword.detector import HotwordDetector
 from .capture import AudioPipeline
+
+if TYPE_CHECKING:
+    # Type-only: the detector is passed in, never constructed here, and
+    # ``None`` is a supported value (the loop then just scores nothing).
+    # Importing it for real would pull openWakeWord — and scipy and
+    # scikit-learn behind it — into every build that runs this loop,
+    # including push-to-talk-only ones that never detect a wake word.
+    # ``voice_core.hotword``'s docstring asks callers not to do that.
+    from ..hotword.detector import HotwordDetector
 
 logger = logging.getLogger(__name__)
 

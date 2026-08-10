@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Microphone, under the hardened runtime. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Near-mandatory once a Python runtime is bundled. The hardened
+         runtime otherwise refuses to load any dylib not signed by the
+         same team, and every native wheel we ship (ctranslate2,
+         onnxruntime, PortAudio, PyAV's ffmpeg) is signed by someone else
+         or not at all. Without this the app launches and dies on the
+         first import. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- CPython and the ML runtimes allocate executable memory. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- The child helper is a separate executable we launch ourselves. -->
+    <key>com.apple.security.inherit</key>
+    <false/>
+</dict>
+</plist>
