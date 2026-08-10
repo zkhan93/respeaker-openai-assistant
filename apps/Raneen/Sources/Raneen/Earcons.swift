@@ -146,7 +146,7 @@ final class EarconPlayer {
                 UInt32(MemoryLayout<AudioDeviceID>.size)
             )
             if status != noErr {
-                NSLog("could not select output device %@ (%d)", device.name, status)
+                Log.devices.error("could not select output device \(device.name): status \(status)")
             }
         }
 
@@ -167,7 +167,7 @@ final class EarconPlayer {
         do {
             try engine.start()
         } catch {
-            NSLog("earcons unavailable: %@", "\(error)")
+            Log.audio.error("earcons unavailable: \(error)")
             return
         }
         player.play()
@@ -207,9 +207,14 @@ final class EarconPlayer {
         lock.lock()
         let current = opened
         lock.unlock()
-        if let current, current.uid == target?.uid { return }
 
-        NSLog("earcon output device changed — reopening")
+        // Both conditions, for the same reason capture checks both: an
+        // unchanged device with a stopped engine still needs reopening,
+        // and an unchanged device with a running one means we caused this
+        // notification ourselves.
+        if let current, current.uid == target?.uid, engine.isRunning { return }
+
+        Log.devices.info("earcon output device changed — reopening")
         teardown()
         // A moment for the new device to settle; a Bluetooth handoff is
         // not instant, and reopening too early just fails.

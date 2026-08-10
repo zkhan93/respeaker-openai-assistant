@@ -122,3 +122,44 @@ final class AudioDeviceTests: XCTestCase {
             "the preference was forgotten, so the device can never be re-adopted")
     }
 }
+
+// MARK: - Private devices (the CADefaultDeviceAggregate problem)
+
+extension AudioDeviceTests {
+
+    /// The HAL builds a private aggregate to stand for "the default
+    /// device" while one is open, so the app was offering a device its own
+    /// AVAudioEngine had just caused to exist. It is a real HAL object and
+    /// a meaningless choice.
+    func testPrivateAggregatesAreNotOffered() {
+        for direction in [AudioDevice.Direction.input, .output] {
+            for device in AudioDevice.all(direction) {
+                XCTAssertFalse(
+                    device.name.hasPrefix("CADefaultDeviceAggregate"),
+                    "a private HAL aggregate reached the menu: \(device.name)")
+                XCTAssertFalse(
+                    device.uid.hasPrefix("~:AMS2"),
+                    "a private HAL aggregate reached the menu: \(device.uid)")
+            }
+        }
+    }
+
+    /// Deliberately narrow filtering: a Multi-Output Device or a
+    /// user-built aggregate is a legitimate choice and must survive.
+    func testRealDevicesAreStillListed() {
+        XCTAssertFalse(
+            AudioDevice.all(.input).isEmpty, "filtering removed every input device")
+        XCTAssertFalse(
+            AudioDevice.all(.output).isEmpty, "filtering removed every output device")
+    }
+
+    /// The default must never be something we refuse to show, or the menu
+    /// has nothing ticked and no way to explain why.
+    func testTheSystemDefaultSurvivesFiltering() {
+        for direction in [AudioDevice.Direction.input, .output] {
+            if let fallback = AudioDevice.systemDefault(direction) {
+                XCTAssertTrue(AudioDevice.all(direction).contains(fallback))
+            }
+        }
+    }
+}

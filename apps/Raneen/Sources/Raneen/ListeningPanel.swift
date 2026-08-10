@@ -26,12 +26,12 @@ import AppKit
 /// it would go.
 final class ListeningPanel: NSPanel {
 
-    private let waveform = WaveformView(frame: .zero)
+    private let meter = ActivityMeter(frame: .zero)
 
     /// Small on purpose. This sits over whatever the user is working in,
     /// so it has to be readable at a glance and then forgettable — a
     /// panel large enough to study is a panel that is in the way.
-    private static let size = NSSize(width: 96, height: 26)
+    private static let size = NSSize(width: 62, height: 26)
 
     /// Above the Dock, clear of the very bottom edge.
     private static let bottomMargin: CGFloat = 90
@@ -79,12 +79,13 @@ final class ListeningPanel: NSPanel {
         container.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         container.autoresizingMask = [.width, .height]
 
-        // Tight insets: at this size the capsule's rounded ends already
-        // provide the visual margin, so padding it further would leave
-        // the wave a sliver.
-        waveform.frame = container.bounds.insetBy(dx: 12, dy: 6)
-        waveform.autoresizingMask = [.width, .height]
-        container.addSubview(waveform)
+        // Tight insets, and tighter vertically than horizontally: the
+        // capsule's rounded ends already supply the side margin, while
+        // every point given away at the top and bottom comes straight off
+        // the wave's dynamic range — which is the thing being looked at.
+        meter.frame = container.bounds.insetBy(dx: 8, dy: 3)
+        meter.autoresizingMask = [.width, .height]
+        container.addSubview(meter)
 
         contentView = container
     }
@@ -97,8 +98,8 @@ final class ListeningPanel: NSPanel {
 
     func show() {
         reposition()
-        waveform.reset()
-        waveform.startAnimating()
+        meter.reset()
+        meter.startAnimating()
         alphaValue = 0
         // Regardless: the app is .accessory and not active, and
         // orderFront would be ignored.
@@ -115,12 +116,12 @@ final class ListeningPanel: NSPanel {
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
             self?.orderOut(nil)
-            self?.waveform.stopAnimating()
+            self?.meter.stopAnimating()
         }
     }
 
-    func update(peak: Int) {
-        waveform.append(peak: peak)
+    func update(peak: Int, blocks: [Int]) {
+        meter.append(blocks: blocks.isEmpty ? [peak] : blocks)
     }
 
     /// Bottom-centre of whichever screen the pointer is on — which is

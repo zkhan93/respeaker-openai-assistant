@@ -42,7 +42,8 @@ Events (helper → host)::
      "capture": "host" | "helper"}
     {"event": "state", "pattern": "armed"}      indicator patterns
     {"event": "transcript", "text": ...}
-    {"event": "level", "peak": 0-32767}         mic activity, for a meter
+    {"event": "level", "peak": 0-32767,          mic activity, for a meter
+     "rms": [4 per frame]}                    loudness at 50 Hz
     {"event": "error", "message": ...}
     {"event": "pong"}
     {"event": "bye"}
@@ -140,6 +141,20 @@ class JsonTextSink:
 #: visual feedback honest.
 LEVEL_EVERY_FRAMES = 1
 
+#: Sub-blocks analysed per frame, each reported separately.
+#:
+#: One number per 80 ms frame is too coarse to drive an indicator, and a
+#: *peak* over 80 ms is worse than coarse: speech has transients all the
+#: way through, so it sits pinned near the top whenever anyone is talking.
+#: Four 20 ms blocks of RMS give 50 updates a second of a measure that
+#: tracks loudness — the difference between a meter that reacts to you and
+#: one that lags behind you.
+#:
+#: **Loudness only, deliberately.** This briefly carried per-frequency-band
+#: magnitudes so the host could draw a spectrum. It looked like a chart of
+#: the audio rather than an indicator of activity, which is not what the
+#: panel is for — so the FFT went and one number came back.
+LEVEL_BLOCKS_PER_FRAME = 4
 
 def level_loop(
     controller,
@@ -174,11 +189,15 @@ def level_loop(
             continue
         try:
             samples = np.frombuffer(chunk, dtype=np.int16)
-            peak = int(np.abs(samples).max()) if samples.size else 0
+            if not samples.size:
+                continue
+            peak = int(np.abs(samples).max())
+            blocks = np.array_split(samples.astype(np.float32), LEVEL_BLOCKS_PER_FRAME)
+            rms = [int(np.sqrt(np.mean(np.square(block)))) for block in blocks]
         except Exception:
             logger.exception("level computation failed")
             continue
-        writer.send("level", peak=peak)
+        writer.send("level", peak=peak, rms=rms)
 
 
 def _handle(command: dict, controller, writer: JsonLineWriter) -> bool:

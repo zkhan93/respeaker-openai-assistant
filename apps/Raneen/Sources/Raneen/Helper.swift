@@ -15,7 +15,11 @@ final class Helper {
         case ready(engine: String, model: String)
         case state(pattern: String)
         case transcript(text: String)
-        case level(peak: Int)
+        /// `blocks` are 20 ms loudness readings, so four arrive at once
+        /// every 80 ms. `peak` is kept because it is the honest answer to
+        /// "is the microphone hearing anything", which is a different
+        /// question from what the meter draws.
+        case level(peak: Int, blocks: [Int])
         case error(message: String)
         case pong(armed: Bool)
         case exited(status: Int32)
@@ -78,7 +82,7 @@ final class Helper {
         // this is where a Python traceback appears, and a silently dead
         // helper is the worst thing to debug.
         readLines(from: helperLog.fileHandleForReading) { line in
-            FileHandle.standardError.write("[helper] \(line)\n".data(using: .utf8)!)
+            Log.helper.helperLine(line)
         }
     }
 
@@ -99,7 +103,7 @@ final class Helper {
         if process.isRunning {
             // It is holding the microphone. Taking that away from the
             // user is worse than an unclean exit.
-            NSLog("helper did not exit within %.1fs — terminating", timeout)
+            Log.helper.error("helper did not exit within \(timeout)s — terminating")
             process.terminate()
         }
     }
@@ -122,7 +126,7 @@ final class Helper {
             } catch {
                 // Broken pipe: the helper died. The termination handler
                 // reports it; nothing useful to do here.
-                NSLog("could not write to helper: %@", error.localizedDescription)
+                Log.helper.error("could not write to helper: \(error.localizedDescription)")
             }
         }
     }
@@ -138,17 +142,30 @@ final class Helper {
     private func readLines(from handle: FileHandle, _ onLine: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var buffer = Data()
-            while true {
-                let chunk = handle.availableData
-                if chunk.isEmpty { break }  // EOF
-                buffer.append(chunk)
+            var open = true
+            while open {
+                // Each pass must drain its own autorelease pool. This block
+                // never returns while the helper lives, and GCD only drains
+                // a thread's pool when a block completes — so without this,
+                // every `availableData` NSData, every decoded String, and
+                // every JSON object graph built downstream in `onLine` is
+                // pinned until the app quits. Measured: 2.8 GB of dirty
+                // MALLOC_SMALL after four hours of level events.
+                autoreleasepool {
+                    let chunk = handle.availableData
+                    if chunk.isEmpty {  // EOF
+                        open = false
+                        return
+                    }
+                    buffer.append(chunk)
 
-                while let newline = buffer.firstIndex(of: 0x0A) {
-                    let lineData = buffer[buffer.startIndex..<newline]
-                    buffer.removeSubrange(buffer.startIndex...newline)
-                    if let line = String(data: lineData, encoding: .utf8),
-                       !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                        onLine(line)
+                    while let newline = buffer.firstIndex(of: 0x0A) {
+                        let lineData = buffer[buffer.startIndex..<newline]
+                        buffer.removeSubrange(buffer.startIndex...newline)
+                        if let line = String(data: lineData, encoding: .utf8),
+                           !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                            onLine(line)
+                        }
                     }
                 }
             }
@@ -174,7 +191,10 @@ final class Helper {
         case "transcript":
             onEvent?(.transcript(text: object["text"] as? String ?? ""))
         case "level":
-            onEvent?(.level(peak: object["peak"] as? Int ?? 0))
+            onEvent?(
+                .level(
+                    peak: object["peak"] as? Int ?? 0,
+                    blocks: object["rms"] as? [Int] ?? []))
         case "error":
             onEvent?(.error(message: object["message"] as? String ?? "unknown error"))
         case "pong":

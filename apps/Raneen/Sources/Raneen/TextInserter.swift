@@ -104,7 +104,7 @@ final class TextInserter {
         // irrelevant, the string is what gets delivered.
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-            NSLog("could not create keyboard event for insertion")
+            Log.app.error("could not create keyboard event for insertion")
             return
         }
 

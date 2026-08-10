@@ -51,18 +51,29 @@ final class AudioCapture {
         return running
     }
 
-    /// The device currently open, or nil when capture is not running.
+    /// The device we last opened. **Survives a configuration change**,
+    /// and is cleared only by an explicit teardown.
     ///
-    /// Exists so the caller can tell a real device change from a
-    /// self-inflicted one. Restarting the engine posts a configuration
-    /// change, so a restart triggered by that notification restarts
-    /// forever — comparing against what is actually open is what breaks
-    /// the loop.
+    /// That outliving matters more than it looks. This exists so the
+    /// caller can tell a real device change from one we caused ourselves,
+    /// and a configuration change is precisely when the question is asked
+    /// — so gating it on `running`, which the configuration-change handler
+    /// has already set to false, returned nil at the only moment it was
+    /// needed. The comparison always failed, the caller always reopened,
+    /// and reopening posted another configuration change.
     var openedDevice: AudioDevice? {
         lock.lock()
         defer { lock.unlock() }
-        return running ? opened : nil
+        return opened
     }
+
+    /// Whether audio is actually flowing, asked of `AVAudioEngine` rather
+    /// than of our own bookkeeping.
+    ///
+    /// A configuration change may or may not have stopped the engine. Our
+    /// `running` flag records that we were *told*; this records what is
+    /// true, which is what "does this need reopening" should turn on.
+    var isEngineRunning: Bool { engine.isRunning }
 
     /// The format the hardware is actually delivering, for diagnostics.
     var inputFormat: AVAudioFormat? { converter?.inputFormat }
@@ -107,7 +118,7 @@ final class AudioCapture {
                 // Not fatal: falling back to the system default keeps
                 // dictation working, which beats refusing to listen
                 // because one preference could not be honoured.
-                NSLog("could not select input device %@ (%d)", device.name, status)
+                Log.devices.error("could not select input device \(device.name): status \(status)")
             }
         }
         // Ask the *node*, not the device: this is the format the tap will
@@ -137,8 +148,15 @@ final class AudioCapture {
 
         input.installTap(onBus: 0, bufferSize: Self.tapBufferSize, format: format) {
             [weak self] buffer, _ in
-            guard let self, let data = self.converter?.convert(buffer) else { return }
-            self.onFrames?(data)
+            // The pool matters: this thread is AVFoundation's, not ours,
+            // and nothing guarantees it drains between callbacks. The
+            // converter allocates an AVAudioPCMBuffer and a Data per call,
+            // ~12 times a second, forever — undrained, that accumulates as
+            // dirty malloc pages for the lifetime of the app.
+            autoreleasepool {
+                guard let self, let data = self.converter?.convert(buffer) else { return }
+                self.onFrames?(data)
+            }
         }
 
         engine.prepare()
@@ -163,10 +181,9 @@ final class AudioCapture {
         opened = device ?? AudioDevice.systemDefault(.input)
         lock.unlock()
 
-        NSLog(
-            "capture started: %.0f Hz %d ch -> 16000 Hz 1 ch int16",
-            format.sampleRate, format.channelCount
-        )
+        Log.audio.info(
+            "capture started: \(Int(format.sampleRate)) Hz \(format.channelCount) ch"
+                + " -> 16000 Hz 1 ch int16")
     }
 
     func stop() {
@@ -192,7 +209,7 @@ final class AudioCapture {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
-        NSLog("capture stopped")
+        Log.audio.info("capture stopped")
     }
 
     /// The engine's configuration changed underneath us.
@@ -203,7 +220,7 @@ final class AudioCapture {
     /// to paper over it — recovery policy belongs to the caller, which is
     /// the only thing that knows whether a turn is in progress.
     @objc private func configurationChanged(_ notification: Notification) {
-        NSLog("audio configuration changed — capture needs restarting")
+        Log.audio.info("audio configuration changed — capture needs restarting")
         lock.lock()
         running = false
         lock.unlock()

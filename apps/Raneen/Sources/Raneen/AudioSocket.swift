@@ -126,7 +126,7 @@ final class AudioSocket {
                     client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)
                 )
             } else {
-                NSLog("audio socket accept failed: %d", errno)
+                Log.audio.error("audio socket accept failed: errno \(errno)")
             }
             self.lock.lock()
             self.clientFD = client

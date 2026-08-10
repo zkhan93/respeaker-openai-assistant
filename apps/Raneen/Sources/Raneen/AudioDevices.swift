@@ -60,11 +60,66 @@ struct AudioDevice: Equatable {
 
         return ids.compactMap { id in
             guard channelCount(id, direction) > 0,
+                !isPrivate(id),
                 let uid = string(id, kAudioDevicePropertyDeviceUID),
                 let name = string(id, kAudioObjectPropertyName)
             else { return nil }
             return AudioDevice(id: id, uid: uid, name: name)
         }
+    }
+
+    /// Whether Core Audio considers this device an implementation detail.
+    ///
+    /// `CADefaultDeviceAggregate` is the one that prompted this: the HAL
+    /// builds a private aggregate to stand for "the default device" when
+    /// an app opens one, so **we were listing a device our own
+    /// `AVAudioEngine` had just caused to exist**. It is a real HAL object
+    /// and completely useless as a choice.
+    ///
+    /// Two independent signals, because neither covers everything:
+    ///
+    /// * `kAudioDevicePropertyIsHidden` — the general "do not show this"
+    ///   flag. Hidden devices still appear in the device list; the flag is
+    ///   what says not to offer them.
+    /// * a private *aggregate*, via the `IsPrivate` key in its
+    ///   composition. Deliberately narrow: user-created aggregates and
+    ///   Multi-Output Devices are legitimate choices and must stay.
+    private static func isPrivate(_ id: AudioDeviceID) -> Bool {
+        if let hidden = uint32(id, kAudioDevicePropertyIsHidden), hidden != 0 { return true }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyComposition,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var composition: Unmanaged<CFDictionary>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFDictionary>?>.size)
+        // Fails for anything that is not an aggregate, which is the
+        // common case and not an error.
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &composition) == noErr,
+            let dictionary = composition?.takeRetainedValue() as? [String: Any]
+        else { return false }
+
+        let key = kAudioAggregateDeviceIsPrivateKey as String
+        if let flag = dictionary[key] as? Int { return flag != 0 }
+        if let flag = dictionary[key] as? Bool { return flag }
+        return false
+    }
+
+    private static func uint32(
+        _ id: AudioDeviceID, _ selector: AudioObjectPropertySelector
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr else {
+            return nil
+        }
+        return value
     }
 
     /// What the system would pick right now.

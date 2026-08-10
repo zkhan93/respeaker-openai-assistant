@@ -22,9 +22,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Kept alive so the Core Audio listeners stay registered.
     private var deviceObservers: [Any] = []
 
-    /// Held rather than rebuilt so they can be filled in on open.
-    private let inputMenu = NSMenu()
-    private let outputMenu = NSMenu()
+    /// The submenus currently attached, so `menuNeedsUpdate` can tell
+    /// which direction it is being asked about.
+    ///
+    /// **Replaced on every rebuild, never reused.** An `NSMenu` may have
+    /// exactly one supermenu; attaching one instance to a second menu item
+    /// throws an assertion and aborts the process. `rebuildMenu` builds a
+    /// fresh `NSMenu` each time, so holding these as constants and
+    /// re-attaching them crashed the app the moment anything rebuilt the
+    /// menu twice.
+    private var inputMenu = NSMenu()
+    private var outputMenu = NSMenu()
 
     /// Whether a turn is open, mirrored from the helper's state events.
     /// Only used to avoid reopening the microphone mid-sentence.
@@ -45,27 +53,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ProcessInfo.processInfo.environment["RANEEN_DEBUG"] == "1"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First thing, so anything that goes wrong during launch is
+        // recorded rather than only reaching a crash report.
+        Log.installCrashHandler()
+        Log.app.info("Raneen starting — log at \(LogFile.shared.path)")
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        inputMenu.delegate = self
-        outputMenu.delegate = self
         show(.starting)
         rebuildMenu()
 
         startHelper()
 
         if !hotkey.start() {
-            NSLog("hotkey tap FAILED to install — Accessibility not granted")
+            Log.hotkey.error("event tap failed to install — Accessibility not granted")
             state = "no Accessibility permission"
             rebuildMenu()
             promptForAccessibility()
         } else {
-            NSLog("hotkey tap installed — %@", self.triggerKey.label)
+            Log.hotkey.info("event tap installed, bound to \(self.triggerKey.label)")
             hotkey.onPress = { [weak self] in
-                if Self.debugLogging { NSLog("hotkey down") }
+                Log.hotkey.debug("down")
                 self?.helper?.arm()
             }
             hotkey.onRelease = { [weak self] in
-                if Self.debugLogging { NSLog("hotkey up") }
+                Log.hotkey.debug("up")
                 self?.helper?.disarm()
             }
         }
@@ -105,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // them was ever exercised — so the other would rot silently.
             // If we cannot own the audio, we say so rather than quietly
             // running a different program than the one that was tested.
-            NSLog("could not create the audio socket: %@", "\(error)")
+            Log.audio.error("could not create the audio socket: \(error)")
             state = "audio unavailable — \(error)"
             show(.error)
             rebuildMenu()
@@ -169,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 state = "chosen mic unavailable — using \(device?.name ?? "the default")"
             }
         } catch {
-            NSLog("could not start capture: %@", "\(error)")
+            Log.audio.error("could not start capture: \(error)")
             state = "microphone unavailable"
         }
     }
@@ -221,15 +232,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard audioSocket != nil else { return }
 
         let target = DevicePreference.resolve(.input).device
-        if let running = capture?.openedDevice, running.uid == target?.uid {
+        let sameDevice = capture?.openedDevice?.uid == target?.uid
+        let stillRunning = capture?.isEngineRunning == true
+
+        // Both conditions, not either. Same device but a stopped engine
+        // means the change really did knock capture over and it needs
+        // reopening; a running engine on the same device means this
+        // notification was our own doing and there is nothing to do.
+        if sameDevice && stillRunning {
+            Log.devices.debug(
+                "ignoring device notification — still on \(target?.name ?? "none"), engine running")
             return
         }
+
+        Log.devices.info(
+            "reopening capture: \(capture?.openedDevice?.name ?? "none") -> "
+                + "\(target?.name ?? "none"), engineRunning=\(stillRunning)")
 
         if isArmed {
             // Reopening mid-utterance would cut the recording in half.
             // The key is still down and the old device is still feeding
             // us, so the honest move is to finish the sentence first.
-            NSLog("audio device changed while armed — deferring until the key is released")
+            Log.devices.info("device changed while armed — deferring until the key is released")
             restartPending = true
             return
         }
@@ -256,7 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = "ready"
             show(.idle)
             if let format = capture?.inputFormat {
-                NSLog("following the new device: %.0f Hz %d ch", format.sampleRate, format.channelCount)
+                Log.devices.info("following the new device: \(Int(format.sampleRate)) Hz \(format.channelCount) ch")
             }
         } else {
             restartAttempts += 1
@@ -327,9 +351,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // and never activate, so "the focused app" is still whatever
             // the user was typing in when they pressed the key.
             inserter.insert(text)
-        case .level(let value):
+        case .level(let value, let blocks):
             peak = value
-            panel.update(peak: value)
+            panel.update(peak: value, blocks: blocks)
             // **Deliberately returns without rebuilding the menu.**
             // Level arrives 12.5 times a second and changes nothing the
             // menu shows. Rebuilding anyway was survivable while the menu
@@ -339,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // enough to make the whole machine feel slow.
             levelTicks += 1
             if Self.debugLogging && levelTicks % 12 == 0 {
-                NSLog("mic peak %d", value)
+                Log.audio.debug("mic peak \(value)")
                 rebuildMenu()  // the debug bar is the only thing that moves
             }
             return
@@ -352,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = "helper exited (\(status))"
             show(.stopped)
         case .unknown(let raw):
-            NSLog("unrecognised event: %@", raw)
+            Log.helper.error("unrecognised event: \(raw)")
         }
         rebuildMenu()
     }
@@ -426,18 +450,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keyItem.submenu = keyMenu
         menu.addItem(keyItem)
 
-        // Submenus are populated when they are opened, not when the menu
-        // is built — see `menuNeedsUpdate`. Enumerating Core Audio here
-        // would put a device scan on a path that runs constantly.
+        // Fresh instances: see the note on `inputMenu`. Still empty at
+        // this point — they are populated when opened (`menuNeedsUpdate`),
+        // so enumerating Core Audio stays off this path, which runs often.
+        inputMenu = NSMenu()
+        inputMenu.delegate = self
         let inputItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
         inputItem.submenu = inputMenu
         menu.addItem(inputItem)
 
+        outputMenu = NSMenu()
+        outputMenu.delegate = self
         let outputItem = NSMenuItem(title: "Sound output", action: nil, keyEquivalent: "")
         outputItem.submenu = outputMenu
         menu.addItem(outputItem)
 
         menu.addItem(.separator())
+        // Somewhere to point a person who says "it broke". Without this
+        // the log exists but only someone who already knows the path can
+        // find it, which is the same as it not existing.
+        let logItem = NSMenuItem(
+            title: "Reveal Log in Finder", action: #selector(revealLog), keyEquivalent: "")
+        logItem.target = self
+        menu.addItem(logItem)
+
         menu.addItem(
             withTitle: "Quit Raneen",
             action: #selector(NSApplication.terminate(_:)),
@@ -586,17 +622,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               choice != triggerKey else { return }
 
         if !hotkey.rebind(to: choice) {
-            NSLog("could not rebind hotkey — Accessibility not granted")
+            Log.hotkey.error("could not rebind — Accessibility not granted")
             state = "no Accessibility permission"
         } else {
-            NSLog("trigger key is now %@", choice.label)
+            Log.hotkey.info("trigger key is now \(choice.label)")
         }
         rebuildMenu()
     }
 
+    @objc private func revealLog() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: LogFile.shared.path)])
+    }
+
     @objc private func toggleTyping() {
         inserter.isEnabled.toggle()
-        NSLog("type at cursor: %@", inserter.isEnabled ? "on" : "off")
+        Log.app.info("type at cursor: \(inserter.isEnabled ? "on" : "off")")
         rebuildMenu()
     }
 
