@@ -24,14 +24,10 @@ import logging
 import time
 
 from voice_assistant.config import load_config
-from voice_assistant.core import (
-    AudioHandler,
-    EventBus,
-    HotwordDetector,
-    HotwordEvent,
-    VoiceDetectionService,
-    ensure_model,
-)
+from voice_assistant.wiring import make_audio_pipeline
+from voice_core.bus.event_bus import EventBus, HotwordEvent
+from voice_core.hotword.detector import HotwordDetector, ensure_model
+from voice_core.pipeline.detection_service import VoiceDetectionService
 
 logger = logging.getLogger(__name__)
 
@@ -75,17 +71,12 @@ def main(simulate_work: float = 0.0) -> bool:
         return False
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(
-        event_bus=event_bus,
-        vad_aggressiveness=config.vad_aggressiveness,
-        silence_threshold=config.vad_silence_threshold,
-        speech_threshold=config.vad_speech_threshold,
-    )
+    audio_pipeline = make_audio_pipeline(config, event_bus)
     hotword_detector = HotwordDetector(
         model_name=hotword_name,
         threshold=config.hotword_threshold,
     )
-    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+    detection_service = VoiceDetectionService(audio_pipeline, event_bus, hotword_detector)
 
     def on_hotword(event: HotwordEvent) -> None:
         logger.info(
@@ -104,7 +95,7 @@ def main(simulate_work: float = 0.0) -> bool:
 
     event_bus.subscribe("hotword_detected", on_hotword)
 
-    audio_handler.start_stream()
+    audio_pipeline.start()
     logger.info(
         "listening for %r — say it to fire a hotword event (Ctrl+C to stop)",
         hotword_name,
@@ -118,8 +109,8 @@ def main(simulate_work: float = 0.0) -> bool:
         logger.exception("detection loop crashed")
         return False
     finally:
-        audio_handler.stop_stream()
-        audio_handler.cleanup()
+        audio_pipeline.stop()
+        audio_pipeline.cleanup()
 
 
 if __name__ == "__main__":

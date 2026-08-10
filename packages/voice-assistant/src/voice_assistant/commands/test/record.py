@@ -7,7 +7,9 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
-from ...core.audio_handler import AudioHandler
+from voice_core.pipeline.capture import AudioPipeline
+
+from ...adapters import PyAudioSource
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +26,15 @@ class SimpleRecorder:
         """
         self.duration_seconds = duration_seconds
         self.auto_play = auto_play
-        self.audio_handler = AudioHandler(
-            device_name="ac108",
-            sample_rate=16000,
-            channels=1,  # Use mono - works perfectly with AC108
-            chunk_size=1280,  # 80ms chunks (required by openWakeWord)
+        # No event bus: this is a raw capture test, so VAD is skipped
+        # entirely rather than emitting events nobody listens to.
+        self.audio_pipeline = AudioPipeline(
+            PyAudioSource(
+                device_name="ac108",
+                sample_rate=16000,
+                channels=1,  # Mono - works perfectly with AC108
+                chunk_size=1280,  # 80ms chunks (required by openWakeWord)
+            )
         )
         self.running = False
 
@@ -57,8 +63,8 @@ class SimpleRecorder:
         logger.info("")
 
         # Start audio stream
-        self.audio_handler.start_stream()
-        self.reader = self.audio_handler.create_reader()
+        self.audio_pipeline.start()
+        self.reader = self.audio_pipeline.create_reader()
         logger.info("✓ Audio stream started")
 
         # Calculate how many frames we need
@@ -79,9 +85,9 @@ class SimpleRecorder:
                 if not audio_data:
                     continue
 
-                # Convert to PCM16 mono for saving
-                pcm16_data = self.audio_handler.convert_to_pcm16_mono(audio_data)
-                frames.append(pcm16_data)
+                # Frames arrive as PCM16 mono already — the AudioSource
+                # contract guarantees the format, so they are WAV-ready.
+                frames.append(audio_data)
 
                 frame_count += 1
 
@@ -94,7 +100,7 @@ class SimpleRecorder:
             logger.info("\n\nRecording interrupted by user")
 
         finally:
-            self.audio_handler.cleanup()
+            self.audio_pipeline.cleanup()
 
         # Calculate actual duration
         actual_duration = frame_count * 0.08  # 80ms per frame

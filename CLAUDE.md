@@ -4,6 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
+> **Direction:** the project is pivoting from a single Pi appliance to one shared core
+> serving three products (Pi appliance, desktop assistant, desktop dictation). Read
+> [docs/ROADMAP.md](docs/ROADMAP.md) before making structural changes — it records the
+> architecture decisions, the rejected alternatives, and the constraint that the Pi
+> deployment keeps working throughout.
+
 An audio broadcasting service for the ReSpeaker 4-Mic Array on Raspberry Pi. Captures audio, detects hotwords/VAD, and broadcasts via ZeroMQ. External consumers (OpenAI Realtime, STT, recorders) connect over ZMQ from any machine. LED hardware is controlled via ZMQ commands. Python 3.11+, managed with `uv`.
 
 ## Common Commands

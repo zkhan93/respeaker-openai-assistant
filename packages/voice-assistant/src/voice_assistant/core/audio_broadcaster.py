@@ -9,8 +9,9 @@ from typing import Optional
 
 import zmq
 
+from voice_core.pipeline.capture import AudioPipeline
+
 from .audio_bus import AudioBusReader
-from .audio_handler import AudioHandler
 from .event_bus import EventBus, HotwordEvent, VoiceActivityEvent
 
 logger = logging.getLogger(__name__)
@@ -30,14 +31,14 @@ class AudioBroadcaster:
 
     def __init__(
         self,
-        audio_handler: AudioHandler,
+        audio_pipeline: AudioPipeline,
         event_bus: EventBus,
         led_consumer=None,
         pub_endpoint: str = "tcp://*:5555",
         pull_endpoint: str = "tcp://*:5556",
         meta_interval: float = 30.0,
     ):
-        self._audio_handler = audio_handler
+        self._audio_pipeline = audio_pipeline
         self._event_bus = event_bus
         self._led_consumer = led_consumer
         self._pub_endpoint = pub_endpoint
@@ -89,7 +90,7 @@ class AudioBroadcaster:
         logger.info(f"PULL socket bound to {self._pull_endpoint}")
 
         # Create audio reader
-        self._reader = self._audio_handler.create_reader()
+        self._reader = self._audio_pipeline.create_reader()
 
         # Subscribe to EventBus
         self._event_bus.subscribe("hotword_detected", self._on_hotword)
@@ -168,12 +169,12 @@ class AudioBroadcaster:
     def _publish_meta(self) -> None:
         meta = json.dumps(
             {
-                "sample_rate": self._audio_handler.sample_rate,
-                "channels": self._audio_handler.channels,
+                "sample_rate": self._audio_pipeline.sample_rate,
+                "channels": self._audio_pipeline.channels,
                 "format": "pcm16",
-                "chunk_size": self._audio_handler.chunk_size,
+                "chunk_size": self._audio_pipeline.chunk_size,
                 "chunk_ms": int(
-                    self._audio_handler.chunk_size / self._audio_handler.sample_rate * 1000
+                    self._audio_pipeline.chunk_size / self._audio_pipeline.sample_rate * 1000
                 ),
                 "ts": datetime.now().isoformat(),
             }

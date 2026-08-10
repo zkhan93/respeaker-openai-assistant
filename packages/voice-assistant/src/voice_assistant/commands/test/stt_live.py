@@ -3,7 +3,7 @@
 Goto reference for "how do I get text out of the mic on this codebase".
 Wires:
 
-    AudioHandler → AudioBus → VoiceDetectionService (hotword + VAD)
+    AudioPipeline → AudioBus → VoiceDetectionService (hotword + VAD)
                             → Transcriber (records, transcribes)
                             → EventBus → log every transcription event
 
@@ -17,18 +17,18 @@ from __future__ import annotations
 import logging
 
 from voice_assistant.config import load_config
-from voice_assistant.core import (
-    AudioHandler,
+from voice_assistant.wiring import make_audio_pipeline
+from voice_core.bus.event_bus import (
     EventBus,
-    HotwordDetector,
     HotwordEvent,
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
     VoiceActivityEvent,
-    VoiceDetectionService,
-    ensure_model,
 )
-from voice_assistant.stt import Transcriber, available_engines, make_stt_engine
+from voice_core.hotword.detector import HotwordDetector, ensure_model
+from voice_core.pipeline.detection_service import VoiceDetectionService
+from voice_core.pipeline.transcriber import Transcriber
+from voice_core.stt import available_engines, make_stt_engine
 
 logger = logging.getLogger(__name__)
 
@@ -69,19 +69,14 @@ def main() -> bool:
         return False
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(
-        event_bus=event_bus,
-        vad_aggressiveness=config.vad_aggressiveness,
-        silence_threshold=config.vad_silence_threshold,
-        speech_threshold=config.vad_speech_threshold,
-    )
+    audio_pipeline = make_audio_pipeline(config, event_bus)
     hotword_detector = HotwordDetector(
         model_name=hotword_name,
         threshold=config.hotword_threshold,
     )
-    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+    detection_service = VoiceDetectionService(audio_pipeline, event_bus, hotword_detector)
     transcriber = Transcriber(
-        audio_handler=audio_handler,
+        audio_pipeline=audio_pipeline,
         event_bus=event_bus,
         engine=engine,
         min_audio_duration=config.stt_min_audio_duration,
@@ -119,7 +114,7 @@ def main() -> bool:
     event_bus.subscribe("transcription_completed", on_transcription_completed)
     event_bus.subscribe("transcription_failed", on_transcription_failed)
 
-    audio_handler.start_stream()
+    audio_pipeline.start()
     logger.info(
         "ready — say %r, then speak. Transcripts log on voice_activity_stopped. Ctrl+C to exit.",
         hotword_name,
@@ -133,5 +128,5 @@ def main() -> bool:
         return False
     finally:
         transcriber.shutdown()
-        audio_handler.stop_stream()
-        audio_handler.cleanup()
+        audio_pipeline.stop()
+        audio_pipeline.cleanup()

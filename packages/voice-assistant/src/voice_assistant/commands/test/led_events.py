@@ -30,15 +30,10 @@ import threading
 
 from voice_assistant.config import load_config
 from voice_assistant.consumers.led import LedConsumer
-from voice_assistant.core import (
-    AudioHandler,
-    EventBus,
-    HotwordDetector,
-    HotwordEvent,
-    VoiceActivityEvent,
-    VoiceDetectionService,
-    ensure_model,
-)
+from voice_assistant.wiring import make_audio_pipeline
+from voice_core.bus.event_bus import EventBus, HotwordEvent, VoiceActivityEvent
+from voice_core.hotword.detector import HotwordDetector, ensure_model
+from voice_core.pipeline.detection_service import VoiceDetectionService
 
 logger = logging.getLogger(__name__)
 
@@ -127,17 +122,12 @@ def main() -> bool:
         return False
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(
-        event_bus=event_bus,  # VAD events enabled
-        vad_aggressiveness=config.vad_aggressiveness,
-        silence_threshold=config.vad_silence_threshold,
-        speech_threshold=config.vad_speech_threshold,
-    )
+    audio_pipeline = make_audio_pipeline(config, event_bus)
     hotword_detector = HotwordDetector(
         model_name=hotword_name,
         threshold=config.hotword_threshold,
     )
-    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+    detection_service = VoiceDetectionService(audio_pipeline, event_bus, hotword_detector)
     led_consumer = LedConsumer(enabled=True)
 
     if not led_consumer.enabled:
@@ -150,7 +140,7 @@ def main() -> bool:
     event_bus.subscribe("voice_activity_started", state.on_voice_started)
     event_bus.subscribe("voice_activity_stopped", state.on_voice_stopped)
 
-    audio_handler.start_stream()
+    audio_pipeline.start()
     logger.info(
         "ready — say %r, keep talking, then go silent. Ctrl+C to stop.",
         hotword_name,
@@ -165,8 +155,8 @@ def main() -> bool:
         return False
     finally:
         led_consumer.set_pattern("off")
-        audio_handler.stop_stream()
-        audio_handler.cleanup()
+        audio_pipeline.stop()
+        audio_pipeline.cleanup()
         led_consumer.cleanup()
 
 

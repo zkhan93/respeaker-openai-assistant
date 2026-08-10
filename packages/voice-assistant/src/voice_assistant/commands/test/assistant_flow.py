@@ -72,24 +72,22 @@ from typing import Optional
 from voice_assistant.config import load_config
 from voice_assistant.consumers.led import LedConsumer
 from voice_assistant.consumers.music import DuckController, MusicConsumer
-from voice_assistant.consumers.speaker import SpeakerManager
-from voice_assistant.conversation import (
+from voice_assistant.wiring import make_audio_pipeline
+from voice_core.bus.event_bus import EventBus
+from voice_core.conversation import (
     AgentReplyEngine,
     ConversationManager,
     EchoReplyEngine,
     ReplyEngine,
 )
-from voice_assistant.core import (
-    AudioHandler,
-    EventBus,
-    HotwordDetector,
-    VoiceDetectionService,
-    ensure_model,
-)
-from voice_assistant.stt import Transcriber, make_stt_engine
-from voice_assistant.stt import available_engines as available_stt_engines
-from voice_assistant.tts import available_engines as available_tts_engines
-from voice_assistant.tts import make_tts_engine
+from voice_core.hotword.detector import HotwordDetector, ensure_model
+from voice_core.pipeline.detection_service import VoiceDetectionService
+from voice_core.pipeline.speaker import SpeakerManager
+from voice_core.pipeline.transcriber import Transcriber
+from voice_core.stt import available_engines as available_stt_engines
+from voice_core.stt import make_stt_engine
+from voice_core.tts import available_engines as available_tts_engines
+from voice_core.tts import make_tts_engine
 
 logger = logging.getLogger(__name__)
 
@@ -171,17 +169,12 @@ def main(
         return False
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(
-        event_bus=event_bus,
-        vad_aggressiveness=config.vad_aggressiveness,
-        silence_threshold=config.vad_silence_threshold,
-        speech_threshold=config.vad_speech_threshold,
-    )
+    audio_pipeline = make_audio_pipeline(config, event_bus)
     hotword_detector = HotwordDetector(
         model_name=hotword_name,
         threshold=config.hotword_threshold,
     )
-    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+    detection_service = VoiceDetectionService(audio_pipeline, event_bus, hotword_detector)
     led_consumer = LedConsumer(enabled=True)
     speaker = SpeakerManager(
         event_bus=event_bus,
@@ -189,7 +182,7 @@ def main(
         channels=config.speaker_channels,
     )
     transcriber = Transcriber(
-        audio_handler=audio_handler,
+        audio_pipeline=audio_pipeline,
         event_bus=event_bus,
         engine=stt_engine,
         min_audio_duration=config.stt_min_audio_duration,
@@ -297,7 +290,7 @@ def main(
     )
     conversation.attach()
 
-    audio_handler.start_stream()
+    audio_pipeline.start()
     logger.info(
         "ready — say %r, talk, then go silent. Ctrl+C to stop.",
         hotword_name,
@@ -321,8 +314,8 @@ def main(
         transcriber.shutdown()
         speaker.cleanup()
         led_consumer.set_pattern("off")
-        audio_handler.stop_stream()
-        audio_handler.cleanup()
+        audio_pipeline.stop()
+        audio_pipeline.cleanup()
         led_consumer.cleanup()
         # Drain and stop any bus workers not already reaped by the
         # detach/shutdown calls above (safety net; idempotent).

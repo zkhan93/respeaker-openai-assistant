@@ -1,0 +1,52 @@
+[project]
+name = "voice-desktop"
+version = "0.1.0"
+description = "Desktop voice assistant and dictation built on voice-core (macOS, Windows, Linux)"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# No pyaudio, no gpiozero, no spidev — that is the whole point of the
+# split. sounddevice ships prebuilt wheels bundling PortAudio for macOS
+# arm64, Windows and Linux, so this installs with no compiler and no
+# Homebrew step. See docs/ROADMAP.md §6 question 1.
+dependencies = [
+    # whisper + piper: local STT/TTS so the app works with no API key.
+    # openai is a base dependency rather than an extra because the CLI
+    # advertises `--engine openai`, and a documented flag that dies with
+    # ImportError unless you guessed an extra is a bad first experience —
+    # especially for someone bringing their own API key. The SDK is pure
+    # Python and trivial next to ctranslate2.
+    "voice-core[whisper,piper,hotword,openai]",
+    "sounddevice>=0.5.0",
+    "typer>=0.15.0",
+    # Synthesizes the keystrokes that put a transcript at the cursor — the
+    # whole point of dictation, so it is a base dependency, not an extra.
+    # On macOS this needs Accessibility permission at runtime.
+    "pynput>=1.7.7",
+]
+
+[project.optional-dependencies]
+# Phase 2: menu-bar indicator. rumps is macOS-only by nature.
+menubar = ["rumps>=0.4.0 ; sys_platform == 'darwin'"]
+
+[project.scripts]
+voice-desktop = "voice_desktop.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.uv.sources]
+voice-core = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voice_desktop"]

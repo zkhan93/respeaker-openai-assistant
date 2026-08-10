@@ -19,9 +19,9 @@ import logging
 import threading
 
 from voice_assistant.config import load_config
-from voice_assistant.consumers.speaker import SpeakerManager
-from voice_assistant.core import EventBus, SpeakingStartedEvent, SpeakingStoppedEvent
-from voice_assistant.tts import available_engines, make_tts_engine
+from voice_core.bus.event_bus import EventBus, SpeakingStartedEvent, SpeakingStoppedEvent
+from voice_core.pipeline.speaker import SpeakerManager
+from voice_core.tts import available_engines, make_tts_engine
 
 logger = logging.getLogger(__name__)
 

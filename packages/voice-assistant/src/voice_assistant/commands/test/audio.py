@@ -10,7 +10,8 @@ def main() -> bool:
         True if successful, False otherwise
     """
     from voice_assistant.config import Config
-    from voice_assistant.core import AudioHandler
+    from voice_assistant.wiring import make_audio_pipeline
+    from voice_core.pipeline.vad import VoiceActivityTracker
 
     try:
         # Load config
@@ -28,16 +29,18 @@ def main() -> bool:
         print("Please make some noise (speak, clap, etc.)")
         print()
 
-        # Initialize audio handler
-        audio_handler = AudioHandler(
-            device_name=config.audio_device,
+        # Capture-only pipeline (no event bus → no VAD events). Speech
+        # counting below uses its own tracker, which is possible now that
+        # the VAD is a plain object rather than part of the audio device.
+        audio_pipeline = make_audio_pipeline(config)
+        speech_tracker = VoiceActivityTracker(
             sample_rate=config.audio_sample_rate,
-            channels=config.audio_channels,
+            aggressiveness=config.vad_aggressiveness,
         )
 
         # Start stream
-        audio_handler.start_stream()
-        reader = audio_handler.create_reader()
+        audio_pipeline.start()
+        reader = audio_pipeline.create_reader()
         print("✓ Audio stream started")
         print()
 
@@ -55,11 +58,11 @@ def main() -> bool:
                 sample_count += len(chunk)
 
                 # Check for speech
-                if audio_handler.is_speech(chunk):
+                if speech_tracker.is_speech(chunk):
                     speech_count += 1
 
-        audio_handler.stop_stream()
-        audio_handler.cleanup()
+        audio_pipeline.stop()
+        audio_pipeline.cleanup()
 
         # Statistics
         duration = time.time() - start_time

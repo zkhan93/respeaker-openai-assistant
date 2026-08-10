@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
-    from voice_assistant.core.event_bus import EventBus
+    from voice_core.bus.event_bus import EventBus
 
     from .music_consumer import MusicConsumer
 
