@@ -1002,12 +1002,18 @@ the microphone, that is simply the normal case.
 Ordered so that the risky piece is the last thing added, and so a failure is always
 attributable to one side of the pipe:
 
-- [ ] `PipeAudioSource` in `voice-desktop/adapters/`, satisfying `AudioSource` unchanged,
-      owning the accumulate-and-emit-at-`chunk_size` buffer.
-- [ ] Frame transport on a dedicated fd; `serve` gains `--audio-fd`. Format declared in the
-      handshake and asserted, so a mismatch is a startup error.
-- [ ] **Prove both with a WAV file replayed down the pipe, before any Swift audio code
-      exists.** When frames later misbehave we then already know which side is wrong.
+- [x] **`PipeAudioSource`** in `voice-desktop/adapters/`, satisfying `AudioSource` unchanged,
+      owning the accumulate-and-emit-at-`chunk_size` buffer. **DONE 2026-08-08.**
+- [x] **Frame transport on a dedicated fd** — `serve --audio-fd`, with `run()` and
+      `make_audio_pipeline()` taking an optional `audio_source` so the composition root keeps
+      the platform decision (AD-2). `ready` declares the required format and whether capture
+      belongs to `host` or `helper`; a disagreeing declaration fails at startup.
+      **DONE 2026-08-08.**
+- [x] **Proven before any Swift audio code exists.** Two levels: a synthesized WAV replayed
+      through a real `os.pipe()` into a real `AudioPipeline` returns byte-identical frames off
+      an `AudioBusReader`; and `serve --audio-fd` driven as a real subprocess — opening no
+      microphone at all — reports `capture=host` and peaks of **19660**, exactly
+      `0.6 × 32767`, so samples cross the process boundary intact. **DONE 2026-08-08.**
 - [ ] Headless CI fitness function pinning the `SoundDeviceSource` CLI path (above).
 - [ ] Swift: `AVAudioEngine` capture + `AVAudioConverter` to 16 kHz mono int16 (arbitrary
       buffer sizes — the core re-blocks).
