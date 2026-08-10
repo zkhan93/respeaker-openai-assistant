@@ -18,11 +18,22 @@ HELPER_DIR  := $(CONTENTS)/Resources/helper
 SWIFT_BIN   := .build/release/$(APP_NAME)
 ENTITLEMENTS:= Resources/entitlements.plist
 
-# Override with your Developer ID, e.g.
-#   make sign IDENTITY="Developer ID Application: ACME (TEAMID)"
-# Ad-hoc ("-") works locally but re-keys TCC on every rebuild, so the
-# Accessibility grant has to be given again after each build.
-IDENTITY ?= -
+# Signing identity, found in the keychain by default.
+#
+# **Why this is auto-detected rather than defaulting to ad-hoc.** An
+# ad-hoc signature ("-") is derived from the binary itself, so every
+# rebuild is a different application as far as TCC is concerned. The
+# Accessibility grant does not carry across, the stale entry in System
+# Settings still *looks* ticked, and `CGEvent.tapCreate` then returns nil
+# — the hotkey silently stops working with no error anywhere. That cost
+# a debugging session once; a default nobody has to remember costs
+# nothing.
+#
+# Override explicitly if you have several:
+#   make dmg IDENTITY="Developer ID Application: ACME (TEAMID)"
+DEVELOPER_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
+	| sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+IDENTITY ?= $(if $(DEVELOPER_ID),$(DEVELOPER_ID),-)
 
 .PHONY: all app helper swift run check sign verify dmg clean
 
@@ -115,6 +126,19 @@ check: helper
 SIGN_JOBS ?= 6
 
 sign: app
+	@if [ "$(IDENTITY)" = "-" ]; then \
+		echo ""; \
+		echo "  ****  AD-HOC SIGNING — the hotkey will not work  ****"; \
+		echo ""; \
+		echo "  No 'Developer ID Application' identity was found in your keychain."; \
+		echo "  An ad-hoc signature changes on every build, so macOS treats this as"; \
+		echo "  a brand-new app: the Accessibility grant does NOT carry over, the old"; \
+		echo "  entry in System Settings still looks ticked, and the event tap fails"; \
+		echo "  silently. The menu bar will work and no key will do anything."; \
+		echo ""; \
+		echo "  Check with:  security find-identity -v -p codesigning"; \
+		echo ""; \
+	fi
 	@echo "signing nested binaries (parallel x$(SIGN_JOBS))…"
 	@find "$(BUNDLE)" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 \
 		| xargs -0 -P $(SIGN_JOBS) -n1 codesign --force --timestamp \
