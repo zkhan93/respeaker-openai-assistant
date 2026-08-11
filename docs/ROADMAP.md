@@ -45,7 +45,7 @@ greenfield rebuild.
 | Resting memory | ~480 MB | **65–90 MB** |
 | Model load | 0.79 s | **0.05 s** |
 | Inference (5.8 s) | 0.56 s | **0.28 s** |
-| Bundle | 187 MB, ~380 files | **4.0 MB** + 57 MB model, **6 files** |
+| Bundle | 187 MB, ~380 files | **13.4 MB** + 57 MB model, **6 files** (4.0 MB before the wake word) |
 | Clean shutdown | ✗ orphans | ✓ |
 | Transcript | reference | **identical** |
 
@@ -185,21 +185,31 @@ and the conversation layer stay.
     gaps are small: `Policy::assistant()` (turn-based — `continuous: false`,
     `drop_stale: true`), a speaking-suppression command so the assistant's own
     voice cannot re-trigger the VAD, and a ZMQ `Consumer`.
-13. **Wake word** in Rust — the missing fourth trigger, same shape as `vad`.
-    **Not a prerequisite for step 12:** `{"cmd":"arm"}` is already in the
-    protocol, so Python keeps its tuned openWakeWord and just sends the command
-    — the same shape as Raneen's hotkey, and AD-16 either way.
+13. ~~**Wake word** in Rust~~ — **DONE 2026-08-10** (`AD-19`). The fourth
+    trigger, and exactly the shape AD-12 predicted: only the *opening*
+    boundary moved, so the VAD still closes the turn and no branch was added
+    to the closing path.
 
-    It becomes necessary only to drop Python from the Pi entirely, because the
-    wake word needs *every* frame and a Python detector means two things in the
-    hot path. openWakeWord is three chained ONNX models (`melspectrogram` 1.0 MB
-    → `embedding_model` 1.3 MB → a per-word classifier, 0.8–1.2 MB), so it needs
-    an ONNX runtime: `tract` (pure Rust, compiles in) or `ort` (~26 MB dylib —
-    the Python wheel's copy is not reachable from Rust). Spike `tract` for a
-    Pi 4B number first. It also decides switchability: only the final classifier
-    differs per wake word, so multiple at once is nearly free and a
-    custom-trained "hey Raneen" is just another file — but only if the loader
-    reads layer dimensions rather than hardcoding one model's shape.
+    `--wake-word <path>.onnx`, repeatable, in **any** trigger mode: a detection
+    is always published as `hotword_detected`, and only `--trigger wakeword`
+    lets it open a turn. That separation is what lets the macOS app carry a
+    detector without losing push-to-talk. **Any openWakeWord-compatible model
+    works**, including a custom-trained one, because the context length is read
+    from the classifier's input shape rather than assumed — a model expecting
+    more than 16 embeddings does not fail when handed 16, it scores garbage
+    confidently. Only the classifier differs per word, so a second wake word
+    costs ~1 MB and 0.014 ms per frame against the shared chain's 1.9 ms.
+
+    **`tract`, not `ort`** — the models total 3.3 MB, where ONNX Runtime's own
+    session and arena would outweigh everything they hold. GPU providers, its
+    real advantage, are worth nothing for three tiny graphs every 80 ms. The
+    spike answered the one question that could have vetoed it: `melspectrogram
+    .onnx` uses `Conv`+`MatMul`, not ONNX's `STFT`/`DFT`, so tract loads all
+    four models. **1.9 ms per 80 ms frame on an M3 Pro — 2.3% of one core.**
+    The Pi 4B number is still to be measured on hardware.
+
+    Still Python's job on the Pi until step 12: the core has the detector, but
+    nothing has rewired the Pi's shell to feed it a socket.
 14. **Diarization**, if the meeting product happens. sherpa-onnx has Python and
     Rust bindings; see `DIARIZATION-SPEC.md`.
 

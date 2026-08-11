@@ -93,6 +93,68 @@ this shape natively.
 
 ---
 
+## Wake word
+
+### A cursor created late silently eats the frames already on the wire
+
+`AudioBusReader` only sees frames written after it exists. Every consumer used
+to create its cursor immediately before spawning its thread, so anything
+already streaming was lost.
+
+It never showed, because the audio missed is the audio arriving while the
+helper is still starting — in a live session, a quiet room. Loading the
+wake-word detector costs ~150 ms of graph optimisation and buffer priming, and
+doing that before creating the segment cursor cost **the first two frames of
+every run**. A fixture whose speech starts at sample 0 then loses the start of
+its first word, which for a wake word is the whole word.
+
+The symptom read as a broken port: **0.31 peak in `serve`, 0.976 on the same
+audio offline** — the same curve, weaker and narrower, which looks like a
+numerics bug and is not. Logging the per-frame RMS next to the score found it
+in one run: the first RMS the detector saw was the fixture's *third* frame.
+
+Every cursor is now created before the ingest thread starts. Cursors are just a
+read position, so making them early is free.
+
+### An ONNX graph is not the whole algorithm
+
+openWakeWord applies `x / 10 + 2` to the melspectrogram **outside** the graph,
+in Python, commented in its own source as an "arbitrary transform". Two more
+like it: the melspectrogram buffer initialises to *ones*, and the feature
+buffer is primed with embeddings of ~4 s of *noise*.
+
+Miss any one and every shape still lines up, every score still looks like a
+score, and the detector simply never fires. Raw mel values run around 90 and
+transformed ones around 11, so the transform test fails by a margin of ~79
+against a 1e-3 tolerance — but only if you write the test. Porting a model
+means porting the code around it, and the only way to know is reference
+vectors from the implementation you are copying.
+
+### Tiny models are the case where a GPU loses
+
+Three chained models, 3.3 MB total, run every 80 ms. Measured on an M3 Pro with
+`tract`: melspectrogram 0.070 ms, embedding 1.772 ms, classifier 0.014 ms —
+**1.9 ms, 2.3% of one core**, of which the shared embedding model is 95%.
+
+At that size a GPU is slower, not faster: kernel-launch overhead exceeds the
+arithmetic, and the context costs tens of MB of permanent RSS to hold weights
+that fit in a cache. The same reasoning inverts for whisper, which is why one
+core runs two inference engines and no shared runtime was available to want.
+
+### 3.3 MB of weights cost 32 MB resident, not 3.3
+
+Measured, and worth knowing before predicting an inference engine's footprint
+from its model sizes. The three plans plus priming cost **16 MB** in isolation
+and nothing further in steady state; inside the running helper it is **~89 MB
+at load decaying to ~45 MB**, against a 13 MB baseline. The binary went 4.0 MB
+-> 13.4 MB, where ~7 MB was predicted.
+
+Roughly 10x the weights, resident, is the number to budget with — the graph
+optimiser materialises constants and preallocates intermediates, and none of
+that is visible in the file size. `AD-19` chose `tract` partly on an expected
+memory win that this does not demonstrate; the reasons that survived
+measurement are the static binary and the irrelevance of GPU providers.
+
 ## Memory
 
 ### A GCD block that never returns never drains its autorelease pool

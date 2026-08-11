@@ -53,6 +53,8 @@ def main():
     parser.add_argument("--wav", default="protocol/fixtures/spike.wav")
     parser.add_argument("--port", type=int, default=5599)
     parser.add_argument("--settle", type=float, default=8.0)
+    parser.add_argument("--wake-word", default=None,
+                        help="assert this wake word's detections reach the wire")
     args = parser.parse_args()
 
     with wave.open(args.wav) as w:
@@ -149,6 +151,19 @@ def main():
     check("4   · the hotkey still dictated while recording", len(transcripts) == 1)
     check("4   · dictation and recording both ran",
           len(transcripts) == 1 and len(seen["audio"]) > 0)
+
+    # The wake word, when one was armed. This is the macOS app's
+    # arrangement: a detector that REPORTS but does not act, so the
+    # detection must reach the network while the hotkey stays the only
+    # thing that opened the turn above.
+    if args.wake_word:
+        hotwords = [e for e in seen["event"] if e.get("type") == "hotword_detected"]
+        names = sorted({e.get("hotword") or e.get("source") for e in hotwords})
+        print(f"  zmq hotwords    : {names}")
+        check("ww  · the wake word reached the network",
+              any(n not in (None, "hotkey", "vad") for n in names))
+        check("ww  · it reported without stealing the turn",
+              len(transcripts) == 1)
 
     if not ok:
         print("\n--- helper stderr ---")

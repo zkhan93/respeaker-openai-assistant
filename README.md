@@ -81,9 +81,9 @@ crates/raneen-core/target/release/raneen-core --help
 
 ```
 raneen-core bench <model.bin> <audio.wav> [--repeats N]
-raneen-core serve [model.bin] --audio-socket <path> [--trigger hold|vad|toggle]
+raneen-core serve [model.bin] --audio-socket <path> [--trigger hold|vad|toggle|wakeword]
                   [--vad silero|energy] [--stt local|remote|realtime] [--stt-url URL]
-                  [--zmq-pub tcp://*:5555] [--language L]
+                  [--wake-word word.onnx] [--zmq-pub tcp://*:5555] [--language L]
 ```
 
 Three things worth knowing:
@@ -97,6 +97,17 @@ Three things worth knowing:
   core event go out on a ZeroMQ PUB socket for consumers elsewhere on the
   network. It **records but never transcribes** — see
   [PRODUCT.md](docs/PRODUCT.md).
+- **`--wake-word` runs openWakeWord natively, and reporting is separate from
+  reacting.** A detection is always published as a `hotword_detected` event
+  carrying the word's own name, in *every* trigger mode; it only opens a turn
+  under `--trigger wakeword`. So `--trigger hold --wake-word alexa_v0.1.onnx`
+  leaves push-to-talk exactly as it was and puts the detections on the wire
+  beside it. Point it at any openWakeWord-compatible `.onnx` — the shipped ones
+  or one you trained — and repeat the flag for several; they share the feature
+  models, so each extra word costs about 1 MB and 0.03 ms per frame. The models
+  are **not shipped in the app**: fetch them with
+  `./tools/fetch-wakeword-models.sh`, and point `RANEEN_WAKEWORD_DIR` anywhere
+  you like.
 - **`--language` is coupled to the model.** A `*.en` model given other speech
   does not fail; it transliterates into English phonemes and returns confident
   nonsense. Other languages need a multilingual model.

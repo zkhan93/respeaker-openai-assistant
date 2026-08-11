@@ -70,7 +70,8 @@ cargo clippy --release --manifest-path crates/raneen-core/Cargo.toml -- -D warni
 cargo build --release --manifest-path crates/raneen-core/Cargo.toml
 
 # Conformance — spawns a real helper, streams real audio, asserts on transcripts
-./protocol/run-suite.sh rust        # 7 cases; `python` runs the same against the reference
+./protocol/run-suite.sh rust        # 10 cases; `python` runs the same against the reference
+./tools/fetch-wakeword-models.sh    # wake-word models, needed by the wakeword case
 
 # macOS app (from apps/Raneen)
 make app                            # build core + assemble the bundle
@@ -95,6 +96,7 @@ compile from source. Later builds are seconds.
 | --- | --- |
 | `src/bus/` | `AudioBus` — ring buffer with independent read cursors and `rewind()` for pre-roll. `EventBus` — one thread per `Consumer`, FIFO |
 | `src/pipeline/` | `SpeechDetector` (Silero, energy), the turn tracker, `TriggerMode`, `Policy` |
+| `src/hotword/` | openWakeWord on `tract` — the shared mel+embedding chain, one classifier per word |
 | `src/stt/` | the frame-level `Stt` trait plus `whisper_cpp`, `remote`, `realtime`, `buffered`, `fallback` |
 | `src/broadcast/` | ZeroMQ publisher and the always-on recorder |
 | `src/serve.rs` | the protocol loop — the composition root |
@@ -110,6 +112,14 @@ Three properties to keep in mind before changing anything here:
 - **Always-on recording is a `Consumer`, not a trigger mode.** It has its own bus
   cursor and its own detector, which is why hotkey dictation keeps working while
   the room is being recorded, with no new state machine.
+- **A wake word is reported in every mode and obeyed in one.** `--wake-word`
+  publishes `hotword_detected` whatever the trigger is; only
+  `--trigger wakeword` lets it open a turn. Never couple the two — a dictation
+  host arms a detector to *report*, and auto-selecting the trigger would take
+  push-to-talk away silently.
+- **Every `AudioBus` cursor is created before the ingest thread starts.** A reader
+  only sees frames written after it exists, so creating one late silently eats the
+  first frames — which cost the beginning of the wake word once (`AD-19`).
 
 ### Protocol summary
 

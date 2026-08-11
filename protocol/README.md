@@ -132,6 +132,7 @@ which no single-implementation test could have surfaced.
 | `spike.wav` | 5.8 s, one sentence. The baseline. Also the tail-padding case — it ends *on speech*, which is where whisper.cpp drops the last word. |
 | `two-sentences.wav` | Two sentences with a 1.5 s gap. VAD segmentation: should yield **two** transcripts and two `listen` states, with no hotkey. |
 | `noise-then-speech.wav` | Door slam → rattling keys → one sentence. Detector quality: Silero opens **1** turn, energy opens **3**. |
+| `wake-word.wav` | "alexa" then a sentence. The wake word opens the turn and the **VAD closes it**, so one transcript proves both halves of AD-12's split boundary. **Its speech starts at sample 0, deliberately** — no lead-in, because that is what caught the segment cursor being created after the ingest thread and losing the first two frames of every run. Any leading silence hides that bug. |
 
 Committed as WAVs rather than generated, because `say` is macOS-only and its
 output varies by installed voice — a fixture that differs per machine cannot pin

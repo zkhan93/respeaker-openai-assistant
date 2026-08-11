@@ -52,6 +52,7 @@ use crate::broadcast::publisher::{ZmqEvents, ZmqPublisher};
 use crate::broadcast::recorder;
 use crate::bus::audio_bus::{AudioBus, AudioBusReader, Frame};
 use crate::bus::event_bus::{Consumer, Event, EventBus};
+use crate::hotword::WakeWordTracker;
 use crate::pipeline::vad::{Transition, VoiceActivityTracker};
 use crate::pipeline::{Policy, TriggerMode};
 use crate::protocol::EventWriter;
@@ -246,6 +247,27 @@ pub fn run(
 
     let running = Arc::new(AtomicBool::new(true));
 
+    // **Every cursor is created before ingest starts**, and none of them
+    // later, because a reader only sees frames written after it exists.
+    //
+    // This was a latent race for as long as the buses have been here:
+    // each consumer created its cursor just before spawning its thread,
+    // so anything already on the wire was lost — invisibly, because the
+    // audio missed is the audio arriving while the helper is still
+    // starting, which in a live session is a quiet room.
+    //
+    // It stopped being invisible when the wake-word detector arrived.
+    // Loading it costs ~150 ms of graph optimisation and buffer priming,
+    // and doing that before creating the segment cursor cost the first
+    // two frames of every run. A fixture whose speech starts at sample 0
+    // then loses the beginning of its first word, which for a wake word
+    // is the whole word.
+    //
+    // Cursors are just a read position, so making them early is free.
+    let level_cursor = bus.create_reader();
+    let recorder_cursor = bus.create_reader();
+    let mut segment_cursor = bus.create_reader();
+
     // Socket -> AudioBus. Does nothing else, so a slow consumer can
     // never stall the thread that is draining the kernel buffer.
     {
@@ -260,7 +282,7 @@ pub fn run(
     // Level metering, on its own cursor. Falling behind here costs a
     // stuttered meter and nothing else.
     {
-        let mut cursor = bus.create_reader();
+        let mut cursor = level_cursor;
         let writer = Arc::clone(&writer);
         let running = Arc::clone(&running);
         std::thread::Builder::new()
@@ -281,7 +303,7 @@ pub fn run(
     // pre-roll, no engine. So the hotkey keeps dictating while this runs,
     // and neither can stall the other.
     let recorder = publisher.as_ref().map(|publisher| {
-        let mut cursor = bus.create_reader();
+        let mut cursor = recorder_cursor;
         let publisher = Arc::clone(publisher);
         let events = Arc::clone(&events);
         let running = Arc::clone(&running);
@@ -338,9 +360,33 @@ pub fn run(
             .map_err(|e| format!("could not spawn the meta thread: {e}"))?;
     }
 
+    // The wake-word detector is built HERE, not inside the segment
+    // thread, so an unreadable model or a mismatched input shape is a
+    // startup error the shell sees — the same rule the audio format
+    // follows. Loading it in the thread would leave the helper reporting
+    // `ready` and then never triggering, which looks like a broken
+    // microphone.
+    // Loaded whenever a wake word is named, in **every** trigger mode —
+    // not only `wakeword`. Detecting and reacting are separate (see the
+    // segment loop), so a hotkey app can carry a detector purely to
+    // report what it hears.
+    let wake_word = if policy.wake_words.is_empty() {
+        if policy.mode == TriggerMode::WakeWord {
+            return Err("--trigger wakeword needs at least one --wake-word model".into());
+        }
+        None
+    } else {
+        let detector = crate::hotword::WakeWord::load(&policy.wake_words)?;
+        Some(WakeWordTracker::new(
+            detector,
+            policy.wake_threshold,
+            policy.wake_patience,
+            policy.wake_cooldown_frames,
+        ))
+    };
+
     // Segmentation, on its own cursor.
     let segmenter = {
-        let mut cursor = bus.create_reader();
         let turn = Arc::clone(&turn);
         let running = Arc::clone(&running);
         let events = Arc::clone(&events);
@@ -348,7 +394,17 @@ pub fn run(
         let policy = policy.clone();
         std::thread::Builder::new()
             .name("audio:segment".into())
-            .spawn(move || segment(&mut cursor, turn, running, events, stt, policy))
+            .spawn(move || {
+                segment(
+                    &mut segment_cursor,
+                    turn,
+                    running,
+                    events,
+                    stt,
+                    policy,
+                    wake_word,
+                )
+            })
             .map_err(|e| format!("could not spawn the segment thread: {e}"))?
     };
 
@@ -496,14 +552,19 @@ fn segment(
     events: Arc<EventBus>,
     stt: Arc<dyn Stt>,
     policy: Policy,
+    mut wake_word: Option<WakeWordTracker>,
 ) {
     let detector = crate::pipeline::vad::build(policy.detector);
     let mut tracker = VoiceActivityTracker::new(detector, policy.silence_frames);
     eprintln!(
-        "vad: {} / trigger: {:?} / stt: {}",
+        "vad: {} / trigger: {:?} / stt: {}{}",
         tracker.detector_name(),
         policy.mode,
-        stt.name()
+        stt.name(),
+        match &wake_word {
+            Some(w) => format!(" / wake words: {}", w.names().join(", ")),
+            None => String::new(),
+        }
     );
     let pre_roll_samples = policy.pre_roll_frames * audio::CHUNK_SAMPLES;
     let max_samples = (policy.max_seconds * audio::SAMPLE_RATE as f32) as usize;
@@ -555,17 +616,64 @@ fn segment(
             (state.armed, state.generation)
         };
 
-        // --- should a turn open? ---
-        let should_open = match policy.mode {
-            TriggerMode::Hold => armed,
-            TriggerMode::Vad => matches!(transition, Some(Transition::Started)),
+        // --- the wake word: reported in every mode, obeyed in one ---
+        //
+        // **Detecting a wake word and acting on one are different
+        // things**, and separating them is what lets the macOS app carry
+        // a detector without changing what the app does. The hotkey stays
+        // the only thing that opens a turn; the detection still reaches
+        // every consumer on the ZeroMQ bus as `hotword_detected`.
+        //
+        // This is the recorder's lesson applied again (AD-19): a wake
+        // word is a *consumer* of audio that happens to publish, and only
+        // `TriggerMode::WakeWord` promotes it to a boundary owner.
+        //
+        // Scored on every frame, including while a turn is open: the
+        // detector is stateful over ~1.3 s, so skipping frames while
+        // collecting would leave a hole in its context and a useless
+        // score on the next utterance.
+        let wake_fired: Option<String> = match (&mut wake_word, &frame) {
+            (Some(tracker), Some(frame)) => match tracker.push(frame) {
+                Ok(fired) => fired,
+                Err(error) => {
+                    // Report, do not abandon the turn loop: a failing
+                    // detector must not also stop dictation from closing
+                    // a segment already in flight.
+                    eprintln!("wake word: {error}");
+                    None
+                }
+            },
+            _ => None,
+        };
+        if let Some(name) = &wake_fired {
+            // Published whether or not it opens anything. `source` is the
+            // word's own name (AD-7), so a consumer can tell `alexa` from
+            // `hey_jarvis` from the hotkey.
+            events.publish(Event::Triggered {
+                source: name.clone(),
+            });
+        }
+
+        // --- should a turn open, and who opened it? ---
+        //
+        // The source travels with the decision rather than being derived
+        // from the mode afterwards, because with several wake words
+        // loaded the mode no longer determines the name — `alexa` and
+        // `hey_jarvis` are the same mode and different sources (AD-7).
+        let open_source: Option<String> = match policy.mode {
+            TriggerMode::Hold => armed.then(|| "hotkey".to_string()),
+            TriggerMode::Vad => {
+                matches!(transition, Some(Transition::Started)).then(|| "vad".to_string())
+            }
             // `Vad` behind a gate. The gate is checked at the edge, not
             // continuously, so enabling mid-sentence does not capture
             // half of it.
-            TriggerMode::Toggle => armed && matches!(transition, Some(Transition::Started)),
+            TriggerMode::Toggle => (armed && matches!(transition, Some(Transition::Started)))
+                .then(|| "vad".to_string()),
+            TriggerMode::WakeWord => wake_fired.clone(),
         };
 
-        if should_open && !collecting {
+        if open_source.is_some() && !collecting {
             collecting = true;
             generation = current_generation;
             turn.lock().unwrap_or_else(|e| e.into_inner()).collecting = true;
@@ -581,13 +689,16 @@ fn segment(
                 pre_roll.clear();
             }
 
-            events.publish(Event::Triggered {
-                source: if policy.mode == TriggerMode::Hold {
-                    "hotkey".into()
-                } else {
-                    "vad".into()
-                },
-            });
+            // In wake-word mode the detection was already published
+            // above, on the frame it fired. Publishing again here would
+            // put two `hotword_detected` events on the wire for one
+            // spoken word — which is exactly what the cooldown exists to
+            // prevent, so it would read as the cooldown being broken.
+            if policy.mode != TriggerMode::WakeWord {
+                events.publish(Event::Triggered {
+                    source: open_source.clone().unwrap_or_else(|| "vad".into()),
+                });
+            }
             if policy.mode != TriggerMode::Hold {
                 events.publish(Event::State {
                     pattern: "listen".into(),

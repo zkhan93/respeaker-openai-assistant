@@ -30,6 +30,7 @@ broken for a day because **a script nobody runs in CI cannot fail visibly.**
 | `try-live.sh` | Record from your real microphone, then run it through the core in always-on mode |
 | `live.py` | The microphone streamed continuously, transcripts printed as they arrive |
 | `drive-helper.py` | Drive the helper's JSON protocol by hand. **Probably obsolete** — see below |
+| `fetch-wakeword-models.sh` | Download openWakeWord models into `~/.cache/raneen/wakeword` |
 
 Every one resolves paths from the repo root, so they work from any directory.
 
@@ -56,6 +57,18 @@ better than two that disagree.
 Reads the **live process tree** first — a bundle can say one thing and the
 running process another. Falls back to inspecting the bundle when nothing is
 running.
+
+### `fetch-wakeword-models.sh`
+
+```bash
+./tools/fetch-wakeword-models.sh              # feature models + alexa
+./tools/fetch-wakeword-models.sh hey_jarvis   # + another wake word
+```
+
+Two of the three are the **shared** feature models, identical for every wake
+word; only the classifier differs. Fetched rather than committed, for the same
+reason the whisper weights are. The conformance suite skips its wake-word case
+loudly until these exist.
 
 ### `try-live.sh` and `live.py`
 

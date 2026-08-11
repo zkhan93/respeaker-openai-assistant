@@ -63,6 +63,46 @@ if [ -n "$HELPER_VAD" ]; then
     --wav "$FIXTURES/noise-then-speech.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
     --helper "$HELPER_VAD" --expect-transcripts 1 --expect-text "brown fox"
 
+  # --- wake word --------------------------------------------------------
+  #
+  # The fourth trigger. Two things are pinned here that unit tests
+  # cannot reach, because both are about *which frames arrive*:
+  #
+  #  - the fixture's speech starts at sample 0, with no lead-in. That is
+  #    deliberate and unrealistic: it is what caught the segment cursor
+  #    being created after the ingest thread started, which silently ate
+  #    the first two frames of every run. Any fixture with leading
+  #    silence hides that bug completely.
+  #  - the turn is opened by the wake word and closed by the VAD, so a
+  #    transcript proves both halves of AD-12's split boundary.
+  WAKE_DIR="${RANEEN_WAKEWORD_DIR:-$HOME/.cache/raneen/wakeword}"
+  if [ -f "$WAKE_DIR/alexa_v0.1.onnx" ] && [ -f "$WAKE_DIR/melspectrogram.onnx" ]; then
+    run "wakeword · 'alexa' opens the turn, the VAD closes it" \
+      --wav "$FIXTURES/wake-word.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
+      --helper "$BIN serve {model} --audio-socket {socket} --trigger wakeword \
+                --wake-word $WAKE_DIR/alexa_v0.1.onnx" \
+      --expect-transcripts 1 --expect-text "weather in London"
+
+    # The macOS app's configuration: a detector armed purely to report.
+    #
+    # Pins the separation of detecting from acting. In `hold` the wake
+    # word must NOT open anything — the helper is never armed here, so a
+    # transcript would mean the detector had quietly taken push-to-talk
+    # away from the user. The detection still goes out over ZeroMQ; that
+    # half is asserted by zmq-check.py, which can see the bus.
+    run "wakeword · reports without triggering, under a hotkey" \
+      --wav "$FIXTURES/wake-word.wav" --settle 6 --no-arm "${MODEL_ARG[@]}" \
+      --helper "$BIN serve {model} --audio-socket {socket} --trigger hold \
+                --wake-word $WAKE_DIR/alexa_v0.1.onnx" \
+      --expect-transcripts 0
+  else
+    # Loud, not silent — a skipped case that prints nothing reads as a
+    # passing one on the summary line.
+    echo "── wakeword · 'alexa' opens the turn, the VAD closes it"
+    echo "  SKIPPED — run ./tools/fetch-wakeword-models.sh"
+    skipped=$((skipped + 1))
+  fi
+
   # --- remote STT -------------------------------------------------------
   #
   # A stand-in server rather than a real one, so this runs in CI with no
@@ -127,6 +167,22 @@ if [ -n "$HELPER_VAD" ]; then
       pass=$((pass + 1))
     else
       fail=$((fail + 1))
+    fi
+
+    # The macOS app's arrangement, end to end over the real bus: a wake
+    # word armed under a hotkey trigger. The detection must reach the
+    # network AND the hotkey must still be what opened the turn.
+    if [ -f "$WAKE_DIR/alexa_v0.1.onnx" ]; then
+      echo "── zmq · a wake word reports over the network without triggering"
+      if python3 "$HERE/zmq-check.py" \
+           --wav "$FIXTURES/wake-word.wav" --port 5601 \
+           --wake-word alexa \
+           --helper "$BIN serve $MODEL_RUST --audio-socket {socket} \
+                     --wake-word $WAKE_DIR/alexa_v0.1.onnx"; then
+        pass=$((pass + 1))
+      else
+        fail=$((fail + 1))
+      fi
     fi
   else
     # Loud, not silent. A skipped case that prints nothing reads as a

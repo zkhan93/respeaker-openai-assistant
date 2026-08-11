@@ -10,8 +10,7 @@ pub mod vad;
 /// Who decides a turn has started and ended — AD-12's table.
 ///
 /// Not four pipelines. One pipeline, and a different answer to "whose
-/// boundary counts". `WakeWord` is absent only because openWakeWord has
-/// no Rust port yet; it is the same shape as `Vad`.
+/// boundary counts".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerMode {
     /// Key down opens, key up closes. The host owns both ends, so the
@@ -23,6 +22,13 @@ pub enum TriggerMode {
     /// `Vad`, gated by an enable flag. Not a separate mechanism —
     /// AD-12: "it is `VadTrigger(paused=True)`".
     Toggle,
+    /// A wake word opens, silence closes. The Pi's mode.
+    ///
+    /// Exactly the shape AD-12 predicted for it: the *opening* boundary
+    /// moves to the detector and everything else — the VAD's stop, the
+    /// pre-roll, the segment policy — is unchanged from `Vad`. That is
+    /// why this variant added no branch to the closing path.
+    WakeWord,
 }
 
 impl TriggerMode {
@@ -31,8 +37,9 @@ impl TriggerMode {
             "hold" => Ok(Self::Hold),
             "vad" => Ok(Self::Vad),
             "toggle" => Ok(Self::Toggle),
+            "wakeword" | "wake-word" => Ok(Self::WakeWord),
             other => Err(format!(
-                "unknown trigger {other:?}; expected hold, vad or toggle"
+                "unknown trigger {other:?}; expected hold, vad, toggle or wakeword"
             )),
         }
     }
@@ -114,6 +121,21 @@ pub struct Policy {
     pub min_confidence: f32,
     /// `"auto"`, or a code like `"en"` / `"hi"`. See `Engine::load`.
     pub language: String,
+    /// openWakeWord classifiers to listen for. Empty unless the trigger
+    /// is `WakeWord`; more than one is nearly free, because they share
+    /// the feature chain.
+    pub wake_words: Vec<std::path::PathBuf>,
+    /// Score at or above which a wake word counts. openWakeWord's own
+    /// default, and the same number the Pi's config exposes.
+    pub wake_threshold: f32,
+    /// Consecutive frames over threshold before firing. 1 fires on the
+    /// first, trading false positives for 80 ms of latency per step.
+    pub wake_patience: usize,
+    /// Frames to ignore after a fire. One spoken word crosses the
+    /// threshold for several consecutive frames, so without this a
+    /// single "alexa" opens a turn three or four times — which is the
+    /// same bug the Python side answers with a 2-second cooldown.
+    pub wake_cooldown_frames: usize,
 }
 
 impl Policy {
@@ -142,6 +164,12 @@ impl Policy {
             // saying "auto" over a `.en` model promises something it
             // cannot deliver.
             language: "en".to_string(),
+            wake_words: Vec::new(),
+            wake_threshold: 0.5,
+            wake_patience: 1,
+            // 2 s, matching the Python detector's cooldown. Chosen there
+            // by watching one utterance produce a burst of events.
+            wake_cooldown_frames: 25,
         }
     }
 }

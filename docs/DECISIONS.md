@@ -1340,6 +1340,154 @@ client*, which reads as a bug in the code under test. The fixture now asserts th
 example at startup, so the next person gets an assertion in the fixture rather than a false
 accusation against the product.
 
+### AD-19 — The wake word runs on `tract`, not ONNX Runtime
+
+**Date:** 2026-08-10. **Status:** landed.
+
+openWakeWord models are ONNX. There is no ggml alternative and never will
+be, so an ONNX engine in the core was not a choice. *Which* engine was.
+
+| | `ort` (Microsoft's ONNX Runtime) | `tract` (Sonos, pure Rust) |
+| --- | --- | --- |
+| Ships as | a 15-30 MB C++ dylib alongside | compiled into the binary |
+| Bundle | reintroduces nested dylibs | **4.0 MB -> 13.4 MB**, still 6 files |
+| GPU | CoreML / CUDA / DirectML providers | none |
+| Op coverage | complete | good, not complete |
+
+**Chosen: `tract`** — but the reasoning needs correcting against what was
+measured afterwards, because the prediction was wrong twice.
+
+The argument going in was memory: three models totalling 3.3 MB, where an
+inference engine's own footprint should dominate everything it holds, so
+the small engine wins on the axis that mattered. **Measured, the cost is
+higher than that argument implies.** In isolation the three plans plus
+priming cost **16 MB** resident and nothing further in steady state. Inside
+the running helper it is **~89 MB at load, decaying to ~45 MB** against a
+13 MB baseline — so roughly **+32 MB steady**, for 3.3 MB of weights. The
+binary grew 4.0 MB -> 13.4 MB, not the ~7 MB predicted.
+
+**`ort` was never measured**, so "tract uses less memory" is an expectation,
+not a result, and this entry should not be read as claiming otherwise. What
+survives the measurement is the part that was never about memory:
+
+* **no dylib.** The bundle stays 6 files, and the parallel-timestamp signing
+  workaround stays dead code rather than becoming live again.
+* **the GPU column is worth nothing here** — see below.
+* **cross-compiling to the Pi stays trivial**, with no arch-specific runtime
+  binary to source.
+
+Those alone justify it. If resident memory ever becomes the binding
+constraint, the honest next step is to measure `ort` rather than assume.
+
+**The GPU column is a red herring here, and that is the non-obvious part.**
+It is `ort`'s real advantage and it is worth nothing for this workload:
+three tiny graphs every 80 ms, where kernel-launch overhead exceeds the
+arithmetic and a GPU context costs tens of MB of permanent RSS. GPU
+acceleration matters for whisper — a big transformer run once per segment —
+and whisper is on whisper.cpp, which has its own Metal backend. Two
+different workloads, two right answers, and no shared runtime to be had.
+
+**The op-coverage risk was real and did not materialise.** It was checked
+before a line was written, because the failure would have been structural:
+`melspectrogram.onnx` could have used ONNX's `STFT`/`DFT` operators, which
+tract does not implement. It uses `Conv` + `MatMul` — the
+DFT-as-convolution export — and all four models load. The fallback, had it
+failed, was to reimplement the log-mel front-end (documented parameters:
+640-sample window, 160 hop, 32 mels) and use tract only for the two CNNs.
+
+Measured on an M3 Pro, per 80 ms frame: melspectrogram 0.070 ms, embedding
+1.772 ms, classifier 0.014 ms. **1.9 ms, or 2.3% of one core.** The
+embedding model is 95% of it, and it is shared, so a second wake word costs
+0.014 ms rather than 1.9.
+
+**Rejected: hardcoding the 16-embedding context length.** It is 16 for every
+model shipped today, which is exactly why assuming it is dangerous — a
+model expecting more does not fail when handed 16, it scores garbage
+confidently. The context is read from the classifier's own input shape, and
+a file whose feature width is not 96 is refused at startup with a message
+saying it does not look like an openWakeWord classifier.
+
+**Rejected: `include_bytes!` for the two shared feature models.** It would
+make the wake word work from a bare `cargo build` with no fetch step, which
+is genuinely nicer. It also means committing 2.3 MB of weights to git, and
+this repo already decided weights are fetched rather than committed.
+Applying that rule by file size is how a repo ends up with three
+conventions. They resolve like the whisper model does: an env override,
+then beside the executable, then `~/.cache/raneen/wakeword`.
+
+#### Detecting a wake word and acting on one are separate
+
+Added 2026-08-10, after the first shape got this wrong. `--wake-word`
+originally auto-selected `TriggerMode::WakeWord`, on the tidy-looking
+argument that naming a wake word *is* choosing a trigger, the way an
+`--stt-url` scheme chooses the engine.
+
+That is wrong, and wrong in the worst direction: **the macOS app wants a
+detector that reports and does not act.** Arming a wake word there must
+not take push-to-talk away, and under the old shape it did — silently,
+because both behaviours look like "the wake word is working".
+
+So the detector runs in **every** trigger mode and always publishes
+`Event::Triggered { source: <the word's name> }`, which reaches the
+network as `hotword_detected`. Only `--trigger wakeword` promotes it to a
+boundary owner that opens a turn. `--trigger hold --wake-word alexa.onnx`
+is now the macOS configuration: the hotkey is still the only thing that
+dictates, and every detection is on the ZeroMQ bus beside it.
+
+This is the recorder's lesson a second time. Always-on recording is a
+*consumer* rather than a mode; a wake word used for observation is the
+same thing, and treating it as a mode was the same mistake in a new place.
+
+Two consequences worth stating:
+
+* `Triggered` is published once per detection, on the frame it fires, and
+  the turn-opening path skips its own publish in wake-word mode. Two
+  events for one spoken word would read as the cooldown being broken.
+* The models are **never shipped in the bundle**. They resolve as
+  `RANEEN_WAKEWORD_DIR` -> beside the executable -> `~/.cache/raneen/
+  wakeword`, so the default is the app's own directory and a user who
+  wants them elsewhere sets one variable. `RANEEN_WAKE_WORD` carries a
+  colon-separated list of classifiers, for the same fixed-argv reason
+  `RANEEN_ZMQ_PUB` exists.
+
+#### The port is checked against the reference, not eyeballed
+
+Three constants in openWakeWord's feature chain are arbitrary in the literal
+sense — they are what the reference does, with no derivation:
+
+* the melspectrogram is transformed by `x / 10 + 2`, commented in the source
+  as "arbitrary transform", to bring the ONNX melspec closer to Google's
+  original TensorFlow one;
+* the melspectrogram buffer initialises to **ones**, not zeros;
+* the feature buffer is primed with embeddings of ~4 s of **noise**.
+
+Miss any of them and the shapes still line up, the scores still look like
+scores, and the detector simply never fires. So the port is pinned by
+vectors dumped from openWakeWord itself and committed
+(`tests/data/openwakeword_reference.json`): the melspectrogram of a fixed
+1760-sample slice and the embedding of a fixed 76x32 window, asserted to
+1e-3. The transform test would fail by a margin of ~79 without it.
+
+#### A latent cursor race this exposed
+
+`AudioBusReader` only sees frames written after it exists. Every consumer
+created its cursor immediately before spawning its thread, so anything
+already on the wire was lost — invisibly, because the audio missed is the
+audio arriving while the helper is still starting, which in a live session
+is a quiet room.
+
+Loading the wake-word detector costs ~150 ms of graph optimisation and
+buffer priming. Doing that before creating the segment cursor cost the
+first two frames of every run, and a fixture whose speech starts at sample
+0 then loses the beginning of its first word — which for a wake word is
+the whole word. The symptom was a detector scoring 0.31 in `serve` and
+0.976 on the same audio offline.
+
+**Every cursor is now created before the ingest thread starts.** Cursors are
+just a read position, so making them early is free. `wake-word.wav`
+deliberately has no leading silence, because any fixture with a lead-in
+hides this class of bug entirely.
+
 ---
 
 
@@ -1363,5 +1511,5 @@ That review set four priorities. Their status, and how this roadmap interacts:
 
 ---
 
-*Last updated 2026-08-05 (Phase 0 + Phase 1 landed on branch `feat/multiplatform-core`).
+*Last updated 2026-08-10 (AD-19: native wake word).
 Amend decisions in place; do not delete rationale.*

@@ -16,6 +16,9 @@ silero-vad-crs = { version = "0.4", features = ["auto"] }
 ureq = "3.4.0"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 zmq = "0.10.0"
+# Wake word. Pure Rust, compiles in — see src/hotword/mod.rs for why
+# this rather than ONNX Runtime.
+tract-onnx = "0.21"
 
 [profile.release]
 # The bundle-size half of the story: LTO plus one codegen unit lets the
@@ -24,3 +27,6 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.14", features = ["metal"] }

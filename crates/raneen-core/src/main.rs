@@ -21,6 +21,7 @@ mod audio;
 mod bench;
 mod broadcast;
 mod bus;
+mod hotword;
 mod mem;
 mod pipeline;
 mod protocol;
@@ -93,10 +94,46 @@ ALWAYS-ON RECORDING (--zmq-pub tcp://*:5555 or RANEEN_ZMQ_PUB, off by default):
     working while the room is being recorded.
 
 TRIGGER MODES (AD-12) — one pipeline, different boundary owners:
-    hold    key down opens, key up closes. The VAD is ignored, so a pause
-            for breath cannot chop a held paragraph in two. (default)
-    vad     speech opens, silence closes. Always-on.
-    toggle  vad, behind an arm/disarm gate.
+    hold      key down opens, key up closes. The VAD is ignored, so a
+              pause for breath cannot chop a held paragraph in two.
+              (default)
+    vad       speech opens, silence closes. Always-on.
+    toggle    vad, behind an arm/disarm gate.
+    wakeword  a wake word opens, silence closes. Needs --wake-word.
+
+WAKE WORD (--wake-word, any trigger mode):
+    Detecting a wake word and acting on one are separate. A wake word is
+    ALWAYS reported — as a `hotword_detected` event carrying the word's
+    own name, to every ZeroMQ consumer — in whatever trigger mode is in
+    use. It only *opens a turn* under --trigger wakeword.
+
+    So `--trigger hold --wake-word alexa_v0.1.onnx` keeps push-to-talk
+    exactly as it was and puts the detections on the wire alongside it.
+
+    --wake-word PATH     an openWakeWord classifier (.onnx). Repeat the
+                         flag for several; they share the feature models,
+                         so each extra word costs about 1 MB and 0.03 ms
+                         per frame. Any model the training notebook
+                         produces works — the context length is read from
+                         the file rather than assumed.
+                         RANEEN_WAKE_WORD takes a colon-separated list,
+                         for hosts that spawn a fixed argv.
+    --wake-threshold N   0.0-1.0, default 0.5. Lower is more sensitive.
+    --wake-patience N    consecutive frames over threshold before firing,
+                         default 1. Each step costs 80 ms of latency and
+                         buys rejection of one-frame false positives.
+    --wake-cooldown N    frames ignored after a fire, default 25 (2 s).
+                         One spoken word crosses the threshold for
+                         several frames; without this it opens a turn
+                         three or four times.
+
+    The two shared feature models (melspectrogram.onnx,
+    embedding_model.onnx) are looked for beside the executable first —
+    inside a .app bundle that is Contents/Resources/helper — then in
+    ~/.cache/raneen/wakeword. RANEEN_WAKEWORD_DIR overrides both, so the
+    models can live anywhere without touching the app. They are not
+    shipped in the bundle; fetch them with
+    ./tools/fetch-wakeword-models.sh.
 
 VAD (--vad silero|energy, default silero):
     silero  neural, weights compiled in. Rejects non-speech noise.
@@ -160,13 +197,50 @@ fn run_serve(args: &[String]) -> Result<(), String> {
     let socket = flag(args, "--audio-socket")
         .map(PathBuf::from)
         .ok_or("serve needs --audio-socket <path>")?;
+    // `RANEEN_WAKE_WORD` is the same escape hatch `RANEEN_ZMQ_PUB` is:
+    // Raneen spawns the helper with a fixed argv, so without an env var
+    // there is no way to arm a wake word without changing the Swift
+    // shell. Colon-separated, like `PATH`, because it is a list of paths.
+    let mut wake_words: Vec<PathBuf> = flags(args, "--wake-word")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    if wake_words.is_empty() {
+        if let Ok(list) = std::env::var("RANEEN_WAKE_WORD") {
+            wake_words.extend(list.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+        }
+    }
+
+    // **Naming a wake word does not change the trigger.** It would be
+    // tidy for it to, the way an `--stt-url` scheme picks the engine —
+    // and it is wrong here, because detecting a wake word and acting on
+    // one are separate concerns. A dictation app wants to *report* what
+    // it hears on the event bus while the hotkey stays the only thing
+    // that opens a turn. Auto-selecting the trigger would silently take
+    // push-to-talk away from anyone who armed a detector.
     let mode = match flag(args, "--trigger") {
         Some(name) => TriggerMode::parse(&name)?,
         None => TriggerMode::Hold,
     };
     let mut policy = Policy::dictation(mode);
+    policy.wake_words = wake_words;
     if let Some(kind) = flag(args, "--vad") {
         policy.detector = DetectorKind::parse(&kind)?;
+    }
+    if let Some(value) = flag(args, "--wake-threshold") {
+        policy.wake_threshold = value
+            .parse()
+            .map_err(|_| "--wake-threshold wants a number between 0 and 1".to_string())?;
+    }
+    if let Some(value) = flag(args, "--wake-patience") {
+        policy.wake_patience = value
+            .parse()
+            .map_err(|_| "--wake-patience wants a frame count".to_string())?;
+    }
+    if let Some(value) = flag(args, "--wake-cooldown") {
+        policy.wake_cooldown_frames = value
+            .parse()
+            .map_err(|_| "--wake-cooldown wants a frame count".to_string())?;
     }
     if let Some(language) = flag(args, "--language") {
         policy.language = language;
@@ -378,4 +452,17 @@ fn default_model() -> Option<PathBuf> {
 fn flag(args: &[String], name: &str) -> Option<String> {
     let position = args.iter().position(|a| a == name)?;
     args.get(position + 1).cloned()
+}
+
+/// Every value given for a repeatable flag, in order.
+///
+/// `--wake-word a.onnx --wake-word b.onnx` loads both. Repetition rather
+/// than a comma-separated list because these are paths, and paths
+/// contain commas on somebody's machine.
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.as_str() == name)
+        .filter_map(|(index, _)| args.get(index + 1).cloned())
+        .collect()
 }
