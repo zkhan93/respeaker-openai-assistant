@@ -1,9 +1,245 @@
 # Speaker Diarization & Identification — Implementation Spec
 
-**Status:** specification, not yet implemented
-**Created:** 2026-08-09
+**Status:** specification. Not implemented — but the parts that could have
+vetoed it have now been **measured**, not assumed. See the update below.
+**Created:** 2026-08-09 · **Spiked:** 2026-08-11
 **Target language:** Rust
 **Audience:** an implementer with no prior context on this system
+
+---
+
+## Update — 2026-08-11: measured findings and revised direction
+
+The original document was written before any of it had been run. Three spikes
+have since answered the questions that decided the shape. **Nothing below this
+heading contradicts the algorithms in §5–§9 — they stand. What changed is the
+dependency, the location, and which half is worth building first.**
+
+### The direction changed: assistant first, meetings later
+
+The document assumes a meeting-transcript product and says so (§1, §15: build
+batch, defer live). For a **dialog assistant** that is backwards — batch
+diarization of a finished file tells a live assistant nothing, and the useful
+question is *"who is talking to me right now"*.
+
+That inverts the build order, and it turns out to be the cheaper half:
+
+| | Meeting product (the original framing) | **Assistant (the new one)** |
+| --- | --- | --- |
+| Path | A: segment → embed → cluster | **B, reduced: embed the turn's start → match** |
+| Needs pyannote segmentation | yes | **no** |
+| Needs clustering engine | yes | **no** |
+| Needs sherpa-onnx | yes | **no** |
+| Where it runs | offline, on recordings | **in the core, per turn** |
+
+**The assistant needs only: the first ~1.6 s of a turn → embedding → match.**
+The turn boundary already exists — the same VAD/wake-word/hotkey edge that
+starts transcription. Identity is a second consumer of the *turn*, not a second
+consumer of the audio bus.
+
+### What that deletes from this document
+
+For the assistant path, these sections are not needed. They remain correct and
+remain required for the meeting product; they are simply not on the critical
+path any more.
+
+| Section | Why it drops out |
+| --- | --- |
+| §5 batch diarization, pyannote, clustering | offline concern — and see the tract result below |
+| §6.3 mid-segment provisional identification | no live captions to feed; identify once per turn |
+| §6.5 `select_best_embedding_window` | the window is fixed at the turn's start |
+| §6.9 reclustering | retroactive fix-up of a recording |
+| §8 status/lock state machine | protects corrections in a transcript UI |
+| §9 transcript merge | one speaker per turn — no time ranges to join |
+| `SPEECH_CHUNKS_MAX_SAMPLES` 32 s ring | ~1.6 s is retained, not 32 s |
+
+### Two properties that fall out, and are worth designing around
+
+**Identity arrives before the transcript.** Because only the *start* of a turn
+is needed, the embedding can run as soon as ~1.6 s of speech exists — while the
+person is still talking. It is not racing STT; it finishes first. The agent
+receives `speaker_identified` and then `transcript`.
+
+**The wake word is the ideal sample.** Under `--trigger wakeword` the pre-roll
+already holds ~1 s of a *known, consistent phrase*. Text-dependent verification
+— the same words every time — is more accurate than text-independent, because
+like is compared with like. The best possible identification audio is already
+buffered, for free.
+
+### Two risks it introduces
+
+**Start-of-utterance is the weakest audio.** §6.5 exists precisely because
+embedding quality collapses on quiet or partial audio, and it picks the
+*loudest* window for that reason. Taking the first 1.6 s unconditionally takes
+the segment most likely to be weak. Partly mitigated by the window being
+VAD-gated, but it is a real accuracy trade and the thing to measure on real
+voices.
+
+**Short turns cannot be identified at all.** `MIN_SEGMENT_SECONDS = 1.5`, and
+for a dialog system *"yes"*, *"no"*, *"stop"*, *"louder"* are the most common
+utterances and all fall below it. The fix is **session stickiness**: identify on
+the first substantial turn and carry that identity across subsequent short ones
+until a new identification contradicts it. This is §6.7's Tier-0 stickiness
+widened from one utterance to one conversation, and `ConversationManager`
+already rotates a `thread_id` that scopes it.
+
+### Finding 1 — `tract` runs CAM++. It does not run pyannote.
+
+Measured against the models in §3, using the ONNX runtime already in the core
+(`AD-19`). No sherpa-onnx, no ONNX Runtime, no C++ toolkit.
+
+| Model | tract | |
+| --- | --- | --- |
+| CAM++ embedding | ✅ loads and runs | the only model the assistant path needs |
+| pyannote segmentation | ❌ **fails to load** | `Parsing as TDim: floor(T/10 - 251/10) + 1` inside an `If` node |
+
+The failure is a symbolic-shape expression tract cannot parse, not a missing
+operator, so it is unlikely to be worked around cheaply. **Batch diarization
+therefore cannot use tract** and must keep sherpa-onnx — which is a further
+argument for it living outside the core, in a separate binary operating on the
+recordings the always-on recorder already writes.
+
+### Finding 2 — the exact feature recipe, which is not guessable
+
+**This is the most valuable result here.** CAM++'s input is `x[N, T, 80]` —
+80-dim Kaldi fbank, *not* raw audio. §3's claim that "audio input to the
+embedder must be 16 kHz mono f32" describes what **sherpa** accepts; sherpa
+computes the features internally with `kaldi-native-fbank`. Bypassing sherpa
+means producing them yourself, and two of the settings are invisible:
+
+```
+snip_edges      = false
+low_freq        = 20
+high_freq       = -400      ← Kaldi's NEGATIVE convention: Nyquist MINUS 400 Hz.
+                              Not 400 Hz. The default 0 means full Nyquist and
+                              caps the embedding match at cosine 0.93.
+window_type     = "povey"
+preemph_coeff   = 0.97
+remove_dc_offset= true
+dither          = 0.0
+num_bins        = 80
+
+then CMN: subtract each bin's mean over time, after fbank.
+          Without it the match caps at cosine 0.80.
+```
+
+Found by grid-searching 128 combinations against sherpa's own embedding until
+one hit **1.000000**. The ablation says which knobs carry weight:
+
+| Omitted | Best achievable cosine |
+| --- | --- |
+| nothing | **1.0000** |
+| `high_freq = -400` | 0.93 |
+| CMN | 0.80 |
+| `snip_edges = false` | 0.985 |
+| `preemph 0.97` | 0.998 |
+
+Both failures are of the worst kind: shapes still line up, values still look
+like features, embeddings still look like embeddings, and identity is quietly
+wrong. This is the same class of bug as openWakeWord's undocumented
+`x / 10 + 2` (`AD-19`), and it was caught the same way — **reference vectors
+from the implementation being copied, not inspection of the code.**
+
+A reference fixture is committed at
+`crates/raneen-core/tests/data/campplus_reference.json`: a fixed 2 s clip, the
+expected fbank rows, the expected 512-dim embedding, and the recipe itself under
+a `_recipe` key. Nothing consumes it yet.
+
+**Result:** the Rust path (`kaldi-native-fbank` → tract → CAM++) reproduces
+sherpa's embedding at **cosine 0.998679**. One residual is unexplained — the
+fbank *mean* differs by ~0.096 while the first and last rows match to 1e-5, so
+some middle frames diverge. It is immaterial at this scale (the matching rule
+turns on a threshold of 0.65 and a margin of 0.03, ~20× larger than the gap),
+but it is not fully understood and should not be rounded to "identical".
+
+### Finding 3 — cost, measured on an M3 Pro
+
+| Stage | Cost |
+| --- | --- |
+| fbank, 80-dim, pure Rust | 7–17 ms |
+| CAM++ embed, 1.6 s window | **36 ms** |
+| CAM++ embed, 3 s window | 65 ms |
+| cosine match, 1,000 profiles | **0.3 µs** |
+| cosine match, 10,000 profiles | 3.1 µs |
+| **total identification** | **~50–80 ms** |
+
+Whisper on the same machine decodes 5.8 s of audio in 120–280 ms. **Speaker
+identification finishes in roughly a third of the transcription time**, and
+because only the turn's start is needed it completes mid-utterance. Latency is
+not a design constraint for this feature.
+
+§7.2's "a linear scan is fine, do not reach for a vector index" is confirmed
+with room to spare.
+
+**Memory is the real cost: +125 MB resident, permanently.** A 29 MB model file
+expanding ~4× in tract's optimised form:
+
+```
+before load          4 MB
+after load+optimise 124 MB
+after 50 embeds     126 MB   (flat — no growth in steady state)
+```
+
+**Window size buys latency, not memory** — a 1.6 s plan costs 126 MB and a 3 s
+plan 130 MB. So choose the window on accuracy grounds alone. On a Pi that
+increment is noise; in the macOS menu-bar helper it roughly triples resident
+memory, so this stays opt-in like `--zmq-pub` and `--wake-word`.
+
+The Pi 4B figure is **not measured**. Extrapolating ~8× for an A72 gives
+~300–650 ms per identification — still comfortably inside a remote-STT round
+trip, but that is arithmetic, not a measurement.
+
+### Revised dependency list
+
+Supersedes §10's table for the assistant path:
+
+| Crate | Why |
+| --- | --- |
+| `kaldi-native-fbank` | pure Rust port — `realfft` + `thiserror` only |
+| `tract-onnx` | already in the core for the wake word |
+| `rusqlite` | profile storage |
+
+**Not `knf-rs`**, despite its "fbank features extractor without external
+dependencies" description: it vendors C++ through `cmake` + `bindgen`, which
+needs libclang at build time and would break the Pi and CI story. The pure-Rust
+port avoids all of it.
+
+**Not `sherpa-onnx`** for the assistant path. It remains the right choice for
+batch diarization, outside the core.
+
+### Revised build order, superseding §15
+
+For the assistant. §15's order stands for the meeting product.
+
+1. fbank front-end, pinned to `campplus_reference.json` — **1 d**
+2. CAM++ embedder on tract, fixed window — **0.5 d**
+3. Speaker store: SQLite, profiles, count-weighted centroid (§6.8, §7) — **1 d**
+4. Matching (§6.7 — threshold **and** margin) plus session stickiness — **0.5 d**
+5. Turn hook and the `speaker_identified` event — **0.5 d**
+6. `enroll` protocol command and a conformance case — **0.5 d**
+
+**≈ 4 days.** Batch diarization leaves the core entirely: a separate binary, on
+sherpa-onnx, over the WAVs the recorder already writes, on nobody's critical
+path.
+
+### Open questions this did NOT answer
+
+**Fidelity is not accuracy.** The port now reproduces sherpa exactly. Whether
+CAM++ separates the actual people in your house or your meetings is untested,
+and it is the question that decides whether 125 MB is worth spending. It needs
+two-speaker audio with known ground truth — a recording session, not a spike.
+§14.6's non-English caveat is likewise unmeasured.
+
+**The privacy question (§14.5) is unchanged and still blocking.** A voiceprint
+is biometric data. Storing them by default in a dictation app is a materially
+different posture from storing none. That is a legal question, not an
+engineering one.
+
+**Naming cannot happen in the core.** The core can say *"this is the same voice
+as profile 3"*; only the app knows that is Zeeshan. That needs a new inbound
+command — `{"cmd":"enroll","speaker":"speaker_2","name":"Zeeshan"}` — which
+would be the protocol's first *stateful* command, and is unreachable for a
+ZeroMQ-only consumer, since the core publishes but does not receive.
 
 ---
 
@@ -48,6 +284,11 @@ Verify the individual **model** licenses before shipping a binary that bundles t
 
 Single-speaker dictation gets nothing from this. Build it only for a
 meeting-recording or multi-party-transcription product.
+
+> **Amended 2026-08-11.** A third case has since appeared and is now the
+> *primary* one: a **dialog assistant**, which needs "who is speaking to me"
+> per turn and needs none of the batch machinery. See the update at the top —
+> it is a much smaller feature than this document describes.
 
 ---
 
@@ -118,6 +359,23 @@ download on first use? The reference downloads on demand with a disk-space prech
 Bundling costs 37 MB but removes an entire class of failure — see §12, where
 download and resolution failures are the single largest source of user-facing bugs
 in the reference implementation.
+
+> **Resolved 2026-08-11: fetched, not bundled** — consistent with the whisper
+> weights and the wake-word models, which this repo also fetches rather than
+> commits (`AD-19`). A `tools/` script and a search path (`RANEEN_*_DIR` → beside
+> the executable → `~/.cache/raneen/…`) is the established pattern.
+
+> **Measured 2026-08-11.** `tract` — the ONNX runtime already in the core —
+> **runs CAM++ but cannot load the pyannote segmentation model** (a symbolic
+> shape expression inside an `If` node). The assistant path needs only CAM++, so
+> it needs no new inference dependency at all; batch diarization keeps
+> sherpa-onnx and belongs outside the core. See the update at the top.
+
+> **Correction 2026-08-11.** "Audio input to the embedder must be 16 kHz mono
+> f32" describes what **sherpa** accepts, not what the model takes. CAM++'s
+> actual input is `x[N, T, 80]` — 80-dim Kaldi fbank plus mean normalisation.
+> The exact recipe, including two settings that are invisible and produce
+> confidently wrong embeddings when missed, is in the update at the top.
 
 ---
 
@@ -257,6 +515,13 @@ The interesting one, and the part that has no off-the-shelf equivalent. Produces
 speaker labels **~1 second behind live speech**, without waiting for the recording
 to finish. It does **not** use the segmentation model or the clustering engine —
 only VAD + embedding + online matching.
+
+> **Reduced for the assistant, 2026-08-11.** A dialog system needs identity once
+> per turn, from the turn's *start*, and nothing more. That drops §6.3, §6.5 and
+> §6.9 entirely, and shrinks the 32 s ring to ~1.6 s. What remains is §6.2's
+> boundary (already provided by the existing VAD/trigger), §6.4's finalisation,
+> §6.6–6.8's matching, and session stickiness for turns too short to identify.
+> The measured cost of that reduced path is ~50 ms. See the update at the top.
 
 ### 6.1 Constants
 
@@ -724,7 +989,8 @@ If you capture the local mic and system output separately:
 
 | Crate | Version | Use |
 |---|---|---|
-| **`sherpa-onnx`** | 1.13.4 | **Official** Rust bindings. Diarization, embeddings, VAD — all three. |
+| **`sherpa-onnx`** | 1.13.4 | **Official** Rust bindings. Diarization, embeddings, VAD — all three. **Batch path only** — see the update at the top; the assistant path needs none of it. |
+| **`kaldi-native-fbank`** | 0.1.0 | **Added 2026-08-11.** Pure-Rust fbank (`realfft` + `thiserror`). What CAM++ needs, without sherpa. Prefer over `knf-rs`, which vendors C++ via cmake + bindgen. |
 | `rusqlite` | 0.40.2 | Profile storage |
 | `hound` | 3.5.1 | WAV read/write |
 | `symphonia` | 0.6.0 | Decoding other container formats |
@@ -930,6 +1196,10 @@ Not specified here because they depend on the product:
 ---
 
 ## 15. Suggested build order
+
+> **Superseded for the assistant path 2026-08-11** — see the revised six-step
+> order in the update at the top (~4 days). The order below remains correct for
+> the meeting product, where batch diarization is the deliverable.
 
 1. `cosine_similarity` + embedding storage + `rusqlite` schema — with tests
 2. Batch diarization via `sherpa-onnx`, typed errors, over a fixture WAV

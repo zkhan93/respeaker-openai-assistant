@@ -210,8 +210,27 @@ and the conversation layer stay.
 
     Still Python's job on the Pi until step 12: the core has the detector, but
     nothing has rewired the Pi's shell to feed it a socket.
-14. **Diarization**, if the meeting product happens. sherpa-onnx has Python and
-    Rust bindings; see `DIARIZATION-SPEC.md`.
+14. **Speaker identity.** Split in two by the 2026-08-11 spikes — see the update
+    at the top of `DIARIZATION-SPEC.md`.
+
+    **Live identification, in the core (~4 days, de-risked).** "Who is speaking
+    to me" per turn, which is the half an *assistant* needs. It runs on `tract`,
+    already in the binary: CAM++ loads and embeds a 1.6 s window in 36 ms, and
+    matching 1,000 profiles costs 0.3 µs — so identity lands well before the
+    transcript does, and latency is not a constraint. The feature recipe is
+    pinned by committed reference vectors
+    (`tests/data/campplus_reference.json`, cosine 0.9987 against sherpa).
+    **The cost is memory: +125 MB resident**, flat regardless of window, so it
+    stays opt-in like `--zmq-pub`.
+
+    **Batch diarization, outside the core.** `tract` **cannot** load the pyannote
+    segmentation model, so this keeps sherpa-onnx — which is a reason to run it
+    as a separate binary over the WAVs the recorder already writes, not in a
+    stateless core. Only the meeting product needs it.
+
+    Two things remain unanswered and both gate shipping, not building: whether
+    CAM++ actually separates real speakers here (fidelity is not accuracy), and
+    the privacy posture, since a voiceprint is biometric data.
 
 ---
 
