@@ -199,6 +199,19 @@ impl VoiceActivityTracker {
     /// off Python; kept because the number is a decision, not a constant.
     #[allow(dead_code)]
     pub const ASSISTANT_SILENCE_FRAMES: usize = 15;
+    /// After a wake word, wait long enough for a thinking pause.
+    ///
+    /// **The failure costs are asymmetric here, unlike dictation.** Someone
+    /// who has just said "alexa" is composing a request as they speak, and
+    /// pauses of a second or more mid-sentence are ordinary — so the
+    /// dictation threshold cuts them off halfway through a thought and hands
+    /// back half a request. Waiting too long only delays the transcript.
+    ///
+    /// Longer than `ASSISTANT_SILENCE_FRAMES` on purpose, even though the
+    /// interaction looks the same: the assistant is deciding when to *speak*,
+    /// where being slow to reply is itself a cost. Here nothing interrupts
+    /// anyone, so patience is nearly free.
+    pub const WAKEWORD_SILENCE_FRAMES: usize = 25;
 
     pub fn new(detector: Box<dyn SpeechDetector>, silence_frames_required: usize) -> Self {
         Self {

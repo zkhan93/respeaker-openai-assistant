@@ -44,7 +44,8 @@ USAGE:
     raneen-core serve [model.bin] --audio-socket <path> [--trigger MODE] [--vad KIND]
                       [--stt KIND] [--stt-url URL] [--stt-model NAME] [--stt-key KEY]
                       [--stt-timeout SECS] [--stt-fallback none]
-                      [--language L] [--threads N]
+                      [--silence-frames N] [--pre-roll-frames N] [--max-seconds N]
+                      [--min-confidence N] [--language L] [--threads N]
 
 SPEECH TO TEXT (--stt local|remote|realtime, default local):
     local     whisper.cpp in this process. Needs a model file.
@@ -139,6 +140,24 @@ VAD (--vad silero|energy, default silero):
     silero  neural, weights compiled in. Rejects non-speech noise.
     energy  adaptive noise floor. No model; cannot tell a voice from a
             door slam of equal loudness.
+
+SEGMENTATION — how a turn is shaped once something has opened it:
+    --silence-frames N   silence before a turn closes, default 8 (640 ms).
+                         The knob for a room that keeps opening turns on
+                         its own: raise it and a fan or a distant voice
+                         has to persist longer to survive.
+    --pre-roll-frames N  audio kept from before the turn opened. Default 3
+                         (240 ms) under --trigger hold, 10 (800 ms)
+                         otherwise, because a key press is an exact
+                         instant and a VAD reports ~240 ms late.
+    --max-seconds N      forced cut, default 30. Hitting it transcribes
+                         and rolls into the next segment; it never
+                         discards.
+    --min-confidence N   drop transcripts below this mean token
+                         probability. Default 0 — off — because low
+                         confidence usually means the model cannot
+                         represent the speech, and deleting real words
+                         leaves no trace. For unattended logging only.
 
 LANGUAGE (--language, default en):
     A *.en model is English-only. Given other speech it does not fail —
@@ -249,6 +268,53 @@ fn run_serve(args: &[String]) -> Result<(), String> {
         policy.min_confidence = value
             .parse()
             .map_err(|_| "--min-confidence wants a number between 0 and 1".to_string())?;
+    }
+
+    // Segmentation shape. These were `Policy` fields with no way to reach
+    // them, which made the defaults the only available answer — and the
+    // defaults are tuned for dictation into a document, not for a room
+    // being recorded all day. A quiet room with a fan in it opens and
+    // closes turns on the silence threshold, so leaving that unreachable
+    // meant the only fix was editing the source.
+    //
+    // Frames, not seconds, because that is the unit the tracker counts in
+    // and a conversion here would round somewhere invisible. One frame is
+    // 80 ms.
+    if let Some(value) = flag(args, "--silence-frames") {
+        policy.silence_frames = value
+            .parse()
+            .map_err(|_| "--silence-frames wants a frame count (80 ms each)".to_string())?;
+        // Zero would close a turn on the first quiet frame, which is most of
+        // the gaps inside ordinary speech.
+        if policy.silence_frames == 0 {
+            return Err("--silence-frames must be at least 1".into());
+        }
+    }
+    if let Some(value) = flag(args, "--pre-roll-frames") {
+        // 0 is meaningful here — no pre-roll at all — so it is not rejected.
+        policy.pre_roll_frames = value
+            .parse()
+            .map_err(|_| "--pre-roll-frames wants a frame count (80 ms each)".to_string())?;
+    }
+    if let Some(value) = flag(args, "--max-seconds") {
+        policy.max_seconds = value
+            .parse()
+            .map_err(|_| "--max-seconds wants a number of seconds".to_string())?;
+        // **Refused rather than clamped, because the failure is invisible.**
+        // A non-positive limit force-cuts every segment the instant it opens:
+        // audio still flows, the level meter still animates, and no
+        // transcript is ever produced. A host that got this wrong reported
+        // "dictation is broken" with nothing in the protocol stream to say
+        // why. A startup error costs one launch; the silent version cost an
+        // evening.
+        // `is_finite` first, so NaN and infinity are rejected here rather
+        // than slipping through a comparison that is false either way.
+        if !policy.max_seconds.is_finite() || policy.max_seconds <= 0.0 {
+            return Err(format!(
+                "--max-seconds must be greater than 0, got {}",
+                policy.max_seconds
+            ));
+        }
     }
 
     // `RANEEN_ZMQ_PUB` is the same escape hatch `RANEEN_MODEL` is, and for

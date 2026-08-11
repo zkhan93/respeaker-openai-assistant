@@ -34,12 +34,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var inputMenu = NSMenu()
     private var outputMenu = NSMenu()
 
+    /// Settings, and the window that edits them. The model outlives the
+    /// window so that opening it twice does not lose an unapplied edit.
+    private let settings = SettingsModel()
+    private lazy var settingsWindow = SettingsWindow(model: settings)
+
     /// Whether a turn is open, mirrored from the helper's state events.
-    /// Only used to avoid reopening the microphone mid-sentence.
+    /// Used to avoid reopening the microphone — or replacing the core —
+    /// mid-sentence.
     private var isArmed = false
-    private var restartPending = false
-    private var restartAttempts = 0
-    private var restartWork: DispatchWorkItem?
+
+    /// Reopening the microphone after a device change. Named for capture
+    /// specifically because there is now a second thing that defers on
+    /// `isArmed` and restarts, and the two must never be confused: this
+    /// one keeps the same core running.
+    private var captureRestartPending = false
+    private var captureRestartAttempts = 0
+    private var captureRestartWork: DispatchWorkItem?
+
+    /// A settings change arrived while a turn was open. See
+    /// `restartHelper()` — configuration is argv, so applying it means
+    /// replacing the process.
+    private var helperRestartPending = false
+
+    /// A restart is between stopping the old core and spawning the new one.
+    ///
+    /// **Without this, two restarts in quick succession spawn two cores.**
+    /// The first clears `helper` and stops the old process on a background
+    /// queue; a second arriving before that finishes sees no helper to stop
+    /// and spawns its own, so both completions spawn — and the loser stays
+    /// alive holding a whisper model and a socket nobody reads.
+    private var helperRestartInFlight = false
 
     private var lastTranscript = "—"
     private var peak = 0
@@ -57,6 +82,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // recorded rather than only reaching a crash report.
         Log.installCrashHandler()
         Log.app.info("Raneen starting — log at \(LogFile.shared.path)")
+
+        // No defaults registration here any more, deliberately: `settings` is
+        // a stored property and is therefore already built by this point, so
+        // anything registered here would have been too late to be read. The
+        // defaults live in `HelperConfig` and `SettingsStore.current` falls
+        // back to them directly.
+        settings.onApply = { [weak self] in self?.restartHelper() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         show(.starting)
@@ -97,7 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Helper
 
     private func startHelper() {
-        guard let executable = Self.locateHelper() else {
+        // Checked here as well as in `spawnHelper`, so a missing core is
+        // reported before we open a microphone and a socket for it.
+        guard Self.locateHelper() != nil else {
             state = "helper not found"
             rebuildMenu()
             return
@@ -135,7 +169,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startCapture(sending: socket)
         watchForDeviceChanges()
 
-        let arguments = ["serve", "--audio-socket", socket.path, "--no-sound"]
+        spawnHelper(sending: socket)
+    }
+
+    /// Spawn the core and wire its events up. Separate from `startHelper`
+    /// because a settings change respawns it against the socket, capture
+    /// and earcons that are already running.
+    private func spawnHelper(sending socket: AudioSocket) {
+        // Re-resolved rather than captured, so a restart picks up a changed
+        // RANEEN_HELPER — which is how cores get swapped without rebuilding
+        // the bundle.
+        guard let executable = Self.locateHelper() else {
+            state = "helper not found"
+            rebuildMenu()
+            return
+        }
+
+        // Read fresh, not captured: this is what makes a restart apply a
+        // settings change rather than repeat the launch configuration.
+        let config = SettingsStore.current()
+        let arguments = config.argv(audioSocket: socket.path)
+
+        // The whole configuration, in one line, every spawn. Worth its space
+        // in the log: "why is it behaving like that" is answerable from it
+        // without guessing which setting the window was showing.
+        Log.helper.info("spawning core: \(arguments.joined(separator: " "))")
+
         let helper = Helper(executable: executable, arguments: arguments)
         helper.onEvent = { [weak self] event in
             // Events arrive on a background queue.
@@ -144,9 +203,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             try helper.start()
             self.helper = helper
+            // Recorded only on success, and only here. The settings window
+            // compares against this to decide whether Apply has anything to
+            // do — so a spawn that failed must leave it alone rather than
+            // claim the new configuration is running.
+            settings.running = config
         } catch {
             state = "helper failed: \(error.localizedDescription)"
             rebuildMenu()
+        }
+    }
+
+    /// Apply a configuration change by replacing the core.
+    ///
+    /// **Configuration is argv, and applying it is a restart.** The Rust
+    /// core reaches `ready` in ~0.05 s, so this is imperceptible — and it
+    /// keeps the core a pure function of its command line, which is what
+    /// lets `protocol/` assert on behaviour from a command line alone.
+    /// Reconfiguring a live core over the protocol instead would mean
+    /// rebuilding the STT engine, both detectors and the ZeroMQ publisher
+    /// while their threads run, in `serve.rs`'s composition root.
+    ///
+    /// This is only viable because the helper is Rust. The Python one took
+    /// ~12 s to reach `ready`, where a restart would have been a visible
+    /// outage rather than a flicker.
+    ///
+    /// The one setting this can never carry is a ZeroMQ auth key: argv is
+    /// readable by every process on the machine through `ps`. That is what
+    /// a protocol command is for, and why securing the broadcast is a
+    /// separate phase rather than one more flag.
+    func restartHelper() {
+        guard let socket = audioSocket else { return }
+
+        if helperRestartInFlight {
+            // Dropped rather than queued: `spawnHelper` reads the current
+            // configuration, so the restart already under way will come up
+            // with whatever the settings say by the time it spawns.
+            Log.helper.info("restart already in flight — ignoring")
+            return
+        }
+
+        if isArmed {
+            // The same reason capture defers: a turn is open and the user is
+            // mid-sentence. Killing the core now loses those words.
+            //
+            // This covers every trigger, not just a held key: `isArmed` is
+            // set by `listen` as well as `armed`, so a wake-word turn is
+            // protected too.
+            Log.helper.info("config changed while armed — restarting after the key is released")
+            helperRestartPending = true
+            return
+        }
+        helperRestartPending = false
+
+        // Detached before stopping, so the old process's `exited` event
+        // cannot reach `handle` and report a failure we asked for. Cheaper
+        // and less fragile than a flag the exit path has to remember to
+        // clear.
+        let outgoing = helper
+        outgoing?.onEvent = nil
+        helper = nil
+        helperRestartInFlight = true
+
+        state = "restarting…"
+        show(.starting)
+        rebuildMenu()
+
+        // `Helper.stop` waits for the process to actually go, so it must
+        // not run on the main queue — a core taking its time would freeze
+        // the menu bar for the whole timeout.
+        DispatchQueue.global(qos: .userInitiated).async {
+            outgoing?.stop()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.helperRestartInFlight = false
+                self.spawnHelper(sending: socket)
+            }
         }
     }
 
@@ -254,17 +386,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // The key is still down and the old device is still feeding
             // us, so the honest move is to finish the sentence first.
             Log.devices.info("device changed while armed — deferring until the key is released")
-            restartPending = true
+            captureRestartPending = true
             return
         }
         scheduleCaptureRestart()
     }
 
     private func scheduleCaptureRestart() {
-        restartPending = false
-        restartWork?.cancel()
+        captureRestartPending = false
+        captureRestartWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.restartCapture() }
-        restartWork = work
+        captureRestartWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.restartDebounce, execute: work)
     }
 
@@ -276,21 +408,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startCapture(sending: socket)
 
         if capture != nil {
-            restartAttempts = 0
+            captureRestartAttempts = 0
             state = "ready"
             show(.idle)
             if let format = capture?.inputFormat {
                 Log.devices.info("following the new device: \(Int(format.sampleRate)) Hz \(format.channelCount) ch")
             }
         } else {
-            restartAttempts += 1
-            if restartAttempts >= Self.maxRestartAttempts {
+            captureRestartAttempts += 1
+            if captureRestartAttempts >= Self.maxRestartAttempts {
                 state = "microphone unavailable"
                 show(.error)
             } else {
                 // Back off rather than hammering a device that is still
                 // settling — a Bluetooth handoff takes a moment.
-                let delay = Self.restartDebounce * Double(restartAttempts * 2)
+                let delay = Self.restartDebounce * Double(captureRestartAttempts * 2)
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     self?.restartCapture()
                 }
@@ -349,12 +481,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "armed":
                 isArmed = true
                 panel.show()
-            case "disarmed":
+            case "listen":
+                // **The wake-word and always-on cue.** Only `hold` has an
+                // arming layer to report; every other trigger publishes the
+                // per-utterance cycle and nothing else, so without this a
+                // wake word opened a turn with no indication on screen at
+                // all — the core was recording and the UI looked asleep.
+                //
+                // `isArmed` is set here too, so a settings change or a device
+                // change waits for the sentence to finish in these modes as
+                // well, not only under a held key.
+                isArmed = true
+                panel.show()
+            case "disarmed", "off":
+                // `off` is the idle pattern for every non-hold trigger, so it
+                // closes the turn there exactly as `disarmed` does for hold.
                 isArmed = false
                 panel.hide()
-                // A device changed while the key was held. Now that the
+                // A device changed while the turn was open. Now that the
                 // sentence is finished, follow it.
-                if restartPending { scheduleCaptureRestart() }
+                if captureRestartPending { scheduleCaptureRestart() }
+                // Likewise a settings change: the words are safe, so the
+                // core can be replaced now.
+                if helperRestartPending { restartHelper() }
             default:
                 break
             }
@@ -479,6 +628,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(outputItem)
 
         menu.addItem(.separator())
+
+        let settingsItem = NSMenuItem(
+            title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        // Kept alongside Settings as a diagnostic: it is the same mechanism
+        // Apply uses, so being able to trigger it on its own separates "the
+        // restart is broken" from "the configuration is wrong".
+        let restartItem = NSMenuItem(
+            title: "Restart Core", action: #selector(restartCoreFromMenu), keyEquivalent: "")
+        restartItem.target = self
+        menu.addItem(restartItem)
+
         // Somewhere to point a person who says "it broke". Without this
         // the log exists but only someone who already knows the path can
         // find it, which is the same as it not existing.
@@ -645,6 +808,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func revealLog() {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: LogFile.shared.path)])
+    }
+
+    @objc private func restartCoreFromMenu() {
+        Log.helper.info("restart requested from the menu")
+        restartHelper()
+    }
+
+    @objc private func openSettings() {
+        settingsWindow.show()
     }
 
     @objc private func toggleTyping() {

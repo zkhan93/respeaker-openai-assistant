@@ -158,7 +158,13 @@ impl Policy {
                 // recording begins ~240 ms into the first word.
                 _ => 10,
             },
-            silence_frames: vad::VoiceActivityTracker::DICTATION_SILENCE_FRAMES,
+            silence_frames: match mode {
+                // A wake word means someone is composing a request out loud,
+                // so a pause for thought must not end the turn. Dictation
+                // wants the opposite — text in the document promptly.
+                TriggerMode::WakeWord => vad::VoiceActivityTracker::WAKEWORD_SILENCE_FRAMES,
+                _ => vad::VoiceActivityTracker::DICTATION_SILENCE_FRAMES,
+            },
             min_confidence: 0.0,
             // English, because the default model is English-only and
             // saying "auto" over a `.en` model promises something it
@@ -170,6 +176,55 @@ impl Policy {
             // 2 s, matching the Python detector's cooldown. Chosen there
             // by watching one utterance produce a burst of events.
             wake_cooldown_frames: 25,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wake word opens a turn for someone who is composing a request out
+    /// loud, and they pause. The dictation threshold ends the turn on the
+    /// first of those pauses and returns half a sentence, so this mode has to
+    /// wait longer — the only cost of waiting is latency.
+    #[test]
+    fn a_wake_word_turn_tolerates_a_longer_pause_than_dictation() {
+        let wake = Policy::dictation(TriggerMode::WakeWord);
+        let hold = Policy::dictation(TriggerMode::Hold);
+        assert!(
+            wake.silence_frames > hold.silence_frames,
+            "wakeword {} should exceed hold {}",
+            wake.silence_frames,
+            hold.silence_frames
+        );
+        // 80 ms a frame, so at least 1.5 s of tolerance.
+        assert!(wake.silence_frames >= 19);
+    }
+
+    /// Dictation into a document wants text promptly, so the extra patience
+    /// must not leak into the modes that are not addressed by a wake word.
+    #[test]
+    fn dictation_modes_keep_the_short_threshold() {
+        for mode in [TriggerMode::Hold, TriggerMode::Vad, TriggerMode::Toggle] {
+            assert_eq!(
+                Policy::dictation(mode).silence_frames,
+                vad::VoiceActivityTracker::DICTATION_SILENCE_FRAMES,
+                "{mode:?} should keep the dictation threshold"
+            );
+        }
+    }
+
+    /// A key press is an exact instant; every detector reports after the fact,
+    /// so it needs audio from before it fired or the first word is lost.
+    #[test]
+    fn every_detector_trigger_keeps_more_pre_roll_than_a_key() {
+        let hold = Policy::dictation(TriggerMode::Hold).pre_roll_frames;
+        for mode in [TriggerMode::Vad, TriggerMode::Toggle, TriggerMode::WakeWord] {
+            assert!(
+                Policy::dictation(mode).pre_roll_frames > hold,
+                "{mode:?} opens on a detector and would clip its first word"
+            );
         }
     }
 }

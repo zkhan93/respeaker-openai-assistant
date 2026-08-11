@@ -51,6 +51,26 @@ run "hold · one sentence · last word survives" \
   --helper "$HELPER_HOLD" --expect-transcripts 1 --expect-text "raw speed"
 
 if [ -n "$HELPER_VAD" ]; then
+  # **The macOS app's own default configuration, spelled out.**
+  #
+  # Every case here had always been a hand-written flag combination, which
+  # left the one configuration every user actually gets untested. Then the app
+  # shipped building `--max-seconds 0 --silence-frames 0` from unregistered
+  # UserDefaults keys: the core armed, the meter animated, and not one word was
+  # ever transcribed. Nothing in this suite could have noticed, because nothing
+  # here ran what the app runs.
+  #
+  # Keep this in step with `HelperConfig`'s property defaults in the Swift
+  # shell — `HelperConfigTests.testDefaultsMirrorTheCore` pins the same numbers
+  # from the other side.
+  run "dictation · the macOS app's default configuration" \
+    --wav "$FIXTURES/spike.wav" --settle "$SETTLE" "${MODEL_ARG[@]}" \
+    --helper "$BIN serve {model} --audio-socket {socket} --no-sound \
+              --trigger hold --vad silero --language en \
+              --silence-frames 8 --pre-roll-frames 3 --max-seconds 30 \
+              --min-confidence 0 --stt local" \
+    --expect-transcripts 1 --expect-text "raw speed"
+
   # Always-on segmentation: two sentences, no hotkey, one transcript each.
   run "vad · segments two sentences unaided" \
     --wav "$FIXTURES/two-sentences.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
@@ -160,9 +180,26 @@ if [ -n "$HELPER_VAD" ]; then
   # Capabilities 2, 3, 3.5 and 4 in one run, because 4 is the claim that
   # only means anything when the other three are happening at the same
   # time: recording and dictating concurrently, not one after the other.
-  echo "── zmq · records and dictates at the same time"
-  if python3 -c "import zmq" 2>/dev/null; then
-    if python3 "$HERE/zmq-check.py" \
+  # An interpreter that can actually import zmq. The repo's own venv has it,
+  # and `tools/zmq-watch.py` already depends on that — so preferring it means
+  # the only two cases covering the entire recording feature run locally
+  # instead of skipping on a bare `python3`. CI pip-installs into the ambient
+  # interpreter, so it is unaffected.
+  ZMQ_PY=""
+  for candidate in "$REPO/.venv/bin/python" python3; do
+    if "$candidate" -c "import zmq" 2>/dev/null; then ZMQ_PY="$candidate"; break; fi
+  done
+
+  # **The two cases below bind differently on purpose.** `127.0.0.1` is this
+  # machine only — the macOS app's default and the safest of the three
+  # choices it offers — and `*` is every interface, which is what the Pi has
+  # always published on. They are not interchangeable, and a loopback bind
+  # that published nothing would break the careful option while the exposed
+  # one kept working: the wrong way round for a bug to go. Splitting them
+  # across the cases covers both without paying for a third run.
+  echo "── zmq · records and dictates at the same time (loopback bind)"
+  if [ -n "$ZMQ_PY" ]; then
+    if "$ZMQ_PY" "$HERE/zmq-check.py" --bind-host 127.0.0.1 \
          --helper "$BIN serve $MODEL_RUST --audio-socket {socket}"; then
       pass=$((pass + 1))
     else
@@ -174,7 +211,7 @@ if [ -n "$HELPER_VAD" ]; then
     # network AND the hotkey must still be what opened the turn.
     if [ -f "$WAKE_DIR/alexa_v0.1.onnx" ]; then
       echo "── zmq · a wake word reports over the network without triggering"
-      if python3 "$HERE/zmq-check.py" \
+      if "$ZMQ_PY" "$HERE/zmq-check.py" \
            --wav "$FIXTURES/wake-word.wav" --port 5601 \
            --wake-word alexa \
            --helper "$BIN serve $MODEL_RUST --audio-socket {socket} \

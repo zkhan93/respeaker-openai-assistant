@@ -44,6 +44,12 @@ enum StatusIcon: Equatable {
     static func forPattern(_ pattern: String) -> StatusIcon {
         switch pattern {
         case "armed":    return .armed
+        // A turn opened by a wake word or by the VAD is every bit as live as
+        // a held key — `listen` is the only signal those triggers give, since
+        // they have no arming layer to report. Falling through to `.idle` left
+        // the menu bar claiming nothing was happening while the core was
+        // recording the user.
+        case "listen":   return .armed
         case "disarmed": return .idle
         case "error":    return .error
         case "off":      return .idle

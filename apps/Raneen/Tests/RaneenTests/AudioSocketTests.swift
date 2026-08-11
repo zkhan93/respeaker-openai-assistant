@@ -144,6 +144,83 @@ final class AudioSocketTests: XCTestCase {
         XCTAssertEqual(received, payload, "audio changed crossing the socket")
     }
 
+    // MARK: - Surviving a helper restart
+
+    /// The property the whole settings feature rests on: configuration is
+    /// argv, so applying it replaces the core, and the replacement has to
+    /// be able to connect.
+    ///
+    /// This failed before `acceptInBackground` became a loop, and it failed
+    /// in the most confusing possible way — the *path* had been unlinked
+    /// after the first connect, so the second helper died on ENOENT inside
+    /// a child process while the app carried on looking healthy and deaf.
+    func testASecondHelperCanConnectAfterTheFirstGoesAway() throws {
+        let socket = makeSocket()
+        try socket.listen()
+        socket.acceptInBackground()
+
+        let first = connectClient(to: socket.path)
+        XCTAssertGreaterThanOrEqual(first, 0, "the first helper could not connect")
+        waitUntilConnected(socket)
+
+        Darwin.close(first)  // the core is replaced
+
+        // The path must still exist for the replacement to reach.
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: socket.path),
+            "the socket path was removed, so no restarted helper could connect"
+        )
+
+        let second = connectClient(to: socket.path)
+        XCTAssertGreaterThanOrEqual(second, 0, "the restarted helper could not connect")
+        defer { Darwin.close(second) }
+
+        // **Not `waitUntilConnected` here, deliberately.** `isConnected`
+        // reports only that *some* descriptor is held, and the departed
+        // client's stays live until a write to it fails — so waiting on it
+        // is satisfied by the connection that just went away, and the reads
+        // below then block forever on a socket nothing was sent to. That is
+        // exactly how this test hung the first time it was written.
+        //
+        // So drive it instead: a send either clears the dead descriptor or
+        // lands on the replacement, and the proof is bytes arriving at the
+        // new client. A receive timeout keeps a failure a failure rather
+        // than a hang.
+        // Short, because the first send is expected to vanish: a write to a
+        // peer that has closed lands in the kernel buffer and only fails on
+        // the next one. Each retry costs one of these, so a second here
+        // would be a second of test time doing nothing.
+        var timeout = timeval(tv_sec: 0, tv_usec: 100_000)
+        setsockopt(
+            second, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        let payload = Data((0..<1280).map { UInt8($0 % 256) })
+        var received = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let deadline = Date().addingTimeInterval(5)
+        while received.count < payload.count && Date() < deadline {
+            _ = socket.send(payload)
+            let n = read(second, &buffer, buffer.count)
+            if n > 0 { received.append(contentsOf: buffer[0..<n]) }
+        }
+
+        XCTAssertEqual(
+            received.prefix(payload.count), payload,
+            "audio never reached the restarted helper"
+        )
+    }
+
+    /// `accept` lands on a background queue, so connection is observed
+    /// rather than assumed.
+    private func waitUntilConnected(_ socket: AudioSocket) {
+        let connected = expectation(description: "helper connected")
+        DispatchQueue.global().async {
+            while !socket.isConnected { usleep(1000) }
+            connected.fulfill()
+        }
+        wait(for: [connected], timeout: 5)
+    }
+
     func testSendingToADepartedHelperFailsAndDisconnects() throws {
         let socket = makeSocket()
         try socket.listen()

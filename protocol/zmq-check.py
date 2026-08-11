@@ -55,6 +55,13 @@ def main():
     parser.add_argument("--settle", type=float, default=8.0)
     parser.add_argument("--wake-word", default=None,
                         help="assert this wake word's detections reach the wire")
+    # The address the publisher binds, as distinct from the one a consumer
+    # dials. `*` is every interface; `127.0.0.1` is this machine only, which
+    # is what the macOS app's "This Mac only" setting asks for. They are not
+    # interchangeable — a loopback bind that silently published nothing would
+    # break the safest of the three choices while the riskiest kept working.
+    parser.add_argument("--bind-host", default="*",
+                        help="host part of the publisher's bind address")
     args = parser.parse_args()
 
     with wave.open(args.wav) as w:
@@ -72,7 +79,7 @@ def main():
     server.listen(1)
 
     argv = args.helper.replace("{socket}", sock_path).split()
-    argv += ["--zmq-pub", f"tcp://*:{args.port}"]
+    argv += ["--zmq-pub", f"tcp://{args.bind_host}:{args.port}"]
     helper = subprocess.Popen(
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True,

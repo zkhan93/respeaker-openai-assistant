@@ -45,6 +45,10 @@ final class AudioSocket {
     private var clientFD: Int32 = -1
     private let lock = NSLock()
     private var accepting = false
+    /// Set before `close()` touches the descriptor, so the accept loop can
+    /// tell an orderly shutdown from a genuine failure. Without it every
+    /// quit logs an accept error that means nothing.
+    private var closing = false
 
     /// Short by construction — see `maxPathLength`. The pid keeps two
     /// instances from colliding, which matters during development when a
@@ -96,11 +100,24 @@ final class AudioSocket {
         listenFD = fd
     }
 
-    /// Accept the helper's connection on a background queue.
+    /// Accept helper connections on a background queue, one after another.
     ///
     /// `accept` blocks, and the helper cannot connect until it has
     /// finished loading a Whisper model — which is seconds. Doing this on
     /// the main queue would freeze the menu bar for the whole of startup.
+    ///
+    /// **A loop, not a single accept, and the path outlives the first
+    /// connection.** Applying a settings change restarts the core with new
+    /// argv (`AppDelegate.restartHelper`), and the replacement connects
+    /// here. This accepted exactly once and then unlinked the path, so a
+    /// second helper had nothing to connect to: it failed with ENOENT
+    /// inside a child process, and the app went deaf with nothing in the
+    /// UI naming the cause.
+    ///
+    /// The cost of keeping the path is a zero-byte socket file left in
+    /// `/tmp` by a crash. That is bounded — the name carries our pid and
+    /// `listen()` unlinks a stale one on the way in — and the alternative
+    /// was not being able to reconfigure at all.
     func acceptInBackground() {
         lock.lock()
         guard listenFD >= 0, !accepting else {
@@ -112,12 +129,22 @@ final class AudioSocket {
         lock.unlock()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let client = accept(fd, nil, nil)
-            guard let self else {
-                if client >= 0 { Darwin.close(client) }
-                return
-            }
-            if client >= 0 {
+            while true {
+                let client = accept(fd, nil, nil)
+                guard let self else {
+                    if client >= 0 { Darwin.close(client) }
+                    return
+                }
+                if client < 0 {
+                    if errno == EINTR { continue }
+                    // Either we are shutting down, or accept failed for a
+                    // reason retrying will not fix. Looping on a broken
+                    // listener would spin a core at full tilt.
+                    if !self.isClosing {
+                        Log.audio.error("audio socket accept failed: errno \(errno)")
+                    }
+                    return
+                }
                 // Without this, writing to a socket the helper has closed
                 // raises SIGPIPE and kills the whole app — and the helper
                 // dying is an ordinary event, not a fatal one.
@@ -125,16 +152,22 @@ final class AudioSocket {
                 setsockopt(
                     client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)
                 )
-            } else {
-                Log.audio.error("audio socket accept failed: errno \(errno)")
+
+                self.lock.lock()
+                // A restarted helper is a new connection, and the previous
+                // one is finished with whether or not it closed its end.
+                if self.clientFD >= 0 { Darwin.close(self.clientFD) }
+                self.clientFD = client
+                self.lock.unlock()
+                Log.audio.info("helper connected to the audio socket")
             }
-            self.lock.lock()
-            self.clientFD = client
-            self.lock.unlock()
-            // The path only had to survive until the helper connected;
-            // unlinking now means nothing is left behind if we crash.
-            unlink(self.path)
         }
+    }
+
+    private var isClosing: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closing
     }
 
     var isConnected: Bool {
@@ -190,6 +223,9 @@ final class AudioSocket {
     func close() {
         lock.lock()
         defer { lock.unlock() }
+        // Before the descriptor goes: the accept loop reads this to tell
+        // "we are quitting" from "accept genuinely failed".
+        closing = true
         if clientFD >= 0 {
             Darwin.close(clientFD)
             clientFD = -1
