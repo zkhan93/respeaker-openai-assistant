@@ -114,6 +114,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Opening the app while it is already running.
+    ///
+    /// **The menu bar is not a reliable way in.** macOS hides status items
+    /// when the bar runs out of room, and an `LSUIElement` app has no Dock
+    /// icon and no app menu to fall back on — so with the item hidden there
+    /// was no way to reach Settings at all, short of quitting.
+    ///
+    /// Double-clicking Raneen in Applications is what someone tries first,
+    /// and until now it did nothing at all: the second launch saw a running
+    /// instance and exited without a word. `open -a Raneen` arrives here too.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows: Bool
+    ) -> Bool {
+        Log.app.info("reopened — showing settings")
+        settingsWindow.show()
+        return true
+    }
+
+    /// `open raneen://settings`, from a terminal, a Shortcut, or a launcher.
+    ///
+    /// The scheme is declared in Info.plist. This exists for the same reason
+    /// as the reopen handler and covers the case where the app is not
+    /// somewhere convenient to double-click.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            if SettingsWindow.opensSettings(url) {
+                Log.app.info("opening settings from \(url.absoluteString)")
+                settingsWindow.show()
+            } else {
+                Log.app.error("unrecognised URL: \(url.absoluteString)")
+            }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         hotkey.stop()
         panel.hide()

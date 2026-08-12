@@ -118,27 +118,37 @@ impl Whisper {
             .full(params, &padded)
             .map_err(|e| format!("transcription failed: {e}"))?;
 
-        let segments = state
-            .full_n_segments()
-            .map_err(|e| format!("could not count segments: {e}"))?;
+        // whisper-rs 0.16 replaced the flat `full_get_segment_*(index)`
+        // accessors with borrowed `WhisperSegment` / `WhisperToken` handles,
+        // and `full_n_segments` returns a plain count rather than a Result.
+        let segments = state.full_n_segments();
 
         let mut text = String::new();
         let mut probability_sum = 0.0_f64;
         let mut token_count = 0_usize;
 
         for i in 0..segments {
-            let piece = state
-                .full_get_segment_text(i)
+            let Some(segment) = state.get_segment(i) else {
+                // A segment index the model reported but will not hand over
+                // is a bug in our loop bounds, not bad audio — say so rather
+                // than returning a silently short transcript.
+                return Err(format!("segment {i} of {segments} vanished"));
+            };
+            // `to_str_lossy` rather than `to_str`: whisper can emit a byte
+            // sequence that is not valid UTF-8 mid-word, and losing the
+            // sentence over one replacement character would be worse than
+            // showing it.
+            let piece = segment
+                .to_str_lossy()
                 .map_err(|e| format!("could not read segment {i}: {e}"))?;
             text.push_str(&piece);
 
             // Averaged across every token of every segment, not per
             // segment: one confident word does not redeem a sentence the
             // model was guessing at.
-            let tokens = state.full_n_tokens(i).unwrap_or(0);
-            for token in 0..tokens {
-                if let Ok(p) = state.full_get_token_prob(i, token) {
-                    probability_sum += p as f64;
+            for token in 0..segment.n_tokens() {
+                if let Some(handle) = segment.get_token(token) {
+                    probability_sum += handle.token_probability() as f64;
                     token_count += 1;
                 }
             }

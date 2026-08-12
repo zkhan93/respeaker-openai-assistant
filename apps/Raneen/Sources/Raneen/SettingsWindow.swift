@@ -47,4 +47,22 @@ final class SettingsWindow {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
+
+    /// Whether a URL is asking for this window.
+    ///
+    /// Both spellings are accepted because both are natural to type and the
+    /// difference is invisible to the person typing it: `raneen://settings`
+    /// puts "settings" in `host`, while `raneen:settings` — no slashes —
+    /// makes the whole thing opaque and leaves `host` nil. A bare
+    /// `raneen://` opens Settings too, since there is nothing else it could
+    /// reasonably mean.
+    static func opensSettings(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "raneen" else { return false }
+        let target =
+            url.host
+            ?? url.absoluteString
+            .dropFirst("raneen:".count)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return target.isEmpty || target.lowercased() == "settings"
+    }
 }

@@ -54,6 +54,43 @@ jobs:
           fi
           echo "all seven signing and notarisation secrets are set"
 
+      # Printed before anything is built, because the C toolchain is what
+      # compiles whisper.cpp and ggml — and a build failure inside ggml's
+      # NEON code says nothing about which compiler produced it. This is the
+      # first line to check when `whisper-rs-sys` fails to build here but
+      # builds on a developer's Mac.
+      - name: Show the toolchain
+        run: |
+          sw_vers
+          echo "arch: $(uname -m)"
+          xcodebuild -version
+          clang --version | head -2
+          cmake --version | head -1
+          ls /Applications | grep -i "^Xcode" || true
+
+      # **A release must not be built on an Intel runner**, and the artefact
+      # would not say so — the DMG name and the version are identical either
+      # way, so an x86_64 build would ship looking exactly like an arm64 one.
+      #
+      # whisper.cpp picks its instruction set at compile time. On aarch64 that
+      # is safe because NEON is mandatory, which is the whole reason one build
+      # covers every Apple Silicon Mac. An x86_64 build has to choose an AVX
+      # baseline and then either faults with SIGILL on older CPUs or leaves
+      # performance on newer ones — the top bug cluster in the closest
+      # comparable product, and why ROADMAP lists x86 under "deliberately not
+      # doing".
+      #
+      # A runner label silently changing generation is exactly how that ships
+      # by accident, so it is asserted rather than assumed.
+      - name: Refuse to release from a non-arm64 runner
+        run: |
+          arch="$(uname -m)"
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::Runner is $arch. Raneen ships arm64 only — see docs/RELEASING.md."
+            exit 1
+          fi
+          echo "arm64 confirmed"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

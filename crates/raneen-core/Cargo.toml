@@ -7,7 +7,14 @@ description = "The Raneen core: audio in, text out. Speaks the newline-JSON help
 [dependencies]
 # whisper.cpp bindings. Pulls and builds whisper.cpp from source, so the
 # first build is minutes and later ones are seconds.
-whisper-rs = "0.14"
+#
+# **0.16 or newer, and the reason is portability rather than features.** Its
+# build script forwards `GGML_*` environment variables to CMake; 0.14's
+# forwards only `WHISPER_*` and `CMAKE_*`. Without `GGML_NATIVE=OFF` reaching
+# ggml, the build tunes itself to whatever CPU compiled it — see
+# `apps/Raneen/Makefile` and docs/RELEASING.md for why that ships a binary
+# that crashes on older Macs.
+whisper-rs = "0.16"
 serde_json = "1"
 # WAV parsing, for `bench` only. Pure Rust, no C, ~1k lines.
 hound = "3"
@@ -29,4 +36,12 @@ strip = true
 panic = "abort"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.14", features = ["metal"] }
+# Metal on Apple Silicon: a system framework, so it adds no dylib to the
+# bundle, no download and no runtime probe. It is what makes the larger
+# models in the settings picker a real choice rather than a trap — on CPU
+# `large-v3` runs slower than realtime.
+#
+# **The version must match `[dependencies]` above.** Cargo merges these two
+# entries, and `whisper-rs-sys` declares `links = "whisper"`, so two versions
+# in one graph is a resolver error rather than two builds.
+whisper-rs = { version = "0.16", features = ["metal"] }

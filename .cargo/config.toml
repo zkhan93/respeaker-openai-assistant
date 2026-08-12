@@ -1,0 +1,29 @@
+# Cargo settings for every build in this repository.
+
+[env]
+# **Do not tune whisper.cpp to the machine that compiled it.**
+#
+# ggml's default (`GGML_NATIVE=ON`) detects the build host's CPU and opts into
+# whatever extensions it finds. On Apple Silicon that means `i8mm` — ARMv8.6,
+# present on M2 and later, absent on M1 — so a core built on an M3 contains
+# `smmla` instructions and dies with SIGILL on an M1. Nobody would notice
+# locally, because the machine that builds it is the machine that runs it.
+#
+# It first surfaced as a *build* failure in CI, which was lucky: the runner's
+# hardware reported i8mm to `sysctl` while its older clang did not enable the
+# codegen, so the two disagreed and the compile stopped. Building on a newer
+# runner would have "fixed" that by shipping the crash instead.
+#
+# This lives here rather than in the Makefile or a CI step because
+# `whisper-rs-sys` does not declare `cargo:rerun-if-env-changed=GGML_NATIVE`.
+# Setting it in one build path only means a developer who has already run
+# `cargo build` keeps their native artefacts, and the flag silently does
+# nothing — a bundled core would then be native-tuned with no sign of it.
+# A config file applies to every cargo invocation in the tree, so there is no
+# ordering to get wrong.
+#
+# The cost is losing i8mm's quantised matmul speedup. On macOS that is close to
+# free, because the `metal` feature moves those matmuls to the GPU anyway.
+# Requires whisper-rs >= 0.16: earlier build scripts forward only `WHISPER_*`
+# and `CMAKE_*` variables, not `GGML_*`.
+GGML_NATIVE = "OFF"

@@ -155,6 +155,48 @@ that is visible in the file size. `AD-19` chose `tract` partly on an expected
 memory win that this does not demonstrate; the reasons that survived
 measurement are the static binary and the irrelevance of GPU providers.
 
+## Portability
+
+### aarch64 mandates NEON, but ggml opts into more than NEON
+
+"One arm64 build covers every Apple Silicon Mac" is what `-march` guarantees on
+paper, and it is **false as built**. ggml's default `GGML_NATIVE=ON` detects the
+*build host's* CPU and enables whatever extensions it finds — including `i8mm`,
+an ARMv8.6 feature present on M2 and later and **absent on M1**. A core compiled
+on an M3 emits `smmla` instructions and dies with `SIGILL` on an M1.
+
+Nothing local can catch it: the machine that builds is the machine that runs.
+It surfaced instead as a *compile* failure the first time the core was built on
+a macOS CI runner, whose hardware reported i8mm to `sysctl` while its older
+clang did not enable the codegen:
+
+```
+error: always_inline function 'vmmlaq_s32' requires target feature 'i8mm',
+       but would be inlined into function 'ggml_vec_dot_q4_0_q8_0'
+       that is compiled without support for 'i8mm'
+```
+
+The obvious reading — "use a newer Xcode" — is the trap. It resolves the
+mismatch by *enabling* i8mm, turning a loud build failure into a silent crash on
+every M1 user's machine. The fix is the opposite: `GGML_NATIVE=OFF`, so nothing
+about the binary depends on who compiled it. Verified by counting instructions:
+`otool -tv … | grep -c smmla` is **0** with it off.
+
+Two details that decide where the setting lives:
+
+* **`whisper-rs` must be >= 0.16.** Its build script forwards `GGML_*`
+  environment variables to CMake; 0.14's forwards only `WHISPER_*` and
+  `CMAKE_*`, so the knob is unreachable and the bump is the fix rather than a
+  feature upgrade.
+* **An environment variable in one build path is not enough.**
+  `whisper-rs-sys` does not declare `cargo:rerun-if-env-changed=GGML_NATIVE`,
+  so toggling it does not invalidate the build script — set it after an
+  ordinary `cargo build` and it silently does nothing. It belongs in
+  `.cargo/config.toml`, which applies to every invocation in the tree.
+
+The cost is losing i8mm's quantised matmul speedup, which on macOS is close to
+free: the `metal` feature moves those matmuls to the GPU regardless.
+
 ## Memory
 
 ### A GCD block that never returns never drains its autorelease pool

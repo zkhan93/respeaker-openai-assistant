@@ -44,6 +44,28 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>Raneen listens while you hold the dictation key, so it can turn what you say into text.</string>
 
+    <!-- A way into the app that does not depend on the menu bar.
+
+         macOS hides status items when the bar runs out of room — a notch
+         plus a few other menu-bar apps is enough — and when ours is
+         hidden there is otherwise no way to reach Settings at all: an
+         LSUIElement app has no Dock icon and no app menu to fall back on.
+
+         So: `open raneen://settings` works from anywhere, and
+         `applicationShouldHandleReopen` covers double-clicking the app in
+         Finder, which is what someone tries first. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.nexuscraftlabs.raneen</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>raneen</string>
+            </array>
+        </dict>
+    </array>
+
     <!-- There is deliberately no Accessibility key: Apple provides none.
          It can only be granted in System Settings, and the most an app
          can do is open that pane pre-populated. -->

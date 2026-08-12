@@ -155,10 +155,21 @@ classifier is about 3.2 MB and needs only two `cp` lines in the Makefile — the
 blocker is confirming the openWakeWord model licence permits redistribution inside
 a signed binary, which is a different question from pip-installing them.
 
-**x86_64 is not built.** aarch64 mandates NEON, so one arm64 build is correct on
-every Apple Silicon Mac. An x86_64 build has to choose an AVX baseline at compile
+**x86_64 is not built.** An x86_64 build has to choose an AVX baseline at compile
 time and then either crashes with SIGILL on older CPUs or leaves performance on
 newer ones. See ROADMAP, "deliberately not doing".
+
+The arm64 build is portable across every Apple Silicon Mac **only because
+`.cargo/config.toml` sets `GGML_NATIVE=OFF`.** Without it, ggml tunes to whoever
+compiled it and a core built on an M2 or later contains `i8mm` instructions that
+`SIGILL` on an M1 — the same class of bug as the x86 one, on ARM, and invisible
+to whoever built it. Do not remove that setting to chase a benchmark, and do not
+"fix" a macOS build failure in ggml by moving to a newer Xcode: that makes it
+compile *by enabling the instructions*, which ships the crash. See
+LEARNINGS.md, "aarch64 mandates NEON, but ggml opts into more than NEON".
+
+The release job also asserts `uname -m` is `arm64`, because an Intel runner would
+produce an artefact identical in name and version to a correct one.
 
 **The Python conformance run is not in CI.** `./protocol/run-suite.sh python` passes
 locally and is the drift protection that keeps two implementations honest, but it
