@@ -186,11 +186,66 @@ jobs:
           curl -sL -o ~/.cache/raneen/models/ggml-base.en-q5_1.bin \
             https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
 
+      # ~3.5 MB of ONNX, cached on the fetch script so a change to which
+      # models it pulls invalidates it.
+      - name: Cache wake-word models
+        id: wakeword
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/raneen/wakeword
+          key: wakeword-${{ hashFiles('tools/fetch-wakeword-models.sh') }}
+
+      # Without these the two wake-word cases skip, and a skipped case is
+      # not a passing one. CI was running 7 of 11 and reporting success.
+      - name: Fetch wake-word models
+        if: steps.wakeword.outputs.cache-hit != 'true'
+        run: ./tools/fetch-wakeword-models.sh
+
+      # Same reasoning: the two cases that cover always-on recording and
+      # concurrent dictation need a Python that can import zmq.
+      # `--break-system-packages` because the runner's python3 is marked
+      # externally managed, and a plain `--user` install fails on it. The
+      # suite finds this via the user site directory, which is on sys.path.
+      - name: Install pyzmq
+        run: python3 -m pip install --user --break-system-packages pyzmq
+
       - name: Build helper
         run: cargo build --release --manifest-path crates/raneen-core/Cargo.toml
 
+      # Strict: on a runner where every optional dependency is installed
+      # deliberately, a skip means the installation broke rather than that a
+      # tool is absent.
       - name: Run conformance suite
+        env:
+          RANEEN_SUITE_STRICT: "1"
         run: ./protocol/run-suite.sh rust
+
+  # The Swift shell. 145 tests that had never run in CI — the socket
+  # transport, the argv the core is launched with, the trigger-key rules,
+  # the meter and the text sink.
+  #
+  # **macOS 15 because the runner must be Apple Silicon.** aarch64 mandates
+  # NEON, which is why one build covers every Apple Silicon Mac and every
+  # Pi 4/5; an Intel runner would build something we do not ship. This job
+  # deliberately does not sign, so it needs no secrets and runs on forks —
+  # signing belongs to release.yml.
+  raneen-app:
+    name: Raneen app unit tests (Swift)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: apps/Raneen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Tests
+        run: swift test
 
   lint:
     name: ruff

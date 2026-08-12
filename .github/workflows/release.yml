@@ -1,0 +1,266 @@
+name: Release
+
+# Tag-driven, so a release is a deliberate act with a name attached:
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# `workflow_dispatch` exists to prove the signing and notarisation path
+# without minting a version. It builds and signs but does not publish.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: Raneen.dmg (signed, notarised)
+    # **Apple Silicon, and this is not a preference.** whisper.cpp selects
+    # its ISA at compile time; aarch64 mandates NEON, so one arm64 build is
+    # correct on every Apple Silicon Mac. An x86_64 build would have to pick
+    # an AVX baseline and would then either crash on older CPUs or leave
+    # performance on newer ones — see ROADMAP, "deliberately not doing".
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checked before anything is built, because the alternative is finding
+      # out twenty minutes in via a `codesign` error that names none of this.
+      # An empty secret is worse than a missing one: `make dmg IDENTITY=""`
+      # sets the variable to empty rather than leaving it unset, so the
+      # Makefile's fallback never applies and signing fails obscurely.
+      - name: Check the secrets are present
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.NOTARY_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD \
+                      MACOS_KEYCHAIN_PASSWORD MACOS_SIGNING_IDENTITY \
+                      NOTARY_ISSUER_ID NOTARY_KEY_ID NOTARY_PRIVATE_KEY; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing"
+            echo "See docs/RELEASING.md for what each one is and how to produce it."
+            exit 1
+          fi
+          echo "all seven signing and notarisation secrets are set"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # whisper.cpp, the Silero C port and tract all build from source, so an
+      # uncached first run is minutes. Keyed on Cargo.lock, which is why that
+      # file is committed.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/raneen-core/target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('crates/raneen-core/Cargo.lock') }}
+
+      - name: Cache whisper model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/raneen/models
+          key: ggml-base.en-q5_1
+
+      - name: Download model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/raneen/models
+          curl -fsSL -o ~/.cache/raneen/models/ggml-base.en-q5_1.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
+
+      # ----- gates -------------------------------------------------------
+      #
+      # Run here as well as in tests.yml, deliberately. A tag can be pushed
+      # at a commit whose test run never finished, or was never triggered at
+      # all, and a signed notarised artefact is the one thing that must never
+      # ship untested.
+
+      - name: Rust unit tests
+        run: cargo test --release --manifest-path crates/raneen-core/Cargo.toml
+
+      - name: Swift unit tests
+        working-directory: apps/Raneen
+        run: swift test
+
+      - name: Fetch wake-word models
+        run: ./tools/fetch-wakeword-models.sh
+
+      - name: Install pyzmq
+        run: python3 -m pip install --user --break-system-packages pyzmq
+
+      - name: Conformance suite
+        env:
+          RANEEN_SUITE_STRICT: "1"
+        run: |
+          cargo build --release --manifest-path crates/raneen-core/Cargo.toml
+          ./protocol/run-suite.sh rust
+
+      # ----- version -----------------------------------------------------
+
+      # The tag is the version, so the bundle cannot disagree with the
+      # release it is attached to. Without this every build reports whatever
+      # is committed in Info.plist, and "which build is this" becomes
+      # unanswerable from the app itself.
+      #
+      # CFBundleVersion is the run number: it must increase for every build
+      # of a given version, and it is what macOS compares when deciding
+      # whether something is an upgrade.
+      - name: Stamp the version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "RANEEN_VERSION=$VERSION" >> "$GITHUB_ENV"
+          PLIST=apps/Raneen/Resources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          echo "version $VERSION build ${{ github.run_number }}"
+
+      # ----- signing -----------------------------------------------------
+
+      # A temporary keychain, deleted afterwards. The alternative — importing
+      # into the login keychain — leaves a private key on a shared runner
+      # image if a later step fails.
+      #
+      # `set-key-partition-list` is the step everyone omits and then spends
+      # an afternoon on: without it codesign has no permission to use the
+      # imported key non-interactively, so it blocks on a GUI prompt that
+      # cannot appear and the job hangs until it times out.
+      - name: Import the signing certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/raneen-signing.keychain-db"
+          CERT="$RUNNER_TEMP/certificate.p12"
+
+          echo "$CERTIFICATE_P12" | base64 --decode > "$CERT"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # No auto-lock: a long build must not lock the keychain mid-signing.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # In the search list so `security find-identity` — which the
+          # Makefile uses to auto-detect — can see it.
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+          rm -f "$CERT"
+          echo "identities available to codesign:"
+          security find-identity -v -p codesigning
+
+      # IDENTITY is passed explicitly rather than left to the Makefile's
+      # auto-detection: on a runner with one certificate they agree, and if a
+      # second is ever added, a build that silently picks the wrong one
+      # produces an artefact that fails Gatekeeper on a user's machine
+      # instead of failing here.
+      - name: Build, sign and package
+        env:
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        working-directory: apps/Raneen
+        run: make dmg IDENTITY="$IDENTITY"
+
+      - name: Verify the signature
+        working-directory: apps/Raneen
+        run: |
+          codesign --verify --deep --strict --verbose=2 build/Raneen.app
+          codesign -dvv build/Raneen.app 2>&1 | grep -E "Authority|TeamIdentifier"
+
+      # ----- notarisation ------------------------------------------------
+
+      # Without this, Gatekeeper refuses the app on any Mac that did not
+      # build it: the user sees "Apple could not verify Raneen is free of
+      # malware", with no obvious way past it. Signing alone is not enough
+      # for distribution.
+      #
+      # The App Store Connect API key is used rather than an Apple ID and
+      # app-specific password because it is scoped to notarisation, revocable
+      # on its own, and unaffected by two-factor prompts on the account.
+      - name: Notarise and staple
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.NOTARY_PRIVATE_KEY }}
+        working-directory: apps/Raneen
+        run: |
+          KEY="$RUNNER_TEMP/AuthKey.p8"
+          echo "$NOTARY_PRIVATE_KEY" | base64 --decode > "$KEY"
+
+          # --wait blocks until Apple answers, which is usually a minute or
+          # two. Failing here rather than publishing an unnotarised artefact
+          # is the entire point.
+          xcrun notarytool submit build/Raneen.dmg \
+            --key "$KEY" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+
+          # Staple the ticket into the DMG so Gatekeeper does not need the
+          # network to verify it — a first launch on a plane should work.
+          xcrun stapler staple build/Raneen.dmg
+          rm -f "$KEY"
+
+      # The real check: what Gatekeeper itself thinks, on a machine that is
+      # not the one that signed it. `spctl` on the mounted app is the closest
+      # a runner can get to a user's first double-click.
+      - name: Gatekeeper assessment
+        working-directory: apps/Raneen
+        run: |
+          xcrun stapler validate build/Raneen.dmg
+          MOUNT=$(mktemp -d)
+          hdiutil attach build/Raneen.dmg -mountpoint "$MOUNT" -nobrowse -quiet
+          spctl --assess --type execute --verbose "$MOUNT/Raneen.app"
+          hdiutil detach "$MOUNT" -quiet
+
+      - name: Rename for release
+        working-directory: apps/Raneen
+        run: mv build/Raneen.dmg "build/Raneen-${RANEEN_VERSION}-arm64.dmg"
+
+      - name: Upload the artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Raneen-${{ env.RANEEN_VERSION }}-arm64
+          path: apps/Raneen/build/*.dmg
+          if-no-files-found: error
+
+      # Only for a real tag. A manual run proves the pipeline without
+      # publishing anything, which is what makes it safe to use as a check.
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Raneen $RANEEN_VERSION" \
+            --generate-notes \
+            --verify-tag \
+            apps/Raneen/build/*.dmg
+
+      # `if: always()` because a failure between import and here would
+      # otherwise leave the private key in a keychain on the runner.
+      - name: Remove the keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/raneen-signing.keychain-db" || true
+          security list-keychain -d user -s login.keychain-db || true

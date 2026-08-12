@@ -3,10 +3,19 @@
 #
 #   ./protocol/run-suite.sh rust
 #   ./protocol/run-suite.sh python
+#   RANEEN_SUITE_STRICT=1 ./protocol/run-suite.sh rust    # a skip is a failure
 #
 # Each case pins behaviour that a real bug has broken at least once, so a
 # failure here is a regression rather than a style disagreement.
+#
+# **Strict mode is for CI.** Cases skip when an optional dependency is
+# missing — pyzmq, or the wake-word models — which is right on a developer's
+# machine and wrong on a build server, where every dependency is installed
+# on purpose. Without this, CI ran 7 of 11 cases and reported success: the
+# summary line said "7 passed" and nothing said what had not been tried.
 set -uo pipefail
+
+STRICT="${RANEEN_SUITE_STRICT:-0}"
 
 IMPL="${1:-rust}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -234,5 +243,13 @@ if [ "$skipped" -gt 0 ]; then
   echo "  $IMPL: $pass passed, $fail failed, $skipped SKIPPED"
 else
   echo "  $IMPL: $pass passed, $fail failed"
+fi
+
+if [ "$skipped" -gt 0 ] && [ "$STRICT" = "1" ]; then
+  echo
+  echo "  RANEEN_SUITE_STRICT=1 and $skipped case group(s) were skipped."
+  echo "  Every optional dependency is meant to be installed here, so a skip"
+  echo "  is a broken build rather than an absent tool."
+  exit 1
 fi
 exit $(( fail > 0 ))
