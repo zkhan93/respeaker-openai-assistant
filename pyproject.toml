@@ -12,3 +12,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+# All three workspace packages are ours, so they belong in the first-party
+# import block rather than being mixed in with pypi dependencies. Without
+# this, `voice_core` sorts next to `numpy` and the import blocks stop
+# communicating the layering.
+known-first-party = ["voice_core", "voice_assistant", "voice_desktop"]

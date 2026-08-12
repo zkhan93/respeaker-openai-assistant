@@ -3,11 +3,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 
-from voice_assistant.core import (
-    available_model_names,
-    ensure_model,
-    get_model_path,
-)
+from voice_core.hotword.detector import available_model_names, ensure_model, get_model_path
 
 DEFAULT_HOTWORDS: tuple[str, ...] = ("alexa",)
 

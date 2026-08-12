@@ -1,0 +1,32 @@
+[package]
+name = "raneen-core"
+version = "0.1.0"
+edition = "2021"
+description = "The Raneen core: audio in, text out. Speaks the newline-JSON helper protocol (see protocol/README.md)."
+
+[dependencies]
+# whisper.cpp bindings. Pulls and builds whisper.cpp from source, so the
+# first build is minutes and later ones are seconds.
+whisper-rs = "0.14"
+serde_json = "1"
+# WAV parsing, for `bench` only. Pure Rust, no C, ~1k lines.
+hound = "3"
+libc = "0.2"
+silero-vad-crs = { version = "0.4", features = ["auto"] }
+ureq = "3.4.0"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+zmq = "0.10.0"
+# Wake word. Pure Rust, compiles in — see src/hotword/mod.rs for why
+# this rather than ONNX Runtime.
+tract-onnx = "0.21"
+
+[profile.release]
+# The bundle-size half of the story: LTO plus one codegen unit lets the
+# linker drop everything whisper.cpp exports that we never call.
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.14", features = ["metal"] }

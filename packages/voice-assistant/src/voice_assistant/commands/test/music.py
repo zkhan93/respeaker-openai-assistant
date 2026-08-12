@@ -41,7 +41,7 @@ from pathlib import Path
 
 from voice_assistant.config import load_config
 from voice_assistant.consumers.music import DuckController, MusicConsumer
-from voice_assistant.core.event_bus import (
+from voice_core.bus.event_bus import (
     ConversationTurnEndedEvent,
     ConversationTurnStartedEvent,
     EventBus,

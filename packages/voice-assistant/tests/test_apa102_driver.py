@@ -7,6 +7,7 @@ driver's SPI protocol against it — no hardware, no real ``spidev``.
 """
 
 import pytest
+
 from voice_assistant.consumers.led import apa102_driver
 from voice_assistant.consumers.led.apa102_driver import APA102
 

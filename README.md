@@ -1,770 +1,253 @@
-# Voice Assistant for ReSpeaker 4-Mic Array
+# Raneen
 
-A voice assistant service for Raspberry Pi using the ReSpeaker 4-Mic Array, with local hotword detection ("alexa") and OpenAI integration.
+**Audio in, text out.** One Rust core, several shells: a macOS dictation app, a
+Raspberry Pi voice appliance, and a desktop CLI for Linux and Windows.
 
-## Features
+> **If you came here for the ReSpeaker Pi assistant, it still works** — that is
+> where this started, and it is still shipping. See
+> [The Pi appliance](#the-pi-appliance). What changed is that the pipeline it
+> pioneered now lives in a shared core, so the same code serves a Mac.
 
-- 🎤 **Local Hotword Detection**: openWakeWord for offline "alexa" wake word detection
-- 🔊 **ReSpeaker 4-Mic Array**: Full support for AC108 device (paInt16 mono)
-- 🤖 **OpenAI Integration**: Speech-to-text with Whisper, future Realtime API support
-- 🎯 **Real-Time Audio**: Multi-consumer architecture with callback-based capture
-- 📡 **Event-Driven**: Pub-sub system for decoupled components
-- 🐍 **Modern Python**: Built with Python 3.11+ using `uv` package manager
+Two rules explain the whole layout:
 
-## Quick Start
+1. **The core never touches a device.** It takes PCM16 bytes on a socket and
+   writes newline-JSON events to stdout. No microphones, no speakers, no files.
+2. **The core never decides what the text is for.** Dictation types it, the
+   assistant answers it, a recorder files it — all consumers of one event.
+
+Those are [`AD-16`](docs/DECISIONS.md) and the consumer boundary, and they are
+the reason a Swift app and a Python appliance can share one transcription engine.
+
+---
+
+## What is in the box
+
+| | Where | Language | Status |
+| --- | --- | --- | --- |
+| **The core** | `crates/raneen-core` | Rust | local + remote + streaming STT, Silero VAD, always-on recorder, ZeroMQ |
+| **Raneen** — macOS dictation | `apps/Raneen` | Swift | ships as a signed DMG; hold a key, speak, text appears |
+| **Pi appliance** | `packages/voice-assistant` | Python | shipping — wake word → agent → speaker, LED ring, music ducking |
+| **Desktop CLI** | `packages/voice-desktop` | Python | Linux/Windows/macOS from a terminal |
+| **Shared Python core** | `packages/voice-core` | Python | ports, conversation state machine, reference pipeline |
+| **The contract** | `protocol/` | — | the wire spec plus a harness that checks *any* implementation |
+
+---
+
+## Quick start
+
+### The macOS app
+
+Needs Xcode command-line tools and a Rust toolchain. The first build takes
+several minutes — whisper.cpp compiles from source; later ones are seconds.
 
 ```bash
-# 1. Install dependencies
-export PATH="$HOME/.local/bin:$PATH"
-uv sync
+make -C apps/Raneen dmg
+```
 
-# 2. Configure
+That builds the Rust core, downloads the 57 MB `base.en` model into
+`~/.cache/raneen/models/`, assembles `apps/Raneen/build/Raneen.app`, signs it
+with the Developer ID in your keychain, and packages
+`apps/Raneen/build/Raneen.dmg`. Use `make app` to stop before signing, `make run`
+to launch it in the foreground with helper logs on the terminal.
+
+The whole bundle is six files: the Swift binary, `Info.plist`, two image assets,
+and one static core binary beside its model. There is no Xcode project — layout
+and signing are assembled by the Makefile so both stay reviewable as text.
+
+Once installed: **hold Right Command, speak, release.** The text lands in
+whatever app has focus. macOS asks for Microphone and Accessibility permission on
+first use — Accessibility is what lets the app see the key at all, and without it
+`CGEvent.tapCreate` just returns nil, so the app says *no Accessibility
+permission* in the menu bar rather than looking broken. Any bare right-hand
+modifier can be bound instead; they are all keys that produce no character, so
+the trigger cannot corrupt what you are dictating into.
+
+> **Sign it properly.** An ad-hoc signature is derived from the binary, so every
+> rebuild looks like a brand-new app to macOS: the Accessibility grant does not
+> carry over, the stale entry still looks ticked in System Settings, and the
+> hotkey stops working with no error anywhere. The Makefile warns when it has to
+> fall back to ad-hoc.
+
+### The core on its own
+
+The core is a normal CLI. It never opens a microphone — something else feeds it
+frames over an `AF_UNIX` socket — so the usual way to exercise it by hand is the
+conformance harness or the tools in `tools/`.
+
+```bash
+cargo build --release --manifest-path crates/raneen-core/Cargo.toml
+crates/raneen-core/target/release/raneen-core --help
+```
+
+```
+raneen-core bench <model.bin> <audio.wav> [--repeats N]
+raneen-core serve [model.bin] --audio-socket <path> [--trigger hold|vad|toggle|wakeword]
+                  [--vad silero|energy] [--stt local|remote|realtime] [--stt-url URL]
+                  [--wake-word word.onnx] [--zmq-pub tcp://*:5555] [--language L]
+```
+
+Three things worth knowing:
+
+- **`--stt` picks where transcription happens.** `local` runs whisper.cpp in
+  process; `remote` posts each segment to any OpenAI-compatible server (yours,
+  `speaches`, LocalAI, whisper.cpp server, or OpenAI); `realtime` streams to
+  OpenAI Realtime and emits `partial` events as you speak. The `--stt-url`
+  scheme decides on its own — `http(s)://` is batch, `ws(s)://` is streaming.
+- **`--zmq-pub` switches on always-on recording.** Speech-gated audio and every
+  core event go out on a ZeroMQ PUB socket for consumers elsewhere on the
+  network. It **records but never transcribes** — see
+  [PRODUCT.md](docs/PRODUCT.md).
+- **`--wake-word` runs openWakeWord natively, and reporting is separate from
+  reacting.** A detection is always published as a `hotword_detected` event
+  carrying the word's own name, in *every* trigger mode; it only opens a turn
+  under `--trigger wakeword`. So `--trigger hold --wake-word alexa_v0.1.onnx`
+  leaves push-to-talk exactly as it was and puts the detections on the wire
+  beside it. Point it at any openWakeWord-compatible `.onnx` — the shipped ones
+  or one you trained — and repeat the flag for several; they share the feature
+  models, so each extra word costs about 1 MB and 0.03 ms per frame. The models
+  are **not shipped in the app**: fetch them with
+  `./tools/fetch-wakeword-models.sh`, and point `RANEEN_WAKEWORD_DIR` anywhere
+  you like.
+- **`--language` is coupled to the model.** A `*.en` model given other speech
+  does not fail; it transliterates into English phonemes and returns confident
+  nonsense. Other languages need a multilingual model.
+
+Watch what a running core publishes:
+
+```bash
+.venv/bin/python tools/zmq-watch.py --audio off
+```
+
+### The Pi appliance
+
+Runs from its own directory, so the relative `config/config.yaml` path resolves.
+
+```bash
+cd packages/voice-assistant
 cp config/config.yaml.example config/config.yaml
-nano config/config.yaml  # Add your OpenAI API key
-
-# 3. Download models
-uv run voice-assistant download-models
-
-# 4. Test event system (no OpenAI needed)
-uv run voice-assistant test-events
-
-# 5. Test speech-to-text (requires OpenAI API key)
-uv run voice-assistant test-stt
-```
-
-## Hardware Requirements
-
-- Raspberry Pi 4B (2GB or more)
-- ReSpeaker 4-Mic Array for Raspberry Pi
-- Internet connection for OpenAI API
-
-## Installation
-
-### System Dependencies
-
-These should already be installed on Raspberry Pi OS:
-- `portaudio19-dev` - Audio I/O
-- `libasound2-dev` - ALSA support
-- `python3-dev` - Python headers
-- `libffi-dev` - FFI library
-
-### Python Setup
-
-```bash
-cd /home/pi/llm-assistant/voice-assistant
-export PATH="$HOME/.local/bin:$PATH"
 uv sync
-```
-
-### Configuration
-
-```bash
-cp config/config.yaml.example config/config.yaml
-nano config/config.yaml
-```
-
-Add your OpenAI API key:
-```yaml
-openai:
-  api_key: "sk-..."  # Your actual API key
-```
-
-###  Download Hotword Models
-
-```bash
 uv run voice-assistant download-models
-```
-
-### Verify Installation
-
-```bash
 uv run voice-assistant verify
+uv run voice-assistant run
 ```
 
-## CLI Commands
+| Command | |
+| --- | --- |
+| `voice-assistant run` | the service — wake word, VAD, ZMQ broadcast, LEDs |
+| `voice-assistant verify` | check the install before blaming the hardware |
+| `voice-assistant config` | show the resolved configuration |
+| `voice-assistant list-audio-devices` | find the AC108 |
+| `voice-assistant test <cmd>` | hardware validation — see below |
 
-### Core Commands
+Test subcommands: `audio`, `record`, `hotword`, `hotword-native`, `events`,
+`led`, `led-events`, `assistant-flow`, `speaker`, `stt`, `stt-live`, `tts`,
+`music`. Start with `test events` — it needs no API key and shows every
+detection event as it happens, which is the fastest way to tell a microphone
+problem from a threshold problem.
+
+Tuning, wiring and troubleshooting live in
+[`packages/voice-assistant/README.md`](packages/voice-assistant/README.md).
+
+### The desktop CLI
 
 ```bash
-# Run the voice assistant (future)
-uv run voice-assistant run [--log-level DEBUG]
-
-# Show configuration
-uv run voice-assistant config
-
-# Verify setup
-uv run voice-assistant verify
-
-# Download hotword models
-uv run voice-assistant download-models
+uv sync
+uv run voice-desktop check      # exercise the real mic and speaker adapters
+uv run voice-desktop dictate    # start talking, no wake word
+uv run voice-desktop assistant  # wake word, spoken replies
 ```
 
-### Test Commands
+---
 
-```bash
-# Monitor all events in real-time (diagnostic tool)
-uv run voice-assistant test-events
-
-# Test speech-to-text (event-driven demo)
-uv run voice-assistant test-stt
-
-# Test OpenAI Realtime API (full voice conversation)
-uv run voice-assistant test-realtime
-
-# Test hotword detection (records 5s after "alexa")
-uv run voice-assistant test-hotword [--debug]
-
-# Test with native paInt16 mono (verification)
-uv run voice-assistant test-hotword-native
-
-# Test audio recording (15s capture & playback)
-uv run voice-assistant record [--duration 15]
-
-# Test audio hardware
-uv run voice-assistant test-audio
-```
-
-**Recommended Testing Flow:**
-1. **`test-events`** - See all events in real-time (no API key needed)
-   - Verify hotword detection works
-   - Check voice activity detection
-   - Understand event timing
-2. **`test-stt`** - Test full STT pipeline (requires API key)
-   - Verifies OpenAI integration
-   - Tests complete event-driven flow
-   - **How it works:**
-     - Say "alexa" → System starts recording
-     - Continue speaking → Audio captured
-     - Stop speaking (~1s pause) → Transcription sent to OpenAI
-     - Wait 1-3 seconds → Transcription displayed
-   - **Important:** Only speech after "alexa" is transcribed
-   - If you speak without saying "alexa", it's ignored (by design)
-   - **Multiple hotwords:** If you say "alexa" again before stopping, the recording restarts (allows correction/new command)
-
-3. **`test-realtime`** - Test OpenAI Realtime API (requires API key)
-   - Full bidirectional voice conversation with AI
-   - **How it works:**
-     - Say "alexa" → Connects to OpenAI Realtime API
-     - Speak your question/command → Streams audio to OpenAI
-     - Stop speaking (~1s pause) → AI processes and responds
-     - **AI speaks back!** → Plays audio response through speakers
-   - **Features:**
-     - Real-time audio streaming (no waiting for transcription)
-     - AI responds with voice (not just text)
-     - Natural conversation flow
-     - Say "alexa" again to interrupt/start new command
-   - **Best for:** Interactive conversations, questions that need spoken responses
-
-## Architecture
-
-### Overview
+## Repo map
 
 ```
-┌───────────────────────────────────────────────────────────┐
-│              Event-Driven Architecture                    │
-├───────────────────────────────────────────────────────────┤
-│                                                           │
-│  Audio Stream (Callback Thread)                          │
-│         ↓                                                 │
-│    ┌────────────────────┐                                 │
-│    │  AudioHandler      │  Emits VAD events               │
-│    │  (Producer + VAD)  │  Broadcasts audio to:           │
-│    └─────┬──────────┬───┘  • hotword_queue (skip-ahead)  │
-│          │          │      • audio_queue (buffered)       │
-│          │ VAD      │ Audio                               │
-│          │ Events   │ Frames                              │
-│          ↓          ↓                                      │
-│    ┌─────────┐  ┌──────────────────┐                      │
-│    │EventBus │  │VoiceDetection    │                      │
-│    │         │←─│Service           │                      │
-│    │         │  │(Hotword Loop)    │                      │
-│    └────┬────┘  └──────────────────┘                      │
-│         │                                                  │
-│         │ Events:                                          │
-│         │  • hotword_detected                              │
-│         │  • voice_activity_started                        │
-│         │  • voice_activity_stopped                        │
-│         │                                                  │
-│         ↓                                                  │
-│    ┌────────────┬────────────┬────────────┐               │
-│    ↓            ↓            ↓            ↓               │
-│ Consumer1   Consumer2    Consumer3    Consumer4           │
-│ (STT)       (Realtime)   (Recording)  (Custom)            │
-│                                                           │
-└───────────────────────────────────────────────────────────┘
+crates/raneen-core/     Rust — THE CORE. Buses, VAD, triggers, STT, ZeroMQ
+apps/Raneen/            Swift — macOS shell: Core Audio, hotkey, text insertion
+packages/               Python — uv workspace
+  voice-core/             ports, conversation layer, reference pipeline
+  voice-assistant/        Pi app: ALSA, APA102 LEDs, ZMQ, agent
+  voice-desktop/          desktop adapters, sidecar, CLI
+  alt-alexa-music-mcp/    music tools (Navidrome + YouTube, MCP server)
+protocol/               the wire contract. Everything here ASSERTS — CI runs it
+tools/                  human-facing: watch, inspect, try a real microphone
+examples/               for CONSUMERS of the wire format, not core developers
+docs/                   architecture, decisions, roadmap, measured facts
+legacy/                 pre-split consumers, kept for reference only
 ```
 
-### Key Concepts
-
-#### 1. Multi-Consumer Audio
-
-One audio stream broadcasts to multiple queues:
-
-- **hotword_queue** (size=3): Small, skip-ahead for low latency detection
-- **audio_queue** (size=100): Large, buffered for complete audio capture
-
-```python
-# Hotword detection (skip-ahead)
-audio = audio_handler.read_hotword_chunk()
-
-# Complete audio for streaming/transcription (buffered)
-audio = audio_handler.read_audio_chunk()
-```
-
-#### 2. Event-Driven
-
-Components communicate via events, not direct calls:
-
-**Available Events:**
-
-1. **hotword_detected** - Wake word detected
-```python
-event = HotwordEvent(
-    timestamp=now,
-    hotword="alexa",
-    score=0.95,
-    audio_queue_size=42
-)
-event_bus.publish("hotword_detected", event)
-```
-
-2. **voice_activity_started** - User started speaking
-```python
-event = VoiceActivityEvent(
-    timestamp=now,
-    activity_type='started'
-)
-event_bus.publish("voice_activity_started", event)
-```
-
-3. **voice_activity_stopped** - User stopped speaking
-```python
-event = VoiceActivityEvent(
-    timestamp=now,
-    activity_type='stopped',
-    duration=3.2  # seconds
-)
-event_bus.publish("voice_activity_stopped", event)
-```
-
-**Subscribing to Events:**
-
-```python
-# Subscribe to events
-event_bus.subscribe("hotword_detected", on_hotword)
-event_bus.subscribe("voice_activity_stopped", on_voice_stopped)
-
-# Example: Capture exact duration of user speech
-def on_hotword(event: HotwordEvent):
-    self.recording = True
-    # Start background thread to collect audio
-
-def on_voice_stopped(event: VoiceActivityEvent):
-    self.recording = False
-    # Transcribe collected audio (exact duration!)
-```
-
-#### 3. Real-Time Performance
-
-- **Callback mode**: Audio captured in background thread (non-blocking)
-- **Skip-ahead**: Hotword queue drops old frames to stay current
-- **Parallel consumers**: All process independently, no blocking
-
-#### 4. Voice Detection Service (Core Loop)
-
-The `VoiceDetectionService` is a reusable orchestration component that:
-- Runs the main detection loop (hotword detection)
-- Publishes hotword events
-- Integrates with AudioHandler (which publishes voice activity events)
-- Can be used by any command to build different functionality
-
-**Why separate from commands?**
-- Commands are UI/entry points
-- Core loop is reusable business logic
-- Different commands can use the same detection service with different consumers
-
-**Example Usage:**
-
-```python
-# Create core components
-event_bus = EventBus()
-audio_handler = AudioHandler(event_bus=event_bus)  # VAD events enabled
-hotword_detector = HotwordDetector()
-detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
-
-# Register consumers (they subscribe to events)
-stt_consumer = SpeechToTextConsumer(event_bus, audio_handler, api_key)
-realtime_consumer = RealtimeConsumer(event_bus, audio_handler, api_key)
-
-# Start audio stream
-audio_handler.start_stream()
-
-# Run detection loop (blocks until stopped)
-detection_service.start()
-```
-
-### Code Structure
-
-```
-src/voice_assistant/
-├── core/                        # Core components (producers & orchestration)
-│   ├── audio_handler.py         # Audio capture + VAD event emission
-│   ├── detection_service.py     # Detection loop (hotword + orchestration)
-│   ├── event_bus.py             # Pub-sub event system
-│   └── hotword_detector.py      # Wake word detection
-│
-├── consumers/                   # Event subscribers
-│   └── stt_consumer.py          # Speech-to-text consumer
-│
-├── services/                    # External services
-│   ├── openai_client.py         # OpenAI Realtime API client
-│   └── state_machine.py         # State management
-│
-├── commands/                    # CLI commands (use core components)
-│   ├── run.py                   # Main service command
-│   ├── test_stt.py              # Test STT consumer
-│   ├── test_hotword.py          # Hotword detection test
-│   └── ...                      # Other utilities
-│
-├── cli.py                   # Command-line interface
-├── config.py                # Configuration management
-└── main.py                  # Service orchestrator (future)
-```
-
-## Configuration
-
-Edit `config/config.yaml`:
-
-### Audio Settings
-
-```yaml
-audio:
-  device: "ac108"        # ALSA device name
-  sample_rate: 16000     # Hz
-  channels: 1            # Mono (works best with openWakeWord)
-  chunk_size: 1280       # 80ms chunks (required by openWakeWord)
-```
-
-### Hotword Detection
-
-```yaml
-hotword:
-  model: "alexa"
-  threshold: 0.5         # 0.0-1.0 (lower = more sensitive)
-```
-
-**Tuning**:
-- Lower (0.3-0.4): More sensitive, may have false positives
-- Higher (0.6-0.7): Less sensitive, may miss wake word
-- Use `--debug` to see scores and tune
-
-**Debouncing**: The system automatically prevents multiple hotword events for a single utterance using a 2-second cooldown period. This means after detecting "alexa" once, it won't fire another event for 2 seconds, even if the detection continues (which is normal as you speak the word).
-
-### Voice Activity Detection
-
-```yaml
-vad:
-  aggressiveness: 3      # 0-3 (recommended: 3)
-  speech_threshold: 3    # Consecutive frames (filters noise)
-  silence_threshold: 15  # Frames before stopping (~1 second)
-```
-
-**Aggressiveness** (0-3):
-- **0**: Least aggressive - detects any sound (not recommended)
-- **3**: Most aggressive - only clear speech (recommended)
-- Use 3 to avoid false triggers from taps, movements, background noise
-
-**Speech Threshold** (consecutive frames):
-- **3** (default): Requires 3 consecutive speech frames (~240ms)
-- **Higher (5-7)**: Stricter - ignores very brief sounds
-- **Lower (1-2)**: More sensitive - may trigger on brief noises
-- Filters out taps, clicks, and momentary sounds
-
-**Silence Threshold** (frames):
-- **15** (default): ~1 second of silence before stopping
-- **Higher (20-25)**: Waits longer before considering speech ended
-- **Lower (10-12)**: Faster response but may cut off pauses
-
-## How It Works
-
-### Hotword Detection
-
-1. Audio captured in background thread (callback mode)
-2. Broadcasted to `hotword_queue` (skip-ahead) and `audio_queue` (buffered)
-3. Hotword detector reads from `hotword_queue`
-4. When "alexa" detected and cooldown period passed → publishes `HotwordEvent`
-   - **Debouncing**: 2-second cooldown prevents duplicate events
-   - Single word "alexa" = single event (even though detection spans multiple frames)
-5. All subscribed consumers react independently
-
-### Speech-to-Text Consumer
-
-1. Subscribes to `hotword_detected` and `voice_activity_stopped` events
-2. When hotword detected:
-   - Starts recording from `audio_queue` in background thread
-   - If another hotword detected: restarts recording (allows correction)
-3. When voice activity stops:
-   - Stops recording and sends audio to OpenAI Whisper API
-   - Displays transcription
-4. Behavior:
-   - Only transcribes speech AFTER hotword
-   - Speech without hotword is ignored
-   - Multiple "alexa" → uses last one before voice stops
-
-### Realtime API Consumer
-
-1. Subscribes to `hotword_detected` and `voice_activity_stopped` events
-2. When hotword detected:
-   - Connects to OpenAI Realtime API via WebSocket
-   - Starts streaming audio from `audio_queue` in real-time
-   - If another hotword detected: cancels current response, restarts
-3. When voice activity stops:
-   - Commits audio buffer and requests AI response
-   - Receives audio response from OpenAI
-   - Plays audio back through speakers
-4. Features:
-   - Bidirectional audio streaming (send + receive)
-   - Low latency (real-time processing)
-   - AI speaks back with voice
-   - Interruption support (say "alexa" to cancel/restart)
-5. Architecture:
-   - Runs async event loop in background thread
-   - Audio streaming in separate thread
-   - Audio playback in separate thread
-   - All synchronized via event bus
-
-### Adding Custom Consumers
-
-```python
-from voice_assistant.core import EventBus, HotwordEvent, AudioHandler
-
-class MyConsumer:
-    def __init__(self, event_bus, audio_handler):
-        self.event_bus = event_bus
-        self.audio_handler = audio_handler
-        event_bus.subscribe("hotword_detected", self.on_hotword)
-    
-    def on_hotword(self, event: HotwordEvent):
-        # React to hotword
-        audio = self.audio_handler.read_audio_chunk()
-        # ... process audio ...
-    
-    def cleanup(self):
-        self.event_bus.unsubscribe("hotword_detected", self.on_hotword)
-```
-
-## Tuning Voice Activity Detection
-
-### Problem: False Triggers (taps, movements, background noise)
-
-**Symptoms:**
-- Voice activity events when you tap the desk
-- Events triggered by keyboard typing
-- Background sounds causing false starts
-
-**Solutions (in order of effectiveness):**
-
-1. **Increase aggressiveness to 3** (default)
-   ```yaml
-   vad:
-     aggressiveness: 3  # Most strict
-   ```
-
-2. **Increase speech threshold**
-   ```yaml
-   vad:
-     speech_threshold: 5  # Require 5 consecutive frames (~400ms)
-   ```
-   - Brief sounds (taps, clicks) won't trigger
-   - Real speech sustained longer than 400ms will trigger
-
-3. **Test with `test-events`**
-   ```bash
-   uv run voice-assistant test-events
-   # Tap desk, type, make noise
-   # Should NOT trigger voice activity events
-   # Only speaking should trigger
-   ```
-
-### Problem: Speech Not Detected
-
-**Symptoms:**
-- You speak but no voice activity event
-- Hotword detected but no speech activity
-
-**Solutions:**
-
-1. **Speak louder/clearer**
-   - VAD aggressiveness=3 requires clear speech
-   - Move closer to microphone
-
-2. **Lower speech threshold**
-   ```yaml
-   vad:
-     speech_threshold: 2  # More sensitive
-   ```
-
-3. **Lower aggressiveness (not recommended)**
-   ```yaml
-   vad:
-     aggressiveness: 2  # Less strict (may cause false triggers)
-   ```
-
-### Understanding the Settings
-
-```
-aggressiveness: 3  ← Filters out non-speech sounds
-       ↓
-speech_threshold: 3  ← Requires sustained sound (not brief tap)
-       ↓
-Voice Activity Started! 🗣️
-       ↓
-(user speaks...)
-       ↓
-silence_threshold: 15  ← Waits for pause before stopping
-       ↓
-Voice Activity Stopped! 🔇
-```
-
-**Recommended defaults** (already set):
-- `aggressiveness: 3` - Only clear speech
-- `speech_threshold: 3` - Filters taps/clicks (~240ms)
-- `silence_threshold: 15` - Natural pause (~1 second)
-
-## Troubleshooting
-
-### Realtime API Errors
-
-**Error: "Unknown parameter: 'session.modalities'"**
-
-This error occurred in older versions. The fix:
-- Removed `modalities` from session configuration
-- The API now infers modalities from context
-- **Already fixed** in current version
-
-**Error: "Invalid authentication" or "401 Unauthorized"**
-- Check your OpenAI API key in `config/config.yaml`
-- Ensure you have access to the Realtime API (requires payment method)
-- The model name should be `gpt-4o-realtime-preview-2024-12-17`
-
-**No audio playback from AI:**
-- Check speaker volume and connections
-- Verify ALSA playback device is working: `speaker-test -t wav -c 2`
-- OpenAI outputs 24kHz audio - ensure your speakers support it
-
-**High latency or delays:**
-- Check internet connection speed
-- Realtime API requires stable, low-latency connection
-- Consider using Ethernet instead of WiFi
-
-### Hotword Not Detecting
-
-**Check scores**:
-```bash
-uv run voice-assistant test-hotword --debug
-```
-
-Look for lines like:
-```
-Debug: Max score = 0.0129 (alexa), threshold = 0.5
-```
-
-**If scores are always 0.0000**:
-- Run `uv run voice-assistant download-models` (prints the actual on-disk cache path)
-- The wake-word model lives inside the installed `openwakeword` package, not in the project tree
-
-**If scores are low (0.01-0.3)**:
-- Speak louder or closer to mic
-- Lower threshold in config
-- Check audio levels: `alsamixer`
-
-**If scores are good but no detection**:
-- Check threshold setting
-- Ensure using correct audio format (paInt16 mono)
-
-### Audio Issues
-
-**Test audio capture**:
-```bash
-uv run voice-assistant record --duration 10
-```
-
-This records 10s and plays it back.
-
-**Check audio device**:
-```bash
-arecord -l
-uv run voice-assistant config
-```
-
-**Low audio levels**:
-```bash
-alsamixer
-# Adjust "Capture" or "ADC" levels
-```
-
-### Import Errors After Reorganization
-
-Update imports:
-```python
-# Old
-from voice_assistant.audio_handler import AudioHandler
-
-# New
-from voice_assistant.core import AudioHandler
-# or
-from voice_assistant.core.audio_handler import AudioHandler
-```
-
-### Performance Issues
-
-Check queue status in logs:
-```
-hotword_queue: 0-3 frames (good - skip-ahead working)
-audio_queue: 10-50 frames (good - buffering)
-```
-
-If audio_queue grows >80 frames, system may be falling behind.
-
-### Audio Playback Issues
-
-**Test speaker first:**
-```bash
-# Quick speaker test (plays a 440Hz beep)
-uv run python test_speaker.py
-
-# Or use system tools
-speaker-test -t sine -f 440 -l 1
-```
-
-**No audio from AI response:**
-1. Check if audio chunks are being received:
-   - Look for `"Received audio delta"` in logs
-   - Should see `"🔊 AI is responding..."` message
-
-2. Verify default output device:
-   ```bash
-   aplay -l  # List playback devices
-   ```
-
-3. Check ALSA mixer:
-   ```bash
-   alsamixer
-   # Press F6 to select sound card
-   # Adjust "Master" or "PCM" volume
-   ```
-
-4. Test with different output device:
-   ```python
-   # In realtime_consumer.py, specify device index
-   self.playback_stream = self.audio.open(
-       ...
-       output_device_index=0,  # Try different indices
-   )
-   ```
-
-5. Check logs for OpenAI events:
-   - `response.audio.delta` - Audio chunks received
-   - `response.audio.done` - Audio response complete
-   - `Event: response.content_part.added` - Response structure
-
-**Audio choppy or distorted:**
-- Increase `frames_per_buffer` in playback stream (try 2048 or 4096)
-- Check system load: `top` or `htop`
-
-## Running as Service (Future)
-
-```bash
-# Install
-sudo cp voice-assistant.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable voice-assistant
-sudo systemctl start voice-assistant
-
-# Monitor
-sudo journalctl -u voice-assistant -f
-```
+Scripts are filed by **what they do, not who wrote them**: if it has a pass/fail
+it belongs in `protocol/`; if a person reads its output it is a tool. That split
+was learned the hard way — a script CI never runs cannot fail loudly.
+
+---
 
 ## Development
 
-### Project Setup
-
 ```bash
-# Clone
-git clone <repo>
-cd voice-assistant
-
-# Install
-uv sync
-
-# Run tests
-uv run pytest
-
-# Lint
-uv run ruff check src/
+# Rust core — unit tests are hermetic: no model, no audio hardware
+cargo test --release --manifest-path crates/raneen-core/Cargo.toml
+cargo fmt --manifest-path crates/raneen-core/Cargo.toml --check
+cargo clippy --release --manifest-path crates/raneen-core/Cargo.toml -- -D warnings
 ```
 
-### Code Style
+```bash
+# The conformance suite — spawns a real helper, streams real audio, asserts
+# on transcripts. Add `python` to run the same cases against the Python core.
+./protocol/run-suite.sh rust
+```
 
-- Use `ruff` for linting and formatting
-- Follow PEP 8
-- Type hints where appropriate
-- Docstrings for public APIs
+```bash
+# Python
+uvx ruff check packages/ && uvx ruff format --check packages/
+cd packages/voice-core && uv run pytest
+```
 
-### Adding Features
+The conformance suite is the anti-drift check, not a duplicate of the unit
+tests. Every case pins behaviour that a real bug has broken at least once:
+last-word truncation, VAD segmentation, false triggers on non-speech, remote
+fallback when the network dies. It earned its keep on the first run by catching
+one implementation losing the first ~320 ms of every stream.
 
-1. **New Consumer**: Add to `src/voice_assistant/consumers/`
-2. **New Service**: Add to `src/voice_assistant/services/`
-3. **New Command**: Add to `src/voice_assistant/commands/` and `cli.py`
-4. **Core Component**: Add to `src/voice_assistant/core/`
+---
 
-## Technical Details
+## Documentation
 
-### Audio Format
+| | |
+| --- | --- |
+| [docs/PRODUCT.md](docs/PRODUCT.md) | what is being shipped and what is left. **Start here** |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | layers, boundaries, repo layout, the memory rules |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | where the project is and what happens next |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | `AD-1`…`AD-18` — why each boundary is where it is, with rejected alternatives |
+| [docs/LEARNINGS.md](docs/LEARNINGS.md) | measured facts, most of which contradict the obvious answer |
+| [protocol/README.md](protocol/README.md) | the wire contract's only authority |
+| [tools/README.md](tools/README.md) | what each tool is for |
 
-- **Capture**: paInt16 mono @ 16kHz
-- **Chunks**: 1280 samples (80ms) - required by openWakeWord
-- **Queues**: Separate for hotword (skip-ahead) and consumers (buffered)
+**About to move a boundary?** Read the relevant `AD-n` first. Several were paid
+for with bugs that took hours to find.
 
-### Hotword Detection
+---
 
-- **Library**: openWakeWord (TensorFlow Lite)
-- **Model**: alexa_v0.1.tflite
-- **Input**: int16 numpy array (not float32!)
-- **Stateful**: Needs every frame for context
+## Hardware
 
-### Real-Time Performance
+The Pi appliance targets a **Raspberry Pi 4B** with a **ReSpeaker 4-Mic Array**:
+AC108 ALSA capture, 12 APA102 LEDs on SPI bus 0 device 1, power on GPIO 5. Audio
+throughout is **PCM16 · 16 kHz · mono · 1280-sample (80 ms) frames** — the frame
+size openWakeWord requires, and the format the protocol fixes rather than
+negotiates.
 
-**Before optimization**:
-- Blocking read: 62ms
-- Detection: 18ms
-- Total: 80ms (falling behind 0.13ms/frame)
-
-**After optimization**:
-- Callback mode: ~0ms (background thread)
-- Detection: 18ms
-- Total: 18ms (real-time capable!)
-
-## Known Issues
-
-1. **NumPy 2.x incompatibility**: Constrained to numpy <2.0 for tflite-runtime
-2. **ALSA warnings**: Harmless warnings about unavailable devices (ignore)
-3. **GPU discovery warning**: Normal on Raspberry Pi (uses CPU)
-
-## Future Enhancements
-
-- [ ] OpenAI Realtime API consumer (bidirectional streaming)
-- [ ] Recording consumer (save conversations)
-- [ ] Analytics consumer (usage tracking)
-- [ ] Web UI for monitoring
-- [ ] Multi-hotword support
-- [ ] Custom wake word training
+The macOS app needs Apple Silicon. `aarch64` mandates NEON, which is why one
+build covers every Pi 4/5 and every Apple Silicon Mac; x86 is deliberately not
+shipped yet, because whisper.cpp's compile-time ISA selection makes one binary
+either crash on older CPUs or leave performance on newer ones.
 
 ## Credits
 
-- [openWakeWord](https://github.com/dscripka/openWakeWord) - Local hotword detection
-- [OpenAI](https://platform.openai.com/) - Whisper API & Realtime API
-- [ReSpeaker 4-Mic Array](https://wiki.seeedstudio.com/ReSpeaker_4_Mic_Array_for_Raspberry_Pi/) - Hardware
+[whisper.cpp](https://github.com/ggerganov/whisper.cpp) ·
+[Silero VAD](https://github.com/snakers4/silero-vad) ·
+[openWakeWord](https://github.com/dscripka/openWakeWord) ·
+[OpenAI](https://platform.openai.com/) ·
+[ReSpeaker 4-Mic Array](https://wiki.seeedstudio.com/ReSpeaker_4_Mic_Array_for_Raspberry_Pi/)
 
 ## License
 

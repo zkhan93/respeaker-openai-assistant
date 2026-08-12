@@ -1,16 +1,18 @@
 [project]
 name = "voice-assistant"
 version = "0.1.0"
-description = "ReSpeaker 4-Mic Array audio core: capture, hotword/VAD detection, ZMQ broadcast, LED driver"
+description = "Raspberry Pi voice assistant app: ReSpeaker capture adapter, APA102 LED ring, ZMQ broadcast, music ducking"
 readme = "README.md"
 requires-python = ">=3.11"
+
+# This package is now the **Pi composition root**, not the whole system.
+# Everything platform-agnostic (buses, VAD, conversation state machine,
+# STT/TTS engines) lives in `voice-core`; what remains here is the Pi's
+# adapters plus the CLI that wires them together. See docs/ROADMAP.md AD-3.
 dependencies = [
-    "gpiozero>=2.0.1",
-    "numpy>=1.24.0,<2.0.0",
-    "faster-whisper>=1.2.0",
-    "openai>=2.14.0",
-    "openwakeword>=0.6.0",
-    "piper-tts>=1.4.0",
+    # The Pi build ships every engine backend, so it takes all the extras.
+    "voice-core[whisper,piper,openai,hotword,agent]",
+    "langchain-mcp-adapters>=0.2.2",
     "pygame>=2.6.1",
     "pyyaml>=6.0.3",
     "pyzmq>=26.0.0",
@@ -18,20 +20,21 @@ dependencies = [
     "setuptools>=80.9.0",
     "soxr>=1.0.0",
     "typer>=0.15.0",
-    "webrtcvad>=2.0.10",
     "websockets>=15.0.1",
     # Pi-only deps. PEP 508 markers keep `uv sync` working on macOS / WSL
     # dev boxes; on Linux/Pi they install normally. `pyaudio` needs the
     # portaudio system lib (no prebuilt wheels on macOS arm64), and
-    # `rpi-gpio` / `spidev` only build against Linux kernel headers.
+    # `gpiozero` / `rpi-gpio` / `spidev` only build against Linux kernel
+    # headers. The desktop app deliberately does NOT use pyaudio — see
+    # `voice-desktop`, which uses sounddevice instead.
+    "gpiozero>=2.0.1 ; sys_platform == 'linux'",
     "pyaudio>=0.2.14 ; sys_platform == 'linux'",
     "rpi-gpio>=0.7.1 ; sys_platform == 'linux'",
     "spidev>=3.8 ; sys_platform == 'linux'",
-    "deepagents>=0.6.3",
-    "langchain-openai>=1.2.2",
-    "langchain-mcp-adapters>=0.2.2",
-    "langgraph>=1.2.1",
 ]
+
+[tool.uv.sources]
+voice-core = { workspace = true }
 
 # Optional runtime dependency: `systemd-python` enables a structured
 # JournalHandler in voice_assistant.logging_config. It is intentionally NOT

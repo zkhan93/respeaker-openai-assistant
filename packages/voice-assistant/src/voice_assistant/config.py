@@ -75,8 +75,25 @@ class Config:
 
     @property
     def audio_channels(self) -> int:
-        """Get number of audio channels."""
-        return self.get("audio.channels", 4)
+        """Get number of capture channels.
+
+        Defaults to mono. Both webrtcvad and openWakeWord require single-
+        channel PCM16, and the AC108 delivers mono directly, so anything
+        other than 1 here needs a downmix step that does not exist yet.
+        (This default used to be 4, which only ever worked because
+        ``config.yaml.example`` overrides it with 1.)
+        """
+        return self.get("audio.channels", 1)
+
+    @property
+    def audio_chunk_size(self) -> int:
+        """Get samples per capture frame.
+
+        Must stay 1280 — 80 ms at 16 kHz, the frame size openWakeWord
+        requires and the size the VAD assumes when splitting into 20 ms
+        sub-frames.
+        """
+        return self.get("audio.chunk_size", 1280)
 
     @property
     def audio_output_device(self) -> str | None:

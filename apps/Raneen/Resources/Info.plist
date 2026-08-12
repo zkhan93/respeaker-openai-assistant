@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Raneen</string>
+    <key>CFBundleDisplayName</key>
+    <string>Raneen</string>
+    <key>CFBundleExecutable</key>
+    <string>Raneen</string>
+
+    <!-- Stable forever. TCC keys permission grants partly on this, so
+         changing it later silently resets every user's microphone and
+         Accessibility grants and they have to re-authorise. -->
+    <key>CFBundleIdentifier</key>
+    <string>com.nexuscraftlabs.raneen</string>
+
+    <!-- Name only, no extension: macOS appends .icns itself. Built from
+         the brand mark by scripts/make_icon.sh. -->
+    <key>CFBundleIconFile</key>
+    <string>Raneen</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Menu-bar only: no Dock icon, no app switcher entry, and
+         activating us does not pull focus away from whatever the user is
+         dictating into. main.swift sets .accessory to match, for the
+         case where the binary runs outside a bundle. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+
+    <!-- REQUIRED. Without this key macOS *terminates* the process the
+         moment it touches the microphone — not a denial dialog, an
+         immediate kill. The string is what the user reads in the
+         permission prompt, so it should say why, not what. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Raneen listens while you hold the dictation key, so it can turn what you say into text.</string>
+
+    <!-- There is deliberately no Accessibility key: Apple provides none.
+         It can only be granted in System Settings, and the most an app
+         can do is open that pane pre-populated. -->
+</dict>
+</plist>

@@ -32,10 +32,11 @@ def main() -> bool:
     # Check 2: Audio device
     print("2. Audio Device")
     try:
-        from voice_assistant.core import AudioHandler
+        from voice_assistant.adapters import PyAudioSource
 
-        audio_handler = AudioHandler()
-        device_index = audio_handler._find_device_index()
+        # Device resolution only — no stream is opened, so this check
+        # stays safe to run while something else holds the mic.
+        device_index = PyAudioSource()._find_device_index()
         print(f"   ✓ Found AC108 device (index {device_index})")
     except Exception as e:
         print(f"   ✗ AC108 device not found: {e}")
@@ -45,7 +46,7 @@ def main() -> bool:
     # Check 3: Hotword models
     print("3. Hotword Models")
     try:
-        from voice_assistant.core import get_model_path, is_model_available
+        from voice_core.hotword.detector import get_model_path, is_model_available
 
         model_name = "alexa"
         path = get_model_path(model_name) or "<unknown>"

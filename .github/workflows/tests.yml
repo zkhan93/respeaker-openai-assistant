@@ -1,7 +1,7 @@
 name: Tests
 
-# Runs the voice-assistant test suite on every push to main and on PRs
-# targeting main (so breakage is caught before it lands).
+# Runs the unit suites on every push to main and on PRs targeting main
+# (so breakage is caught before it lands).
 on:
   push:
     branches: [main]
@@ -9,6 +9,44 @@ on:
     branches: [main]
 
 jobs:
+  # voice-core carries the domain logic, so it gets the real dependency
+  # install: its base deps are tiny (numpy + webrtcvad-wheels, both with
+  # prebuilt wheels) and the boundary tests in tests/test_boundaries.py
+  # need a genuinely importable package to make their assertions mean
+  # anything. Optional extras (whisper/piper/openai/hotword/agent) are
+  # deliberately NOT installed — that is exactly what those tests check.
+  voice-core:
+    name: voice-core unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/voice-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Create virtualenv (Python 3.11)
+        run: uv venv .venv --python 3.11
+
+      - name: Install test dependencies
+        run: |
+          uv pip install --python .venv/bin/python pytest
+          uv pip install --python .venv/bin/python -e .
+
+      # The end-to-end speech test is skipped unless VOICE_E2E=1: it needs
+      # the whisper + piper extras and network access for model weights.
+      - name: Run tests
+        run: .venv/bin/python -m pytest
+
+  # The Pi app installs WITHOUT its runtime deps (--no-deps): they include
+  # native Pi-only libraries (pyaudio needs the portaudio system lib;
+  # rpi-gpio / spidev build against Linux/Pi headers) plus the heavy
+  # LLM/ASR stack. The remaining tests here cover the APA102 driver, which
+  # injects its own fake SPI device, and conftest.py stubs pyaudio.
   voice-assistant:
     name: voice-assistant unit tests
     runs-on: ubuntu-latest
@@ -26,22 +64,202 @@ jobs:
       - name: Create virtualenv (Python 3.11)
         run: uv venv .venv --python 3.11
 
-      # Install ONLY the test runner and the package itself, without its
-      # runtime dependencies (--no-deps). Those runtime deps include
-      # native, Pi-only libraries (pyaudio needs the portaudio system lib;
-      # rpi-gpio / spidev build against Linux/Pi headers) and a large
-      # LLM/ASR stack (faster-whisper, openwakeword, deepagents, langgraph)
-      # that the current unit tests do not need — the event bus is pure
-      # stdlib and tests/conftest.py stubs the native modules. Skipping
-      # them keeps CI fast (seconds) and free of native-build fragility.
-      #
-      # When tests start needing real runtime deps, split those into
-      # optional extras in pyproject.toml and install the relevant extra
-      # here instead of broadening this step to a full `uv sync`.
       - name: Install test dependencies
         run: |
           uv pip install --python .venv/bin/python pytest
+          uv pip install --python .venv/bin/python -e ../voice-core
           uv pip install --python .venv/bin/python -e . --no-deps
 
       - name: Run tests
         run: .venv/bin/python -m pytest
+
+  # The desktop suite is structural only — it asserts the sounddevice
+  # adapters still match the voice-core audio ports and never opens a
+  # device, so it runs fine on a CI box with no audio hardware. sounddevice
+  # itself installs from a wheel with PortAudio bundled.
+  voice-desktop:
+    name: voice-desktop unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/voice-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Create virtualenv (Python 3.11)
+        run: uv venv .venv --python 3.11
+
+      # --no-deps on the package itself skips the whisper/piper extras that
+      # voice-core[...] would pull in; the port-conformance tests only need
+      # voice-core's tiny base deps plus sounddevice.
+      - name: Install test dependencies
+        run: |
+          uv pip install --python .venv/bin/python pytest sounddevice
+          uv pip install --python .venv/bin/python -e ../voice-core
+          uv pip install --python .venv/bin/python -e . --no-deps
+
+      - name: Run tests
+        run: .venv/bin/python -m pytest
+
+  # The Rust core. Unit tests are pure and hermetic — bus, VAD state
+  # machine, tail padding, hallucination markers — and need no model and
+  # no audio hardware, so they run on any runner.
+  #
+  # whisper.cpp and the Silero C port are both built from source, so the
+  # first run is minutes. The cache keys on Cargo.lock, which is why that
+  # file is committed.
+  raneen-core:
+    name: raneen-core unit tests (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/raneen-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/raneen-core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/raneen-core/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+
+      - name: Tests
+        run: cargo test --release
+
+  # Conformance: the protocol suite driven against the Rust helper.
+  #
+  # This is the anti-drift check. It is NOT a duplicate of the unit tests
+  # — it spawns a real helper, streams real audio over a real socket, and
+  # asserts on transcripts. Every case here pins a behaviour that a real
+  # bug has broken at least once (last-word truncation, VAD segmentation,
+  # false triggers on non-speech).
+  #
+  # Downloads a 57 MB model, so it is cached on the model filename.
+  conformance:
+    name: protocol conformance (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/raneen-core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/raneen-core/Cargo.lock') }}
+
+      - name: Cache whisper model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/raneen/models
+          key: ggml-base.en-q5_1
+
+      - name: Download model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/raneen/models
+          curl -sL -o ~/.cache/raneen/models/ggml-base.en-q5_1.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
+
+      # ~3.5 MB of ONNX, cached on the fetch script so a change to which
+      # models it pulls invalidates it.
+      - name: Cache wake-word models
+        id: wakeword
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/raneen/wakeword
+          key: wakeword-${{ hashFiles('tools/fetch-wakeword-models.sh') }}
+
+      # Without these the two wake-word cases skip, and a skipped case is
+      # not a passing one. CI was running 7 of 11 and reporting success.
+      - name: Fetch wake-word models
+        if: steps.wakeword.outputs.cache-hit != 'true'
+        run: ./tools/fetch-wakeword-models.sh
+
+      # Same reasoning: the two cases that cover always-on recording and
+      # concurrent dictation need a Python that can import zmq.
+      # `--break-system-packages` because the runner's python3 is marked
+      # externally managed, and a plain `--user` install fails on it. The
+      # suite finds this via the user site directory, which is on sys.path.
+      - name: Install pyzmq
+        run: python3 -m pip install --user --break-system-packages pyzmq
+
+      - name: Build helper
+        run: cargo build --release --manifest-path crates/raneen-core/Cargo.toml
+
+      # Strict: on a runner where every optional dependency is installed
+      # deliberately, a skip means the installation broke rather than that a
+      # tool is absent.
+      - name: Run conformance suite
+        env:
+          RANEEN_SUITE_STRICT: "1"
+        run: ./protocol/run-suite.sh rust
+
+  # The Swift shell. 145 tests that had never run in CI — the socket
+  # transport, the argv the core is launched with, the trigger-key rules,
+  # the meter and the text sink.
+  #
+  # **macOS 15 because the runner must be Apple Silicon.** aarch64 mandates
+  # NEON, which is why one build covers every Apple Silicon Mac and every
+  # Pi 4/5; an Intel runner would build something we do not ship. This job
+  # deliberately does not sign, so it needs no secrets and runs on forks —
+  # signing belongs to release.yml.
+  raneen-app:
+    name: Raneen app unit tests (Swift)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: apps/Raneen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Tests
+        run: swift test
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Lint
+        run: uvx ruff check packages/
+
+      - name: Format check
+        run: uvx ruff format --check packages/

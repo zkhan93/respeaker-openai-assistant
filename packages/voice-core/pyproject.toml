@@ -1,0 +1,58 @@
+[project]
+name = "voice-core"
+version = "0.1.0"
+description = "Platform-agnostic voice assistant core: buses, VAD, conversation state machine, STT/TTS engines"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Base dependencies are deliberately tiny. Anything platform-specific
+# (audio device I/O, LEDs, hotkeys, text injection) belongs in an
+# adapter package, NOT here — see docs/ROADMAP.md AD-1/AD-2.
+#
+# webrtcvad is a C extension but builds/wheels on every target we care
+# about (Linux/Pi, macOS, Windows), and the VAD state machine is domain
+# logic, so it stays in the base set.
+dependencies = [
+    "numpy>=1.24.0,<2.0.0",
+    # webrtcvad-wheels, NOT the original webrtcvad. Two reasons, both of
+    # which matter more now that we build for more than one platform:
+    #  1. It ships prebuilt wheels for macOS/Windows/Linux, so no host
+    #     needs a C compiler to install the core.
+    #  2. The original does `import pkg_resources` at module scope, which
+    #     setuptools 81 removed — so `import webrtcvad` now fails outright
+    #     on a current environment. (This is why the pre-split package
+    #     carried an undocumented `setuptools` dependency; pinning
+    #     setuptools<81 would have been the alternative.)
+    # Same module name and API, so imports are unchanged.
+    "webrtcvad-wheels>=2.0.14",
+]
+
+[project.optional-dependencies]
+# Heavy engine backends. Apps declare only what they ship, e.g.
+# `voice-core[whisper,piper]` on the Pi vs `voice-core[openai]` for a
+# cloud-only desktop build. See ROADMAP AD-6.
+whisper = ["faster-whisper>=1.2.0"]
+piper = ["piper-tts>=1.4.0"]
+openai = ["openai>=2.14.0"]
+hotword = ["openwakeword>=0.6.0"]
+agent = [
+    "deepagents>=0.6.3",
+    "langchain-openai>=1.2.2",
+    "langgraph>=1.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voice_core"]

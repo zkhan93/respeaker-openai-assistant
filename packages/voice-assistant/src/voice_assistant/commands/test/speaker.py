@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Iterator
 
 from voice_assistant.config import load_config
-from voice_assistant.consumers.speaker import SpeakerManager
-from voice_assistant.core import EventBus, SpeakingStartedEvent, SpeakingStoppedEvent
+from voice_core.bus.event_bus import EventBus, SpeakingStartedEvent, SpeakingStoppedEvent
+from voice_core.pipeline.speaker import SpeakerManager
 
 logger = logging.getLogger(__name__)
 

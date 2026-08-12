@@ -7,16 +7,13 @@ import threading
 
 from voice_assistant.config import load_config
 from voice_assistant.consumers.led import LedConsumer
-from voice_assistant.core import (
-    AudioBroadcaster,
-    AudioHandler,
-    EventBus,
-    HotwordDetector,
-    VoiceDetectionService,
-    ensure_model,
-)
+from voice_assistant.core import AudioBroadcaster
 from voice_assistant.systemd_notify import notify as sd_notify
 from voice_assistant.systemd_notify import start_watchdog_thread
+from voice_assistant.wiring import make_audio_pipeline
+from voice_core.bus.event_bus import EventBus
+from voice_core.hotword.detector import HotwordDetector, ensure_model
+from voice_core.pipeline.detection_service import VoiceDetectionService
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +62,7 @@ def main(hotword: str | None = None) -> bool:
         )
 
     event_bus = EventBus()
-    audio_handler = AudioHandler(
-        event_bus=event_bus,
-        vad_aggressiveness=config.vad_aggressiveness,
-        silence_threshold=config.vad_silence_threshold,
-        speech_threshold=config.vad_speech_threshold,
-    )
+    audio_pipeline = make_audio_pipeline(config, event_bus)
 
     hotword_detector: HotwordDetector | None = None
     if hotword_available:
@@ -79,13 +71,13 @@ def main(hotword: str | None = None) -> bool:
             threshold=config.hotword_threshold,
         )
 
-    detection_service = VoiceDetectionService(audio_handler, event_bus, hotword_detector)
+    detection_service = VoiceDetectionService(audio_pipeline, event_bus, hotword_detector)
     led_consumer = LedConsumer(enabled=True)
 
     broadcaster: AudioBroadcaster | None = None
     if config.broadcaster_enabled:
         broadcaster = AudioBroadcaster(
-            audio_handler=audio_handler,
+            audio_pipeline=audio_pipeline,
             event_bus=event_bus,
             led_consumer=led_consumer,
             pub_endpoint=config.broadcaster_pub_endpoint,
@@ -99,7 +91,7 @@ def main(hotword: str | None = None) -> bool:
             config.broadcaster_pull_endpoint,
         )
 
-    audio_handler.start_stream()
+    audio_pipeline.start()
     logger.info("audio stream started (16kHz PCM16, callback mode)")
     if hotword_available:
         logger.info("listening for %r and voice activity", hotword_name)
@@ -123,15 +115,15 @@ def main(hotword: str | None = None) -> bool:
         sd_notify("STOPPING=1")
         watchdog_stop.set()
         logger.info("shutting down")
-        # Stop producers (audio_handler publishes VAD events) before
+        # Stop producers (audio_pipeline publishes VAD events) before
         # subscribers, then drain the bus so no worker is mid-callback
         # while its component is torn down.
-        audio_handler.stop_stream()
+        audio_pipeline.stop()
         if broadcaster is not None:
             broadcaster.cleanup()
         event_bus.shutdown()
         led_consumer.cleanup()
-        audio_handler.cleanup()
+        audio_pipeline.cleanup()
         logger.info("shutdown complete")
 
 

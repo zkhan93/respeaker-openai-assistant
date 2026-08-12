@@ -19,7 +19,7 @@ import wave
 from pathlib import Path
 
 from voice_assistant.config import load_config
-from voice_assistant.stt import available_engines, make_stt_engine
+from voice_core.stt import available_engines, make_stt_engine
 
 logger = logging.getLogger(__name__)
 

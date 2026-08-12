@@ -61,7 +61,22 @@ logs/
 *.mp3
 *.flac
 
+# ...except the conformance fixtures, which ARE part of the contract.
+# `protocol/README.md` says they are committed rather than generated,
+# because `say` is macOS-only and its output varies by installed voice —
+# a fixture that differs per machine cannot pin a regression. The blanket
+# `*.wav` above meant they were never actually tracked, so a fresh
+# checkout had no audio and CI's conformance job could not have run.
+!protocol/fixtures/*.wav
+
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Swift/PyInstaller build output for the macOS app
+apps/*/build/
+apps/*/.build/
+
+# Rust helper spike
+crates/*/target/
