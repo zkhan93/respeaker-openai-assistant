@@ -89,6 +89,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // defaults live in `HelperConfig` and `SettingsStore.current` falls
         // back to them directly.
         settings.onApply = { [weak self] in self?.restartHelper() }
+        // Straight through to the panel: the choice changes nothing the
+        // core does, so it does not wait for Apply and does not wait for
+        // the turn to finish either — swapping it mid-sentence costs
+        // nothing but the animation starting over.
+        settings.onIndicatorStyleChange = { [weak self] style in self?.panel.restyle(style) }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         show(.starting)

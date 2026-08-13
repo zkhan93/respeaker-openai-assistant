@@ -26,19 +26,25 @@ import AppKit
 /// it would go.
 final class ListeningPanel: NSPanel {
 
-    private let meter = ActivityMeter(frame: .zero)
-
-    /// Small on purpose. This sits over whatever the user is working in,
-    /// so it has to be readable at a glance and then forgettable — a
-    /// panel large enough to study is a panel that is in the way.
-    private static let size = NSSize(width: 62, height: 26)
+    /// The chosen animation, and the view drawing it.
+    ///
+    /// **The style owns the panel's size**, so switching between a bar row
+    /// and a ring resizes the window rather than squashing one into the
+    /// other's frame. Small either way, on purpose: this sits over whatever
+    /// the user is working in, so it has to be readable at a glance and
+    /// then forgettable — a panel large enough to study is a panel that is
+    /// in the way.
+    private var style: IndicatorStyle
+    private var indicator: IndicatorView
 
     /// Above the Dock, clear of the very bottom edge.
     private static let bottomMargin: CGFloat = 90
 
-    init() {
+    init(style: IndicatorStyle = IndicatorPreference.current()) {
+        self.style = style
+        self.indicator = style.makeView()
         super.init(
-            contentRect: NSRect(origin: .zero, size: Self.size),
+            contentRect: NSRect(origin: .zero, size: style.panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -48,7 +54,6 @@ final class ListeningPanel: NSPanel {
         level = .statusBar
         backgroundColor = .clear
         isOpaque = false
-        hasShadow = true
         ignoresMouseEvents = true
         hidesOnDeactivate = false
 
@@ -57,37 +62,107 @@ final class ListeningPanel: NSPanel {
         // completely ordinary thing to do.
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
-        // Solid black rather than a blurred HUD material.
-        //
-        // `NSVisualEffectView` is translucent by design — it samples
-        // whatever is behind the panel, so the bars sat on a mid-grey
-        // that shifted with the wallpaper, and white-on-grey is barely a
-        // contrast at all. A fixed background means the wave has one
-        // known colour to stand against no matter what it floats over.
-        let container = NSView(frame: NSRect(origin: .zero, size: Self.size))
+        let container = NSView(frame: NSRect(origin: .zero, size: style.panelSize))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.cgColor
-        // Half the height gives a capsule: the short sides become full
-        // semicircles rather than merely rounded corners.
-        container.layer?.cornerRadius = Self.size.height / 2
-        container.layer?.masksToBounds = true
-        // A black capsule on a black background — a dark terminal, a
-        // full-screen editor — would be an invisible window with bars
-        // floating in mid-air. The hairline keeps its shape readable
-        // without being noticeable against anything lighter.
-        container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         container.autoresizingMask = [.width, .height]
-
-        // Tight insets, and tighter vertically than horizontally: the
-        // capsule's rounded ends already supply the side margin, while
-        // every point given away at the top and bottom comes straight off
-        // the wave's dynamic range — which is the thing being looked at.
-        meter.frame = container.bounds.insetBy(dx: 8, dy: 3)
-        meter.autoresizingMask = [.width, .height]
-        container.addSubview(meter)
-
+        container.addSubview(indicator)
         contentView = container
+
+        applyBackdrop()
+        layOutIndicator()
+    }
+
+    /// The capsule, or nothing at all.
+    ///
+    /// When the style asks for one it is **solid black rather than a
+    /// blurred HUD material**. `NSVisualEffectView` is translucent by
+    /// design — it samples whatever is behind the panel, so the bars sat on
+    /// a mid-grey that shifted with the wallpaper, and white-on-grey is
+    /// barely a contrast at all. A fixed background means the wave has one
+    /// known colour to stand against no matter what it floats over.
+    ///
+    /// The radial styles ask for no backdrop, and everything here has to be
+    /// undone rather than merely left unset — this runs again on every
+    /// restyle, so a value set for the previous style would survive into
+    /// the next one.
+    private func applyBackdrop() {
+        guard let layer = contentView?.layer else { return }
+
+        if style.hasBackdrop {
+            layer.backgroundColor = NSColor.black.cgColor
+            // Half the height: a capsule for the bar row, whose short sides
+            // become full semicircles rather than merely rounded corners.
+            layer.cornerRadius = style.cornerRadius
+            // A black capsule on a black background — a dark terminal, a
+            // full-screen editor — would be an invisible window with bars
+            // floating in mid-air. The hairline keeps its shape readable
+            // without being noticeable against anything lighter.
+            layer.borderWidth = 1
+            layer.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            // Clipped to the capsule, which is what makes the ends round.
+            layer.masksToBounds = true
+        } else {
+            layer.backgroundColor = NSColor.clear.cgColor
+            layer.cornerRadius = 0
+            layer.borderWidth = 0
+            // **Unclipped on purpose.** The halo each mark draws for
+            // contrast extends past its own line, and clipping to the
+            // bounds would shave it off at the panel edge — a faint square
+            // crop around a shape with no square in it.
+            layer.masksToBounds = false
+        }
+
+        // The window shadow is computed from the content's opacity, so with
+        // a transparent panel it has nothing to trace but the marks
+        // themselves — and it caches, which on animating content leaves the
+        // previous frame's shadow behind the current one. The halo is the
+        // replacement, drawn per mark, per frame.
+        hasShadow = style.hasBackdrop
+        invalidateShadow()
+    }
+
+    /// Tight insets — every point given away comes straight off the
+    /// animation's dynamic range, which is the thing being looked at. How
+    /// tight depends on the shape, so the style supplies it.
+    private func layOutIndicator() {
+        guard let container = contentView else { return }
+        indicator.frame = container.bounds.insetBy(
+            dx: style.contentInset.width, dy: style.contentInset.height)
+        indicator.autoresizingMask = [.width, .height]
+    }
+
+    // MARK: - Style
+
+    /// Swap the animation without a relaunch.
+    ///
+    /// Applied live because nothing about the choice reaches the core — it
+    /// is the same level events drawn differently. Rebuilding rather than
+    /// reconfiguring: the styles share no state beyond the level pipeline,
+    /// and a view that had to be able to become another style would be a
+    /// third implementation of all three.
+    func restyle(_ next: IndicatorStyle) {
+        guard next != style, let container = contentView else { return }
+        let wasVisible = isVisible
+
+        indicator.stopAnimating()
+        indicator.removeFromSuperview()
+
+        style = next
+        indicator = next.makeView()
+
+        setContentSize(next.panelSize)
+        container.addSubview(indicator)
+        applyBackdrop()
+        layOutIndicator()
+
+        // Resizing moves the panel off centre, and a style chosen while
+        // dictation is running should not leave the indicator sitting
+        // askew until the next turn.
+        if wasVisible {
+            reposition()
+            indicator.reset()
+            indicator.startAnimating()
+        }
     }
 
     /// Never key, never main — see the class note.
@@ -98,8 +173,8 @@ final class ListeningPanel: NSPanel {
 
     func show() {
         reposition()
-        meter.reset()
-        meter.startAnimating()
+        indicator.reset()
+        indicator.startAnimating()
         alphaValue = 0
         // Regardless: the app is .accessory and not active, and
         // orderFront would be ignored.
@@ -116,12 +191,12 @@ final class ListeningPanel: NSPanel {
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
             self?.orderOut(nil)
-            self?.meter.stopAnimating()
+            self?.indicator.stopAnimating()
         }
     }
 
     func update(peak: Int, blocks: [Int]) {
-        meter.append(blocks: blocks.isEmpty ? [peak] : blocks)
+        indicator.append(blocks: blocks.isEmpty ? [peak] : blocks)
     }
 
     /// Bottom-centre of whichever screen the pointer is on — which is
@@ -135,7 +210,7 @@ final class ListeningPanel: NSPanel {
 
         setFrameOrigin(
             NSPoint(
-                x: frame.midX - Self.size.width / 2,
+                x: frame.midX - style.panelSize.width / 2,
                 y: frame.minY + Self.bottomMargin
             )
         )

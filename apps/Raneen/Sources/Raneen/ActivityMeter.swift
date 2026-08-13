@@ -42,8 +42,14 @@ import AppKit
 /// A bar jumps to a loud sound the moment it arrives, because lagging
 /// there feels unresponsive, and then falls back smoothly, because a bar
 /// that dropped as fast as it rose would flicker on every syllable
-/// boundary rather than dance.
-final class ActivityMeter: NSView {
+/// boundary rather than dance. The rule itself lives in `LevelStream`,
+/// which every indicator style shares; what is here is the part that is
+/// specific to a row of bars.
+///
+/// This is the default style and the calmest one. Unlike `BloomMeter` and
+/// `SwarmMeter` it has no clock of its own — it moves only when audio
+/// arrives, which is why it is still.
+final class ActivityMeter: NSView, IndicatorView {
 
     /// Odd, so there is a true centre bar for the shape to peak on.
     private static let barCount = 9
@@ -72,25 +78,11 @@ final class ActivityMeter: NSView {
     private static let centreRelease: CGFloat = 0.90
     private static let edgeRelease: CGFloat = 0.965
 
-    /// Interval between updates from the helper.
-    private static let updateInterval: TimeInterval = 0.02
-
-    /// Slightly longer, so a late update interrupts an animation still in
-    /// flight rather than leaving a bar frozen. An interrupted implicit
-    /// animation resumes from the current presentation value, so the
-    /// motion stays continuous either way.
+    /// Slightly longer than `LevelStream.updateInterval`, so a late update
+    /// interrupts an animation still in flight rather than leaving a bar
+    /// frozen. An interrupted implicit animation resumes from the current
+    /// presentation value, so the motion stays continuous either way.
     private static let animationDuration: CFTimeInterval = 0.024
-
-    /// Below this it is a quiet room. RMS, not peak — silence measures
-    /// tens, ordinary speech measures thousands.
-    static let noiseFloor: CGFloat = 60
-
-    /// The scale never drops below this, so room hiss is not amplified
-    /// into a dancing meter the moment you stop talking.
-    static let minimumCeiling: CGFloat = 900
-
-    /// Per 20 ms update: roughly a two-second half-life.
-    static let ceilingDecay: CGFloat = 0.993
 
     /// Brand orange on the panel's black, deliberately the same colour
     /// the menu-bar mark turns while recording.
@@ -103,17 +95,14 @@ final class ActivityMeter: NSView {
     private var heights = [CGFloat](repeating: 0, count: barCount)
     private var bars: [CALayer] = []
 
-    private var ceiling = ActivityMeter.minimumCeiling
-
-    /// Updates waiting to be shown, one released per `updateInterval`.
-    private var pending: [Int] = []
-    private var draining = false
+    private var stream: LevelStream?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = false
         buildBars()
+        stream = LevelStream { [weak self] loudness in self?.advance(to: loudness) }
     }
 
     required init?(coder: NSCoder) {
@@ -124,58 +113,7 @@ final class ActivityMeter: NSView {
 
     /// Feed per-block loudness, oldest first. Main thread only.
     func append(blocks: [Int]) {
-        guard !blocks.isEmpty else { return }
-        pending.append(contentsOf: blocks)
-        // A backlog would show audio late, and a meter that is behind is
-        // worse than one that skipped: it says you are speaking when you
-        // have stopped.
-        if pending.count > 8 {
-            pending.removeFirst(pending.count - 8)
-        }
-        startDraining()
-    }
-
-    /// 0...1 for one loudness reading, against the current ceiling.
-    ///
-    /// Square root rather than linear because hearing is compressive:
-    /// linear scaling makes ordinary speech look timid and wastes the top
-    /// of the range on shouting.
-    static func normalise(level: Int, ceiling: CGFloat, noiseFloor: CGFloat = noiseFloor)
-        -> CGFloat
-    {
-        let above = CGFloat(max(0, level)) - noiseFloor
-        guard above > 0 else { return 0 }
-        return min(1, sqrt(above / max(ceiling - noiseFloor, 1)))
-    }
-
-    /// Where the ceiling goes next: up instantly, down slowly.
-    ///
-    /// Rising immediately matters — a sound louder than anything before it
-    /// must not clip while the scale catches up. Falling slowly matters
-    /// for the opposite reason: a scale that dropped as fast as it rose
-    /// would pump between every word.
-    static func nextCeiling(
-        current: CGFloat,
-        level: CGFloat,
-        decay: CGFloat = ceilingDecay,
-        minimum: CGFloat = minimumCeiling
-    ) -> CGFloat {
-        max(minimum, max(level, current * decay))
-    }
-
-    /// Peak-meter ballistics: rise fast, ease down.
-    ///
-    /// `attack` of 1 means jump straight to the target. Below that the bar
-    /// closes a fraction of the gap per update, which is what lets the
-    /// outer bars trail the centre.
-    static func nextHeight(
-        current: CGFloat,
-        target: CGFloat,
-        attack: CGFloat = 1,
-        release: CGFloat = centreRelease
-    ) -> CGFloat {
-        if target > current { return current + (target - current) * attack }
-        return max(target, current * release)
+        stream?.append(blocks: blocks)
     }
 
     /// The fixed silhouette: tallest in the middle, tapering to the ends.
@@ -213,9 +151,8 @@ final class ActivityMeter: NSView {
     }
 
     func reset() {
-        pending.removeAll()
+        stream?.reset()
         heights = [CGFloat](repeating: 0, count: Self.barCount)
-        ceiling = Self.minimumCeiling
         apply(animated: false)
     }
 
@@ -227,35 +164,16 @@ final class ActivityMeter: NSView {
     }
 
     func stopAnimating() {
-        pending.removeAll()
+        stream?.stop()
     }
 
-    // MARK: - Draining
+    // MARK: - Motion
 
-    private func startDraining() {
-        guard !draining else { return }
-        draining = true
-        step()
-    }
-
-    /// Show one update, then schedule the next.
-    ///
-    /// Four arrive together every 80 ms. Applying all four at once would
-    /// throw away three quarters of the resolution that measuring them
-    /// separately bought; spacing them out is what makes the meter track
-    /// syllables rather than words.
-    private func step() {
-        guard !pending.isEmpty else {
-            draining = false
-            return
-        }
-        let level = pending.removeFirst()
-        ceiling = Self.nextCeiling(current: ceiling, level: CGFloat(max(0, level)))
-        let loudness = Self.normalise(level: level, ceiling: ceiling)
-
+    /// One loudness reading, applied to every bar.
+    private func advance(to loudness: CGFloat) {
         for index in heights.indices {
             let target = loudness * Self.envelope(bar: index, of: heights.count)
-            heights[index] = Self.nextHeight(
+            heights[index] = LevelStream.ease(
                 current: heights[index],
                 target: target,
                 attack: Self.responsiveness(bar: index, of: heights.count),
@@ -263,10 +181,6 @@ final class ActivityMeter: NSView {
             )
         }
         apply(animated: true)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.updateInterval) { [weak self] in
-            self?.step()
-        }
     }
 
     // MARK: - Layers

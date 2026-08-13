@@ -1490,6 +1490,72 @@ hides this class of bug entirely.
 
 ---
 
+### AD-20 — Appearance is a shell preference, not core configuration
+
+**Date:** 2026-08-12. **Status:** landed.
+
+The listening panel offers three animations — the bar row (`bars`, the
+default), a rotating ring of spokes (`bloom`), and an orbiting swarm
+(`swarm`). All three are fed the same `level` events; none of them changes
+a byte the core sees.
+
+**That is why the choice is not in `HelperConfig`.** Everything in that
+struct becomes argv, so applying it means relaunching the core, which is
+the entire reason the settings window has an Apply button and a "still
+running the previous settings" line. Putting a drawing style in there
+would have lit that warning for a change the core cannot observe and
+offered a restart that would achieve nothing. It lives at
+`raneen.ui.indicator` in `UserDefaults`, applies on selection, and
+`isDirty` never sees it.
+
+The general rule this instances: **`HelperConfig` is "what the core is
+running", not "what the user has configured".** Anything the shell can act
+on alone belongs beside it, not in it — the same boundary AD-16 draws for
+audio devices, one level up.
+
+Three consequences worth stating:
+
+* **The style owns the panel's size** (62x26 for the bar row, 74x74 for the
+  radial pair). A ring squeezed into the capsule is an ellipse, and one
+  drawn at the capsule's height is too small to read. Switching styles
+  resizes the window and re-centres it.
+* **…and whether there is a panel to see at all.** Amended 2026-08-12: the
+  radial styles have no backdrop, so the shape floats on the desktop. The
+  black capsule was never decoration — it is what gives brand orange one
+  known colour to stand against, and orange on a white document is about
+  2.3:1. What pays for dropping it is a **dark halo drawn under every
+  mark** (`CGContext` shadow, centred, no offset): invisible over a dark
+  editor, and the edge that makes the shape readable over a light one.
+  Only styles drawn as thin separated marks can use it — on the bar row's
+  solid shapes at 26 points the same halo reads as a smudge, which is why
+  it keeps its capsule. Two consequences: the content layer is
+  **unclipped** for those styles, since `masksToBounds` would crop the halo
+  into a faint square around a shape with no square in it; and the window's
+  own `hasShadow` is off for them, because AppKit traces it from content
+  opacity and caches it, leaving the previous frame's shadow behind
+  animating marks.
+* **The level pipeline is shared, the drawing is not.** Noise floor,
+  adaptive ceiling and the release ballistics moved to `LevelStream` when
+  the second style arrived; three copies would have been three meters that
+  disagreed about the same audio. What each style owns is its shape.
+* **Neither radial style shows a spectrum.** The bar row's own history
+  records that per-band bars read as a chart of the signal rather than as
+  an indicator; the same rule applies here, so the spokes and the embers
+  are driven by the single loudness value and what varies around the ring
+  is a fixed weighting. What the radial styles add is that they *keep
+  moving in silence* — the bar row is motionless in a pause, which is
+  exactly when someone looks at the panel to check it has not given up.
+
+**Rejected: a picker with three names and no preview.** "Bloom" and
+"Swarm" mean nothing unread, and the alternative to previewing is choosing
+one, dismissing the window, holding the key and looking at the bottom of
+the screen — three times. The preview runs the real view against synthetic
+speech rather than the microphone: opening Settings must not start
+recording, or the macOS recording indicator appears for as long as the
+window is open.
+
+---
+
 
 ## 8. Relationship to the 2026-07-06 architecture review
 
@@ -1511,5 +1577,5 @@ That review set four priorities. Their status, and how this roadmap interacts:
 
 ---
 
-*Last updated 2026-08-10 (AD-19: native wake word).
+*Last updated 2026-08-12 (AD-20: appearance is a shell preference).
 Amend decisions in place; do not delete rationale.*

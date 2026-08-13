@@ -21,6 +21,25 @@ final class SettingsModel: ObservableObject {
     /// that knows for certain.
     @Published var running: HelperConfig?
 
+    /// The listening animation.
+    ///
+    /// **Separate from `config`, and deliberately not part of `isDirty`.**
+    /// Nothing about it reaches the core, so it takes effect the instant it
+    /// is chosen — folding it into `HelperConfig` would have lit "the core
+    /// is still running the previous settings" for a change the core never
+    /// sees, and offered a restart that would do nothing.
+    @Published var indicatorStyle: IndicatorStyle {
+        didSet {
+            guard indicatorStyle != oldValue else { return }
+            IndicatorPreference.save(indicatorStyle)
+            onIndicatorStyleChange?(indicatorStyle)
+        }
+    }
+
+    /// Applying the style to the live panel. Owned by `AppDelegate` for the
+    /// same reason `onApply` is: this type does not know about windows.
+    var onIndicatorStyleChange: ((IndicatorStyle) -> Void)?
+
     /// Whether the shared openWakeWord feature models are on disk. Cached
     /// rather than checked in `body`: SwiftUI re-evaluates a view many times
     /// and hitting the filesystem on each pass is needless.
@@ -35,6 +54,7 @@ final class SettingsModel: ObservableObject {
 
     init() {
         config = SettingsStore.current()
+        indicatorStyle = IndicatorPreference.current()
         models = ModelLibrary.available()
         wakeFeatureModelsAvailable = WakeWordLibrary.featureModelsAvailable()
 

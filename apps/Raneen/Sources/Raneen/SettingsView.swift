@@ -67,6 +67,37 @@ struct SettingsView: View {
                 Text("Chosen from the menu bar — currently \(TriggerKey.current.label).")
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                HStack(alignment: .center, spacing: 20) {
+                    Picker("", selection: $model.indicatorStyle) {
+                        ForEach(IndicatorStyle.allCases) { style in
+                            Text(style.label).tag(style)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .labelsHidden()
+
+                    Spacer()
+                    // The preview is the control, really — the names mean
+                    // nothing until you have watched one.
+                    IndicatorPreview(style: model.indicatorStyle)
+                        .fixedSize()
+                        .frame(width: 80, height: 80)
+                }
+                Text(model.indicatorStyle.detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("While listening")
+            } footer: {
+                // Said plainly because every other control on this window
+                // needs the Apply button, and leaving this one to look the
+                // same would have people restarting the core for a colour.
+                Text("Takes effect immediately — the core is not involved.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }

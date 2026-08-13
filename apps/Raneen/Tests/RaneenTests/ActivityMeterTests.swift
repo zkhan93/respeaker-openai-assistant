@@ -8,10 +8,10 @@ import XCTest
 /// as broken rather than as responsive.
 final class ActivityMeterTests: XCTestCase {
 
-    private let ceiling = ActivityMeter.minimumCeiling
+    private let ceiling = LevelStream.minimumCeiling
 
     private func value(_ level: Int) -> CGFloat {
-        ActivityMeter.normalise(level: level, ceiling: ceiling)
+        LevelStream.normalise(level: level, ceiling: ceiling)
     }
 
     // MARK: - Range
@@ -25,7 +25,7 @@ final class ActivityMeterTests: XCTestCase {
     }
 
     func testTheNoiseFloorLeavesRoomForQuietSpeech() {
-        XCTAssertLessThan(ActivityMeter.noiseFloor, ActivityMeter.minimumCeiling / 4)
+        XCTAssertLessThan(LevelStream.noiseFloor, LevelStream.minimumCeiling / 4)
     }
 
     func testTheCeilingIsFullHeight() {
@@ -60,35 +60,35 @@ final class ActivityMeterTests: XCTestCase {
     /// A sound louder than anything before it must not clip while the
     /// scale catches up.
     func testTheCeilingRisesImmediately() {
-        let raised = ActivityMeter.nextCeiling(current: 200, level: 5000)
+        let raised = LevelStream.nextCeiling(current: 200, level: 5000)
         XCTAssertEqual(raised, 5000)
         XCTAssertEqual(
-            ActivityMeter.normalise(level: 5000, ceiling: raised), 1.0, accuracy: 0.0001)
+            LevelStream.normalise(level: 5000, ceiling: raised), 1.0, accuracy: 0.0001)
     }
 
     /// …and must not fall as fast as it rises, or the scale pumps between
     /// every word.
     func testTheCeilingFallsSlowly() {
         var current: CGFloat = 5000
-        for _ in 0..<10 { current = ActivityMeter.nextCeiling(current: current, level: 0) }
+        for _ in 0..<10 { current = LevelStream.nextCeiling(current: current, level: 0) }
         XCTAssertGreaterThan(current, 4000, "the scale collapsed within a fifth of a second")
         XCTAssertLessThan(current, 5000, "the scale never came down at all")
     }
 
     func testTheCeilingNeverFallsBelowTheMinimum() {
         var current: CGFloat = 5000
-        for _ in 0..<5000 { current = ActivityMeter.nextCeiling(current: current, level: 0) }
-        XCTAssertEqual(current, ActivityMeter.minimumCeiling)
+        for _ in 0..<5000 { current = LevelStream.nextCeiling(current: current, level: 0) }
+        XCTAssertEqual(current, LevelStream.minimumCeiling)
     }
 
     func testAConstantSoundStaysAtFullHeightRatherThanFadingOut() {
         // Auto-gain that tracked both ends would decay a steady sound to
         // nothing, which is wrong: a constant sound is constant.
-        var current = ActivityMeter.minimumCeiling
+        var current = LevelStream.minimumCeiling
         var last: CGFloat = 0
         for _ in 0..<200 {
-            current = ActivityMeter.nextCeiling(current: current, level: 4000)
-            last = ActivityMeter.normalise(level: 4000, ceiling: current)
+            current = LevelStream.nextCeiling(current: current, level: 4000)
+            last = LevelStream.normalise(level: 4000, ceiling: current)
         }
         XCTAssertEqual(last, 1.0, accuracy: 0.0001)
     }
@@ -98,13 +98,13 @@ final class ActivityMeterTests: XCTestCase {
     /// Instant attack. Lagging behind a loud sound is what makes a meter
     /// feel unresponsive, and it is the one thing people notice.
     func testABarJumpsStraightUpToALoudSound() {
-        XCTAssertEqual(ActivityMeter.nextHeight(current: 0.1, target: 0.9), 0.9)
+        XCTAssertEqual(LevelStream.ease(current: 0.1, target: 0.9), 0.9)
     }
 
     /// Gradual release. A bar that fell as fast as it rose would flicker
     /// at every syllable boundary rather than settle.
     func testABarFallsGraduallyRatherThanDropping() {
-        let fallen = ActivityMeter.nextHeight(current: 1.0, target: 0)
+        let fallen = LevelStream.ease(current: 1.0, target: 0)
         XCTAssertGreaterThan(fallen, 0.8, "the bar dropped instead of easing down")
         XCTAssertLessThan(fallen, 1.0, "the bar never came down at all")
     }
@@ -112,13 +112,13 @@ final class ActivityMeterTests: XCTestCase {
     func testABarReachesSilenceEventually() {
         var height: CGFloat = 1.0
         // A quarter of a second of updates.
-        for _ in 0..<50 { height = ActivityMeter.nextHeight(current: height, target: 0) }
+        for _ in 0..<50 { height = LevelStream.ease(current: height, target: 0) }
         XCTAssertLessThan(height, 0.1, "the meter is still moving long after the sound stopped")
     }
 
     func testHoldingALevelKeepsTheBarThere() {
         var height: CGFloat = 0
-        for _ in 0..<20 { height = ActivityMeter.nextHeight(current: height, target: 0.6) }
+        for _ in 0..<20 { height = LevelStream.ease(current: height, target: 0.6) }
         XCTAssertEqual(height, 0.6, accuracy: 0.0001)
     }
 }
@@ -201,9 +201,9 @@ extension ActivityMeterTests {
         var centre: CGFloat = 1
         var edge: CGFloat = 1
         for _ in 0..<15 {
-            centre = ActivityMeter.nextHeight(
+            centre = LevelStream.ease(
                 current: centre, target: 0, release: ActivityMeter.releaseRate(bar: 4, of: 9))
-            edge = ActivityMeter.nextHeight(
+            edge = LevelStream.ease(
                 current: edge, target: 0, release: ActivityMeter.releaseRate(bar: 0, of: 9))
         }
         XCTAssertLessThan(centre, edge, "the row is draining uniformly — no shape change")
@@ -223,7 +223,7 @@ extension ActivityMeterTests {
         var height: CGFloat = 0
         let attack = ActivityMeter.responsiveness(bar: 0, of: 16)
         for _ in 0..<40 {
-            height = ActivityMeter.nextHeight(current: height, target: 0.8, attack: attack)
+            height = LevelStream.ease(current: height, target: 0.8, attack: attack)
         }
         XCTAssertEqual(height, 0.8, accuracy: 0.01)
     }
@@ -239,7 +239,7 @@ extension ActivityMeterTests {
         for bar in 0..<9 {
             var height: CGFloat = 1
             for _ in 0..<200 {
-                height = ActivityMeter.nextHeight(
+                height = LevelStream.ease(
                     current: height, target: 0,
                     release: ActivityMeter.releaseRate(bar: bar, of: 9))
             }
