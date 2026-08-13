@@ -258,8 +258,19 @@ jobs:
         with:
           enable-cache: true
 
+      # `protocol/` and `tools/` are included because they were not, and drifted:
+      # an unused import and two over-long lines sat in the conformance harness
+      # for weeks. That harness is the thing guarding against drift between two
+      # implementations, so leaving it unlinted was the wrong file to skip.
+      #
+      # `examples/` is deliberately still out. It carries real violations, and
+      # its audience is someone consuming the ZeroMQ wire format rather than
+      # working on the core — fixing it is a separate change, not a drive-by.
       - name: Lint
-        run: uvx ruff check packages/
+        run: uvx ruff check packages/ protocol/ tools/
 
+      # Format-checked for `packages/` only: `protocol/` and `tools/` are
+      # scripts written to be read as prose, and `ruff format` would reflow
+      # argument lists and comment blocks that are laid out deliberately.
       - name: Format check
         run: uvx ruff format --check packages/

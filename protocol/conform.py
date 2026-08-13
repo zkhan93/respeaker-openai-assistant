@@ -41,10 +41,11 @@ def main() -> int:
     parser.add_argument("--wav", required=True)
     parser.add_argument("--helper", required=True, help="command, with {socket} and {model}")
     parser.add_argument("--model", default="")
-    parser.add_argument("--settle", type=float, default=4.0, help="seconds to wait for a transcript")
+    parser.add_argument("--settle", type=float, default=4.0,
+                        help="seconds to wait for a transcript")
     parser.add_argument("--quiet", action="store_true", help="suppress helper stderr")
     parser.add_argument("--no-arm", action="store_true",
-                        help="do not send arm/disarm — for trigger modes that own their own boundaries")
+                        help="do not send arm/disarm — for triggers that own their boundaries")
     parser.add_argument("--expect-transcripts", type=int, default=None,
                         help="fail unless exactly N transcripts arrive")
     parser.add_argument("--expect-text", default=None,
@@ -153,6 +154,16 @@ def main() -> int:
             print(f"  transcript {i}: {text!r}")
     else:
         print("  transcript : NONE")
+
+    # The message, not just the fact.
+    #
+    # An `error` event used to appear in the `events` list and nowhere else, so
+    # a case failed with "expected 1 transcripts, got 0" while the helper had
+    # already said exactly what went wrong. Diagnosing a CI failure then meant
+    # reasoning from which case failed rather than reading the reason.
+    for event in events:
+        if event.get("event") == "error":
+            print(f"  error      : {event.get('message')!r}")
 
     failures = []
     if "ready" not in kinds:

@@ -6,12 +6,11 @@ framing, the WAV container, the declared sample rate — then answers with a
 fixed transcript. That makes the remote engine testable without a network,
 an API key, or a GPU box.
 """
+import io
 import json
 import re
-import struct
 import sys
 import wave
-import io
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TRANSCRIPT = "the remote engine answered"

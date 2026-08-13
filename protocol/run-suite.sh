@@ -53,6 +53,33 @@ run() {
   if python3 "$HERE/conform.py" --quiet "$@"; then pass=$((pass+1)); else fail=$((fail+1)); fi
 }
 
+# Wait until a stand-in server is actually accepting connections.
+#
+# **Not `sleep 1`.** A fixed sleep is a bet on how fast the machine is, and it
+# lost: the STT double is the first `python3` the suite starts, so it pays
+# interpreter cold-start that later ones do not, and one second was not enough
+# on a cold macOS runner. The core got connection-refused, published an
+# `error`, and the case reported "expected 1 transcripts, got 0" — which reads
+# as a product bug rather than a server that had not finished binding.
+#
+# On failure the double's own log is printed, because the alternative is a
+# silent race whose only symptom is an assertion about transcripts.
+wait_for_port() {
+  local port="$1" name="$2" log="$3"
+  local deadline=$((SECONDS + 20))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    # bash can open a TCP socket directly, so this needs no nc or lsof —
+    # neither of which is reliably present on both CI images.
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "  $name never listened on port $port. Its log:"
+  sed 's/^/    | /' "$log" 2>/dev/null || echo "    | (no log at $log)"
+  return 1
+}
+
 # One sentence, hotkey boundaries. Also the tail-padding case: the audio
 # ends ON speech, where whisper.cpp drops the final word without padding.
 run "hold · one sentence · last word survives" \
@@ -142,7 +169,7 @@ if [ -n "$HELPER_VAD" ]; then
   python3 "$HERE/doubles/fake-stt-server.py" "$PORT" >/tmp/raneen-fake-stt.log 2>&1 &
   FAKE=$!
   trap 'kill $FAKE 2>/dev/null' EXIT
-  sleep 1
+  wait_for_port "$PORT" "fake-stt-server" /tmp/raneen-fake-stt.log || fail=$((fail + 1))
 
   # The Pi's configuration: no local model anywhere in play. Also pins the
   # keyless path, which the Python engine cannot do at all — it raises
@@ -173,7 +200,8 @@ if [ -n "$HELPER_VAD" ]; then
   python3 "$HERE/doubles/fake-realtime-server.py" "$WS_PORT" >/tmp/raneen-fake-realtime.log 2>&1 &
   FAKE_WS=$!
   trap 'kill $FAKE $FAKE_WS 2>/dev/null' EXIT
-  sleep 1
+  wait_for_port "$WS_PORT" "fake-realtime-server" /tmp/raneen-fake-realtime.log \
+    || fail=$((fail + 1))
 
   run "realtime · streams partials, then a final transcript" \
     --wav "$FIXTURES/spike.wav" --settle 4 \
