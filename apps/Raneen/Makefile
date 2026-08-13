@@ -68,7 +68,9 @@ DEVELOPER_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
 	| sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
 IDENTITY ?= $(if $(DEVELOPER_ID),$(DEVELOPER_ID),-)
 
-.PHONY: all app helper-rust model swift run check sign verify dmg clean
+.PHONY: all app helper-rust model swift run check sign verify dmg clean screenshots
+
+DOC_IMAGES := ../../docs/images
 
 all: app
 
@@ -117,6 +119,20 @@ run: app
 # runs, and it drives whichever core is selected.
 check: helper-rust
 	cd ../.. && ./protocol/run-suite.sh $(IMPL)
+
+# ----- documentation --------------------------------------------------------
+
+# Regenerates the README's screenshots and the indicator animation from the
+# real views. Env-gated rather than a plain test, so CI never writes images
+# and no ordinary run depends on a screenshot.
+#
+# Writes exactly the files the README references, so a run leaves a clean
+# tree unless something actually changed.
+screenshots:
+	@mkdir -p $(DOC_IMAGES)
+	RANEEN_DOC_IMAGES="$$(cd $(DOC_IMAGES) && pwd)" \
+		swift test --filter DocumentationImages
+	@ls -lh $(DOC_IMAGES)
 
 # ----- signing --------------------------------------------------------------
 

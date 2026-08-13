@@ -53,8 +53,9 @@ struct ModelsView: View {
                 "Every language",
                 detailTitle: "What quantised means",
                 detail: """
-                    These carry all 99 of whisper's languages. Most are \
-                    quantised, which on these weights is close to free: \
+                    These carry every language whisper supports, not only \
+                    English. Most are quantised, which on these weights is \
+                    close to free: \
                     large-v3 is 3.1 GB at full precision and 1.1 GB as q5_0, \
                     for a difference dictation will rarely notice. The full \
                     precision variants are here anyway — the choice belongs to \
@@ -122,7 +123,12 @@ struct ModelsView: View {
             }
 
             HStack {
-                SettingsFootnote("Downloads go to \(ModelInstall.directory.path).")
+                // Abbreviated: the absolute form is `/Users/<name>/…`, which
+                // is longer, no more useful, and someone's name in a
+                // screenshot.
+                SettingsFootnote(
+                    "Downloads go to "
+                        + "\((ModelInstall.directory.path as NSString).abbreviatingWithTildeInPath).")
                 Spacer(minLength: 12)
                 Button("Add a Model File…") { choose() }
             }
