@@ -152,6 +152,11 @@ The Rust core is configured by flags only, plus two escape hatches for the
 fixed-argv problem: `RANEEN_MODEL` and `RANEEN_ZMQ_PUB` (`RANEEN_HELPER` swaps
 the binary the macOS app spawns).
 
+The macOS app stores its settings in `UserDefaults` under `raneen.*` and applies
+them by relaunching the core with new argv. Two environment overrides move where
+it looks for weights: `RANEEN_MODEL_DIR` (whisper models, default
+`~/.cache/raneen/models`) and `RANEEN_WAKEWORD_DIR`.
+
 The Pi reads `packages/voice-assistant/config/config.yaml` — copy the
 `.example`. `audio.chunk_size` must stay 1280; `hotword.threshold` is 0.0–1.0;
 `vad.aggressiveness` is 0–3; `broadcaster.pub_endpoint` and `pull_endpoint`

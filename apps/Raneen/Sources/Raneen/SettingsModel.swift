@@ -31,7 +31,7 @@ final class SettingsModel: ObservableObject {
     @Published var indicatorStyle: IndicatorStyle {
         didSet {
             guard indicatorStyle != oldValue else { return }
-            IndicatorPreference.save(indicatorStyle)
+            IndicatorPreference.save(indicatorStyle, to: defaults)
             onIndicatorStyleChange?(indicatorStyle)
         }
     }
@@ -48,13 +48,31 @@ final class SettingsModel: ObservableObject {
     /// Models found on disk, for the picker.
     @Published private(set) var models: [WhisperModel]
 
+    /// Fetches models from the catalogue.
+    ///
+    /// Owned here rather than by `AppDelegate` because it is settings-window
+    /// state and nothing else in the app needs it. Its `URLSession` is lazy,
+    /// so constructing this at launch costs a directory scan and nothing
+    /// more.
+    let downloader = ModelDownloader()
+
     /// Applying means restarting the core. Owned by `AppDelegate` because
     /// process lifecycle is its job, not this type's.
     var onApply: (() -> Void)?
 
-    init() {
-        config = SettingsStore.current()
-        indicatorStyle = IndicatorPreference.current()
+    /// Where settings are read from and written to.
+    ///
+    /// Injectable for tests only — the app always gets `.standard`. Without
+    /// it a test constructing this type writes real `raneen.*` keys into
+    /// whatever domain the test runner happens to own, and the next
+    /// `SettingsModel()` in the same process reads them back: state leaking
+    /// from one test into another through disk.
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        config = SettingsStore.current(defaults)
+        indicatorStyle = IndicatorPreference.current(defaults)
         models = ModelLibrary.available()
         wakeFeatureModelsAvailable = WakeWordLibrary.featureModelsAvailable()
 
@@ -65,6 +83,16 @@ final class SettingsModel: ObservableObject {
         // bad read into a permanently broken configuration on disk. Writing
         // settings is now something only an edit does.
         if selectedModelIsEnglishOnly { config.language = "en" }
+
+        // Someone who downloads a model wants to use it. Making them then
+        // find it in a picker is a step with no decision in it — and the
+        // core is not restarted here, so this behaves like any other edit:
+        // the footer lights up and Apply is theirs to press.
+        downloader.onInstalled = { [weak self] _, url in
+            guard let self else { return }
+            self.config.modelPath = url.path
+            self.refreshLibraries()
+        }
     }
 
     /// Whether the timings are this trigger's recommended ones, so the window
@@ -145,7 +173,7 @@ final class SettingsModel: ObservableObject {
             }
         }
 
-        SettingsStore.save(config)
+        SettingsStore.save(config, to: defaults)
     }
 
     /// Re-read what is on disk. Called when the window opens, so a model or
@@ -153,6 +181,43 @@ final class SettingsModel: ObservableObject {
     func refreshLibraries() {
         models = ModelLibrary.available()
         wakeFeatureModelsAvailable = WakeWordLibrary.featureModelsAvailable()
+        downloader.refresh()
+
+        // A selection pointing at a file that is no longer there would be
+        // passed to the core verbatim, and whisper failing to load is an
+        // `error` event and no dictation at all. Falling back to the bundled
+        // model keeps the app working; leaving the stale path would mean the
+        // window and the core disagreeing about something that cannot work.
+        if let path = config.modelPath, !FileManager.default.fileExists(atPath: path) {
+            Log.app.error("selected model \(path) is gone — falling back to the bundled model")
+            config.modelPath = nil
+        }
+    }
+
+    // MARK: - The model catalogue
+
+    /// Delete a downloaded model.
+    ///
+    /// The order matters: the selection is moved off the file *before* it is
+    /// removed, so there is no window in which the stored settings name a
+    /// model that does not exist.
+    /// Only ever the copy in the download directory — the same file
+    /// `canDelete` answers about. A model found inside the app bundle, or one
+    /// added from somewhere else on disk, is not this app's to remove.
+    func deleteModel(_ filename: String) {
+        if config.modelPath == ModelInstall.destination(for: filename).path {
+            config.modelPath = nil
+        }
+        downloader.delete(filename)
+        refreshLibraries()
+    }
+
+    /// Models on disk that the catalogue does not know about — a model built
+    /// or converted elsewhere, added through the open panel. Listed
+    /// separately so the catalogue rows stay a fixed, familiar set.
+    var addedModels: [WhisperModel] {
+        let known = Set(ModelCatalog.all.map(\.filename))
+        return models.filter { !known.contains($0.name) }
     }
 
     // MARK: - Editing

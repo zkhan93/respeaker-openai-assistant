@@ -276,6 +276,14 @@ final class HelperConfigTests: XCTestCase {
 /// Reading settings back out of `UserDefaults`.
 final class SettingsStoreTests: XCTestCase {
 
+    /// Fixed rather than a fresh UUID per run. A UUID is isolated too, but
+    /// its domain can only ever be removed by the run that invented the name
+    /// — so a crashed or interrupted run orphans a plist nothing will ever
+    /// collect again. A constant name is reclaimed by the next `setUp`
+    /// whatever happened last time. 100 orphaned `raneen.tests.<uuid>`
+    /// domains on one machine is what this cost before.
+    private static let suite = "raneen.tests.settingsstore"
+
     private var defaults: UserDefaults!
 
     override func setUp() {
@@ -290,11 +298,15 @@ final class SettingsStoreTests: XCTestCase {
         // situation the app was actually in — a completely empty defaults
         // database. It passed while the shipped app launched the core with
         // `--max-seconds 0` and transcribed nothing.
-        defaults = UserDefaults(suiteName: "raneen.tests.\(UUID().uuidString)")
+        defaults = UserDefaults(suiteName: Self.suite)
+        defaults.removePersistentDomain(forName: Self.suite)
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: defaults.description)
+        // The name, not `defaults.description` — that is
+        // `<NSUserDefaults: 0x…>`, which names no domain, so the removal
+        // silently did nothing and every run left a plist behind.
+        defaults.removePersistentDomain(forName: Self.suite)
         defaults = nil
         super.tearDown()
     }
@@ -408,11 +420,31 @@ final class SettingsStoreTests: XCTestCase {
 /// The rules the settings window applies while editing.
 final class SettingsModelTests: XCTestCase {
 
+    private static let suite = "raneen.tests.settingsmodel"
+
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        // `SettingsModel` persists on every edit, by design — so a test that
+        // let it use `.standard` would write `raneen.*` keys into the test
+        // runner's own domain and the next test's `SettingsModel()` would
+        // read them back. Each test starts from an empty database instead.
+        defaults = UserDefaults(suiteName: Self.suite)
+        defaults.removePersistentDomain(forName: Self.suite)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: Self.suite)
+        defaults = nil
+        super.tearDown()
+    }
+
     /// Switching trigger must carry the timings with it. Otherwise choosing
     /// "when I say a wake word" quietly applies push-to-talk timings, and the
     /// turn ends on the first thinking pause.
     func testChangingTriggerMovesUntouchedTimings() {
-        let model = SettingsModel()
+        let model = SettingsModel(defaults: defaults)
         model.config.trigger = .hold
         model.useRecommendedTimings()
 
@@ -428,7 +460,7 @@ final class SettingsModelTests: XCTestCase {
     /// But a deliberate choice must survive a mode switch — otherwise the
     /// window silently discards what the user set.
     func testChangingTriggerLeavesACustomisedTimingAlone() {
-        let model = SettingsModel()
+        let model = SettingsModel(defaults: defaults)
         model.config.trigger = .hold
         model.config.silenceFrames = 40
 
@@ -441,7 +473,7 @@ final class SettingsModelTests: XCTestCase {
     /// And there has to be a way back, or one experiment with the stepper opts
     /// you out of the recommendations for good.
     func testRecommendedTimingsCanBeRestored() {
-        let model = SettingsModel()
+        let model = SettingsModel(defaults: defaults)
         model.config.trigger = .wakeword
         model.config.silenceFrames = 3
         XCTAssertFalse(model.timingsAreRecommended)

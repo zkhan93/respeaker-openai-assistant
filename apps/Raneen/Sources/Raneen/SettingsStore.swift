@@ -201,6 +201,27 @@ struct WhisperModel: Identifiable, Hashable {
 
 enum ModelLibrary {
 
+    /// The writable half of the search path, and where downloads go.
+    ///
+    /// The other candidate is inside the app bundle, which is read-only and
+    /// signed — so this is not merely a preference about tidiness, it is the
+    /// only one of the two a download could use.
+    ///
+    /// `RANEEN_MODEL_DIR` overrides it, matching `RANEEN_WAKEWORD_DIR` next
+    /// door. Two reasons beyond symmetry: `large-v3` is 3.1 GB and a boot
+    /// disk is not always where that should live, and without an override
+    /// every test of the download machinery would have to write into the
+    /// real cache directory.
+    static var userDirectory: URL {
+        if let override = ProcessInfo.processInfo.environment["RANEEN_MODEL_DIR"],
+            !override.isEmpty
+        {
+            return URL(fileURLWithPath: override)
+        }
+        return URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".cache/raneen/models")
+    }
+
     /// Where the core looks, in the order it looks: beside the executable
     /// (inside the bundle that is `Contents/Resources/helper`), then the
     /// user cache. Mirrored rather than asked for, because the core has no
@@ -210,10 +231,7 @@ enum ModelLibrary {
         if let helper = Bundle.main.resourceURL?.appendingPathComponent("helper") {
             paths.append(helper)
         }
-        paths.append(
-            URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent(".cache/raneen/models")
-        )
+        paths.append(userDirectory)
         return paths
     }
 

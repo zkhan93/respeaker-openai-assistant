@@ -38,8 +38,27 @@ final class SettingsWindow {
 
         let hosting = NSHostingController(rootView: SettingsView(model: model))
         let window = NSWindow(contentViewController: hosting)
+        // Still set, though nothing draws it: the Window menu, ⌘` cycling
+        // and VoiceOver all read this, and an untitled window is announced
+        // as "window".
         window.title = "Raneen Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable]
+
+        // **The chrome is part of the design.** `.fullSizeContentView` plus
+        // a transparent titlebar is what lets the sidebar's vibrancy run to
+        // the top of the window, which is the difference between a modern
+        // Mac window and a document window with a toolbar. The cost is that
+        // the content has to leave room for the traffic lights itself —
+        // `SettingsMetric.titlebarInset` is that room, and it is why both
+        // the sidebar and the pane carry a top inset rather than the usual
+        // gutter.
+        //
+        // The title itself is hidden because the pane header already names
+        // the section; showing both would say "Raneen Settings" above
+        // "Dictation" and lead with the less useful of the two.
+        window.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+
         window.isReleasedWhenClosed = false
         window.center()
         self.window = window

@@ -1556,6 +1556,109 @@ window is open.
 
 ---
 
+### AD-21 — Models are acquired by the shell, from a pinned catalogue
+
+**Date:** 2026-08-12. **Status:** landed.
+
+Choosing a heavier whisper model used to mean: read a README, run a shell
+script from a repo you may not have, then find a hidden directory in an open
+panel. The settings window now lists twelve models with their sizes, fetches
+them, and selects what it fetched.
+
+**The shell downloads them, not the core.** The core takes a path and loads
+what is there — it has no opinion about how the file arrived, no catalogue,
+and no progress to report. This is AD-16's boundary one level up: the
+platform layer owns the network, the filesystem and the human, and the core
+owns turning sound into text. The practical consequence is that
+`protocol/` stays hermetic — a conformance case is still "a command line and
+a model path".
+
+**The catalogue is pinned, not discovered.** There is no API on the other end
+that returns sizes and tradeoffs, and a remote directory listing would offer
+the tokenizer files and the Core ML archives beside the weights. Pinning is
+also the only place the *tradeoff* can be written down, which is the part
+someone actually needs in order to choose between `small.en` and
+`large-v3-turbo`.
+
+**Every model carries its SHA-256, and nothing is visible under its real name
+until it verifies.** The failure this exists for is not a truncated download
+— it is a complete one of the wrong thing. A captive portal, an expired
+signed URL or a moved file answers with a valid HTML document, and saved as
+`ggml-small.en-q5_1.bin` that surfaces as a ggml parse error which reads like
+a corrupt build. So a download lands as `.part`, is checked cheapest-first
+(size, then the four magic bytes `lmgg`, then the digest), and is renamed
+only if all three pass. `tools/fetch-wakeword-models.sh` already carried the
+`.part` half of this lesson.
+
+The digests come from the server's own `x-linked-etag`, which is the LFS
+object's SHA-256; the scheme was confirmed by hashing the copy of
+`base.en-q5_1` already on disk, and end-to-end by a real download.
+
+Three consequences worth stating:
+
+* **`installedPath` searches the bundle as well as the cache**, in the core's
+  own order, so the model shipped inside the app shows as included rather
+  than as something to fetch. It is selectable and *not* deletable — deleting
+  it would break the code signature, and nobody chose to install it. Removal
+  resolves a filename against the download directory, so no argument reaches
+  outside it.
+* **A downloaded model is selected automatically.** Someone who fetches a
+  model wants to use it; making them then find it in a picker is a step with
+  no decision in it. The core is not restarted for it — this behaves like any
+  other edit, and Apply stays theirs to press.
+* **"The core reaches `ready` in ~0.05 s" is now a floor, not a cost.** That
+  number justifies applying configuration by relaunching (AD-15), and it was
+  measured on a 57 MB `base.en`. `large-v3` is 3.1 GB and takes seconds to
+  load. The mechanism still holds — the panel shows `.starting` throughout,
+  and the hotkey does nothing rather than opening a turn nothing is listening
+  to — but the figure should not be quoted without the model it belongs to.
+
+**Rejected: a pop-up menu of filenames**, which is what was there. It cannot
+show a size, cannot show a transfer in progress, and cannot offer to delete
+anything — so the twelve-row library earned its own pane rather than staying
+a control inside Transcription.
+
+Still open: the wake-word models have the same problem and no catalogue. A
+released app tells the user to run a script from a repo they do not have.
+
+---
+
+### AD-22 — The settings window's design language
+
+**Date:** 2026-08-12. **Status:** landed.
+
+The window was a five-tab strip over `Form(.grouped)`. It is now a vibrant
+sidebar, a pane of raised cards, one four-step type scale, and controls
+right-aligned to a single column — with every measurement, colour and
+component in `SettingsDesign.swift` rather than invented per section. That
+split is the durable part: when "how wide is a control" or "how loud is
+prose" has one answer somewhere else, a new section cannot quietly disagree.
+
+Two decisions that cost something and should not be reversed by accident:
+
+* **The selection pill is the brand orange, not `Color.accentColor`.** This
+  breaks the platform convention that a sidebar honours whatever accent the
+  user chose in Appearance. The argument for breaking it: that orange is the
+  menu-bar mark, the listening indicator and the app icon, and a settings
+  window tinted someone's system pink would be the only surface of the
+  product that did not look like the product. It is darkened from the mark's
+  own #F58B2E, which is about 2.3:1 under white text. **The cost is real: a
+  user who set a system accent does not see it here.**
+* **The explanatory prose is folded into per-card disclosures, not deleted.**
+  Every paragraph survives verbatim — why pre-roll exists, why an `.en` model
+  returns confident nonsense, why the confidence gate should stay off, why a
+  wake word is reported in every mode and obeyed in one. But five paragraphs
+  shown at once are five paragraphs nobody reads, which loses them as
+  effectively as deleting them. A popover was rejected: it dismisses on the
+  next click, so it cannot be read *beside* the control it explains.
+
+Verified by rendering every pane offscreen in both appearances and looking at
+the result, which is also how the window height, the option-pill width and
+the models pane's trailing alignment were settled. Vibrancy and live
+animation are the two things only the real window can confirm.
+
+---
+
 
 ## 8. Relationship to the 2026-07-06 architecture review
 
@@ -1577,5 +1680,6 @@ That review set four priorities. Their status, and how this roadmap interacts:
 
 ---
 
-*Last updated 2026-08-12 (AD-20: appearance is a shell preference).
+*Last updated 2026-08-12 (AD-21: pinned model catalogue, verified downloads;
+AD-22: the settings window's design language).
 Amend decisions in place; do not delete rationale.*

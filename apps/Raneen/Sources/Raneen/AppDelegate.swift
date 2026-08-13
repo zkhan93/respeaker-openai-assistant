@@ -256,9 +256,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Apply a configuration change by replacing the core.
     ///
     /// **Configuration is argv, and applying it is a restart.** The Rust
-    /// core reaches `ready` in ~0.05 s, so this is imperceptible — and it
-    /// keeps the core a pure function of its command line, which is what
-    /// lets `protocol/` assert on behaviour from a command line alone.
+    /// core reaches `ready` in ~0.05 s with the bundled `base.en`, so this
+    /// is imperceptible — and it keeps the core a pure function of its
+    /// command line, which is what lets `protocol/` assert on behaviour from
+    /// a command line alone.
+    ///
+    /// That number is now the *floor*, not the cost: the model catalogue
+    /// goes up to a 3.1 GB `large-v3`, which takes seconds to load cold. The
+    /// mechanism still holds — the panel shows `.starting` and the menu says
+    /// "restarting…" throughout, and the hotkey simply does nothing until
+    /// the new core exists, rather than opening a turn nothing is listening
+    /// to. Worth knowing before trusting the 0.05 s figure for anything.
     /// Reconfiguring a live core over the protocol instead would mean
     /// rebuilding the STT engine, both detectors and the ZeroMQ publisher
     /// while their threads run, in `serve.rs`'s composition root.

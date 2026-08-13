@@ -110,7 +110,11 @@ Three things worth knowing:
   you like.
 - **`--language` is coupled to the model.** A `*.en` model given other speech
   does not fail; it transliterates into English phonemes and returns confident
-  nonsense. Other languages need a multilingual model.
+  nonsense. Other languages need a multilingual model. The app's Models pane
+  lists the two families apart for this reason, and fetches any of twelve
+  whisper models — 32 MB `tiny.en` up to a 3.1 GB `large-v3` — verifying each
+  against a pinned SHA-256 before it is installed. Nothing needs Finder, and
+  `RANEEN_MODEL_DIR` moves the library off the boot disk.
 
 Watch what a running core publishes:
 

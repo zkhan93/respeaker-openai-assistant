@@ -125,18 +125,27 @@ Falls out of §3.2 almost for free. See §4.
 
 ### 3.4 Model and language choice
 
-Core already takes `--language` and a model path. Missing:
+Core already takes `--language` and a model path. Done, 2026-08-12 — see
+`AD-21`:
 
-- **Discovery** — only `ggml-base.en-q5_1.bin` is on disk today
-- **Download on demand** — `tiny.en` ~19 MB, `base.en` 57 MB, `small.en` a few
-  hundred MB, `large` several GB. Needs progress and a cancel
-- **A picker in the app**, and the coupling made visible: **a `.en` model cannot
-  produce any other language.** It does not fail — it transliterates into English
-  phonemes and returns confident nonsense. A UI that lets you pick `small.en` and
-  set language `hi` is promising something impossible, so model and language
-  belong in one control
-- **Switching without a restart** is cheap here (0.05 s model load) but needs the
-  swappable-`Arc` path wired through
+- **Discovery** — the Models pane lists what is on disk, searching the bundle
+  and `~/.cache/raneen/models` in the core's own order
+- **Download on demand** — twelve pinned models, 32 MB `tiny.en` to 3.1 GB
+  `large-v3`, with progress, a cancel, and a delete. Each verified by size,
+  ggml magic and SHA-256 before it is given its real name
+- **A picker in the app**, with the coupling made visible: **a `.en` model
+  cannot produce any other language.** It does not fail — it transliterates
+  into English phonemes and returns confident nonsense. So the two families
+  are listed apart, and choosing an English-only model sets the language
+
+Still open:
+
+- **Switching without a restart.** Cheap for `base.en` (0.05 s) and no longer
+  cheap in general — `large-v3` takes seconds — but it needs the
+  swappable-`Arc` path wired through, and a relaunch is honest in the
+  meantime
+- **The wake-word models have no catalogue.** A released app tells the user to
+  run `tools/fetch-wakeword-models.sh` from a repo they do not have
 
 ### 3.5 App surface
 
