@@ -80,3 +80,6 @@ apps/*/.build/
 
 # Rust helper spike
 crates/*/target/
+
+# Voice trial recordings — real people, never committed (tools/record-voice-trial.sh)
+trial/

@@ -136,6 +136,48 @@ pub struct Policy {
     /// single "alexa" opens a turn three or four times — which is the
     /// same bug the Python side answers with a 2-second cooldown.
     pub wake_cooldown_frames: usize,
+    /// Seconds of speech per voiceprint, or `None` to identify nobody.
+    ///
+    /// `None` is the default and it is not merely "off": the model costs
+    /// ~125 MB resident whether or not anyone speaks, so a dictation host
+    /// that never asked must not pay for it.
+    ///
+    /// **Rounded to a multiple of 2 s before use** — anything else
+    /// corrupts the embedding rather than merely shortening it. See
+    /// `speaker::SEGMENT_FRAMES`.
+    pub speaker_window: Option<f32>,
+    /// Frames of speech between re-identifications while someone keeps
+    /// talking. Continuous tracking, not one answer per turn — people
+    /// interrupt and hand over mid-sentence.
+    pub speaker_interval_frames: usize,
+    /// Where voiceprints persist. `None` keeps them for the process only,
+    /// so every run rediscovers `speaker_0` from scratch.
+    pub speaker_store: Option<std::path::PathBuf>,
+    /// Frames of quiet a voiceprint may span before it starts over.
+    ///
+    /// **Without this a 4 s window is unreachable in dictation**, where
+    /// turns run two to four seconds: one stretch never fills it, so the
+    /// person is never identified at all. Carrying the buffer across
+    /// short pauses makes the window "the last N seconds they spoke"
+    /// rather than "one unbroken run". 0 restores the per-stretch
+    /// behaviour, which is what a room with fast turn-taking wants —
+    /// two people alternating faster than this blend into one voiceprint.
+    pub speaker_gap_frames: usize,
+    /// Whether a voice nobody recognises becomes a profile by itself.
+    ///
+    /// **False by default.** A failed match means either a new person or
+    /// a poor recording of a known one, and the audio cannot say which;
+    /// assuming "new person" every time fills the registry with fragments
+    /// of the same voice, and each fragment makes the next match more
+    /// ambiguous. Unknown voices are reported as `unknown` and enrolment
+    /// is deliberate — see the `learn` command.
+    pub speaker_discover: bool,
+    /// How alike two voiceprints must be to count as the same person.
+    ///
+    /// **Lower merges, higher splits** — the opposite of the intuitive
+    /// reading, and the knob for a room where one person keeps turning
+    /// into three. See `speaker::registry::DEFAULT_MATCH_THRESHOLD`.
+    pub speaker_threshold: f32,
 }
 
 impl Policy {
@@ -176,6 +218,17 @@ impl Policy {
             // 2 s, matching the Python detector's cooldown. Chosen there
             // by watching one utterance produce a burst of events.
             wake_cooldown_frames: 25,
+            speaker_window: None,
+            // 2 s. Fast enough to notice a hand-over mid-conversation,
+            // slow enough that the ~36 ms embedding is 2% of a core.
+            speaker_interval_frames: 25,
+            speaker_store: None,
+            // 2 s. Longer than a breath or a mid-sentence pause, shorter
+            // than the beat between somebody finishing and somebody else
+            // starting — though only just, which is why it is a flag.
+            speaker_gap_frames: 25,
+            speaker_discover: false,
+            speaker_threshold: crate::speaker::registry::DEFAULT_MATCH_THRESHOLD,
         }
     }
 }

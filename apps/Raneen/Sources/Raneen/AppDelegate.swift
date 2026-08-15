@@ -94,6 +94,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // the turn to finish either — swapping it mid-sentence costs
         // nothing but the animation starting over.
         settings.onIndicatorStyleChange = { [weak self] style in self?.panel.restyle(style) }
+        settings.onSpeakerCommand = { [weak self] command in
+            guard let helper = self?.helper else { return }
+            switch command {
+            case .list: helper.requestSpeakers()
+            case .name(let id, let name): helper.enroll(speaker: id, name: name)
+            case .forget(let id): helper.forget(speaker: id)
+            case .learn(let name):
+                name.isEmpty ? helper.cancelLearning() : helper.learn(name: name)
+            }
+            // No follow-up query: the core answers every one of these
+            // with the roster, so a rename it rejected shows as unchanged
+            // rather than as applied.
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         show(.starting)
@@ -579,6 +592,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .error(let message):
             state = "error: \(message)"
             show(.error)
+        case .speakerIdentified(let id, let name, _, let settled, let from, let to):
+            // Only a settled answer is worth acting on: a running one is
+            // provisional and may name whoever is about to be interrupted.
+            if settled {
+                // The id, never the name — a person's name is the same
+                // class of data as the transcript, which this log never
+                // carries at any level. The span is what makes the line
+                // useful for lining identity up against dictated text.
+                Log.helper.info(
+                    "speaker identified: \(id) spoke \(String(format: "%.1f–%.1f s", from, to))")
+                settings.speakerHeard(id: id)
+                // A pending enrolment is only finished when the core has
+                // actually heard the person, which is this event and not
+                // the acknowledgement of the command.
+                settings.learned(name)
+            }
+        case .speakers(let profiles):
+            settings.speakersChanged(to: profiles)
         case .pong(let armed):
             state = armed ? "armed" : "idle"
         case .exited(let status):

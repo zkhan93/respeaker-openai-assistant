@@ -22,8 +22,34 @@ final class Helper {
         case level(peak: Int, blocks: [Int])
         case error(message: String)
         case pong(armed: Bool)
+        /// Someone is speaking. Arrives repeatedly while they talk —
+        /// `settled` marks the final answer for a stretch of speech, so a
+        /// list that wants one row per person filters on it.
+        /// `startedAt`/`endedAt` are seconds of audio since the core
+        /// began ingesting — the span of the run of speech, which is
+        /// what lets text be attributed to a person rather than merely
+        /// noting that they are in the room.
+        case speakerIdentified(
+            id: String, name: String?, score: Double, settled: Bool,
+            startedAt: Double, endedAt: Double)
+        /// The roster, in reply to `speakers()`.
+        case speakers([SpeakerProfile])
         case exited(status: Int32)
         case unknown(raw: String)
+    }
+
+    /// One enrolled voice, as the settings window shows it.
+    struct SpeakerProfile: Identifiable, Equatable {
+        let id: String
+        var name: String?
+        /// Voiceprints folded into this profile. One is a first guess;
+        /// the more there are, the better it recognises them.
+        let samples: Int
+        /// A few seconds of this person, kept by the core when it first
+        /// heard them. **The only thing in this list a human can act on**
+        /// — nobody recognises `speaker_3` from an id and a count, and
+        /// naming the wrong person is worse than leaving them unnamed.
+        let clip: URL?
     }
 
     private let executable: URL
@@ -114,6 +140,31 @@ final class Helper {
     func disarm() { send(["cmd": "disarm"]) }
     func ping() { send(["cmd": "ping"]) }
 
+    /// Ask for the speaker roster. Answered by a `speakers` event.
+    func requestSpeakers() { send(["cmd": "speakers"]) }
+
+    /// Bind a name to a voice the core discovered.
+    func enroll(speaker: String, name: String) {
+        send(["cmd": "enroll", "speaker": speaker, "name": name])
+    }
+
+    /// Forget a voice. Their id is never reused.
+    func forget(speaker: String) { send(["cmd": "forget", "speaker": speaker]) }
+
+    /// Attach the next few seconds of speech to this name.
+    ///
+    /// **The only way anybody enters the registry.** The core does not
+    /// invent profiles for voices it fails to recognise — a failed match
+    /// is as often a poor recording of somebody known as it is a new
+    /// person, and guessing filled the registry with fragments of one
+    /// voice. Repeating this with the same name improves that profile
+    /// rather than adding a second.
+    func learn(name: String) { send(["cmd": "learn", "name": name]) }
+
+    /// Cancel a pending `learn`, so a dismissed sheet does not leave the
+    /// microphone armed to enrol whoever speaks next.
+    func cancelLearning() { send(["cmd": "learn"]) }
+
     private func send(_ command: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: command),
               var line = String(data: data, encoding: .utf8) else { return }
@@ -199,6 +250,25 @@ final class Helper {
             onEvent?(.error(message: object["message"] as? String ?? "unknown error"))
         case "pong":
             onEvent?(.pong(armed: object["armed"] as? Bool ?? false))
+        case "speaker_identified":
+            onEvent?(.speakerIdentified(
+                id: object["speaker"] as? String ?? "?",
+                name: object["name"] as? String,
+                score: object["score"] as? Double ?? 0,
+                settled: object["settled"] as? Bool ?? false,
+                startedAt: object["started_at"] as? Double ?? 0,
+                endedAt: object["ended_at"] as? Double ?? 0
+            ))
+        case "speakers":
+            let listed = (object["speakers"] as? [[String: Any]] ?? []).map {
+                SpeakerProfile(
+                    id: $0["id"] as? String ?? "?",
+                    name: $0["name"] as? String,
+                    samples: $0["samples"] as? Int ?? 0,
+                    clip: ($0["clip"] as? String).map(URL.init(fileURLWithPath:))
+                )
+            }
+            onEvent?(.speakers(listed))
         case "bye":
             break
         default:

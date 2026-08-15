@@ -24,6 +24,10 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case models
     case detection
     case wakeWord
+    /// After Wake Word and before Recording: it is the other thing that
+    /// listens alongside dictation without changing it, and it shares
+    /// Recording's property of costing something real when switched on.
+    case speakers
     case recording
 
     var id: String { rawValue }
@@ -35,6 +39,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .models: return "Models"
         case .detection: return "Detection"
         case .wakeWord: return "Wake Word"
+        case .speakers: return "Speakers"
         case .recording: return "Recording"
         }
     }
@@ -49,6 +54,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .models: return "square.stack.3d.up"
         case .detection: return "waveform"
         case .wakeWord: return "ear"
+        case .speakers: return "person.wave.2"
         case .recording: return "dot.radiowaves.left.and.right"
         }
     }
@@ -70,6 +76,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             return "What counts as speech, and where a turn ends."
         case .wakeWord:
             return "The words that can open a turn, and how keenly they listen."
+        case .speakers:
+            return "Who is talking, and the voices this Mac has learned."
         case .recording:
             return "Publishing audio and events to other machines."
         }

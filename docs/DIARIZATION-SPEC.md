@@ -1,7 +1,9 @@
 # Speaker Diarization & Identification — Implementation Spec
 
-**Status:** specification. Not implemented — but the parts that could have
-vetoed it have now been **measured**, not assumed. See the update below.
+**Status:** **live identification is implemented**, with a settings pane —
+`crates/raneen-core/src/speaker/` and `apps/Raneen/…/SpeakersView.swift`,
+2026-08-13. Batch diarization is not, and is not planned for the core. One thing
+remains unproven: whether it tells *real* people apart. See the updates below.
 **Created:** 2026-08-09 · **Spiked:** 2026-08-11
 **Target language:** Rust
 **Audience:** an implementer with no prior context on this system
@@ -46,7 +48,7 @@ path any more.
 | Section | Why it drops out |
 | --- | --- |
 | §5 batch diarization, pyannote, clustering | offline concern — and see the tract result below |
-| §6.3 mid-segment provisional identification | no live captions to feed; identify once per turn |
+| ~~§6.3 mid-segment provisional identification~~ | **restored 2026-08-13 — see the implementation note** |
 | §6.5 `select_best_embedding_window` | the window is fixed at the turn's start |
 | §6.9 reclustering | retroactive fix-up of a recording |
 | §8 status/lock state machine | protects corrections in a transcript UI |
@@ -82,6 +84,33 @@ the first substantial turn and carry that identity across subsequent short ones
 until a new identification contradicts it. This is §6.7's Tier-0 stickiness
 widened from one utterance to one conversation, and `ConversationManager`
 already rotates a `thread_id` that scopes it.
+
+### Implementation note — 2026-08-13: §6.3 came back
+
+The plan above identified **once per turn, from the turn's start**. What shipped
+re-identifies **every `--speaker-interval` seconds while speech continues**, plus
+once when it stops. That is §6.3's mid-segment identification in all but name,
+and dropping it was wrong for the stated reason:
+
+> Identifying once per turn answers "who *started* talking". A room does not
+> work that way — people interrupt, hand over mid-sentence, and talk past a VAD
+> that has not yet closed.
+
+The spec's `update_centroid = false` distinction earns its keep exactly here:
+**only the settled answer teaches a profile.** A running guess mid-stretch may
+belong to whoever is about to be interrupted, and letting it drift a centroid
+would corrupt the profile of the person who was *not* speaking.
+
+What did *not* come back: §6.5's best-window selection (the window is the most
+recent one, not the loudest), §6.9's reclustering, and §8's lock state machine.
+
+**One bug this shape introduced, worth knowing before re-deriving it.** The
+settled identification fires on the VAD's stop — which arrives only after
+`silence_frames` of quiet, so its window is part speech and part silence. A
+voiceprint taken from that scores *below the match threshold against the very
+speaker who just spoke*: measured, the running answers matched at 0.68 and 0.71
+while every settled one invented a new speaker, so two stretches produced four
+profiles. The closing silence must be trimmed before embedding.
 
 ### Finding 1 — `tract` runs CAM++. It does not run pyannote.
 
@@ -214,7 +243,11 @@ For the assistant. §15's order stands for the meeting product.
 1. fbank front-end, pinned to `campplus_reference.json` — **1 d**
 2. CAM++ embedder on tract, fixed window — **0.5 d**
 3. Speaker store: SQLite, profiles, count-weighted centroid (§6.8, §7) — **1 d**
+   — *shipped as an atomically-replaced JSON file. The access pattern is a
+   linear scan over a handful of rows and `serde_json` was already a
+   dependency; `rusqlite` would have added a bundled C library for nothing.*
 4. Matching (§6.7 — threshold **and** margin) plus session stickiness — **0.5 d**
+   — *the margin needed a third outcome to be safe; see the 2026-08-13 update.*
 5. Turn hook and the `speaker_identified` event — **0.5 d**
 6. `enroll` protocol command and a conformance case — **0.5 d**
 
@@ -224,11 +257,36 @@ path.
 
 ### Open questions this did NOT answer
 
-**Fidelity is not accuracy.** The port now reproduces sherpa exactly. Whether
-CAM++ separates the actual people in your house or your meetings is untested,
-and it is the question that decides whether 125 MB is worth spending. It needs
-two-speaker audio with known ground truth — a recording session, not a spike.
-§14.6's non-English caveat is likewise unmeasured.
+**Fidelity is not accuracy — and trying to close this made it sharper.** The
+port reproduces sherpa exactly. Whether CAM++ separates the actual people in
+your house is *still* untested, and it decides whether 125 MB is worth spending.
+
+Implementation included an attempt to test separation with two macOS `say`
+voices reading the same sentence. **It does not work, and the failure is
+instructive.** Cosine between the two *different* speakers, by window length —
+identical in the Rust implementation and the Python reference, so this is the
+model rather than a bug:
+
+```text
+  window   1.0    1.6    2.0    2.5    3.0    3.5    4.0
+  A vs B   0.62   0.50   0.22   0.91   0.83   0.50   0.18
+```
+
+Two different people at 0.91, and 0.22 half a second either side. CAM++ is
+trained on VoxCeleb — real recordings — so synthetic voices are out of
+distribution and the embedding is *unstable*, not merely inaccurate.
+
+Two consequences, both now enforced in the code:
+
+* **No test asserts that two speakers get two profiles.** Such a test passes on
+  the window length rather than on the code, which is worse than none. A first
+  draft of exactly that test passed at 2.0 s by luck and would have failed at
+  2.5 s.
+* **`--speaker-window` cannot be tuned against synthetic audio.** The 2.0 s
+  default is the spec's neighbourhood, not a measured optimum.
+
+Real two-speaker recordings with known ground truth are the missing piece.
+Nothing else about the feature is blocked on them.
 
 **The privacy question (§14.5) is unchanged and still blocking.** A voiceprint
 is biometric data. Storing them by default in a dictation app is a materially
@@ -240,6 +298,377 @@ as profile 3"*; only the app knows that is Zeeshan. That needs a new inbound
 command — `{"cmd":"enroll","speaker":"speaker_2","name":"Zeeshan"}` — which
 would be the protocol's first *stateful* command, and is unreachable for a
 ZeroMQ-only consumer, since the core publishes but does not receive.
+*Shipped, along with `speakers` and `forget`. Every one of them answers with
+the full roster, including the ones that fail — see the update below.*
+
+---
+
+## Update — 2026-08-13 (later): the settings window, and the bug it exposed
+
+Building the UI for this found a defect that no amount of reading would have,
+because it only appears once a store has been *lived in*.
+
+### The margin was creating the ambiguity it existed to prevent
+
+§6.7's rule is threshold **and** margin: the best profile must clear 0.65 *and*
+beat the runner-up by 0.03, so two similar people produce no answer rather than
+a coin flip. Correct, and the asymmetry is right — a mislabelled turn is far
+worse than an unlabelled one.
+
+The implementation expressed both failures as one: `best_match` returned
+`Option`, and `None` meant "make a new speaker". So a voiceprint that failed the
+*margin* — meaning **two existing profiles already fit this person** — minted a
+third. And then the loop closes: with three near-identical profiles, everything
+that person says next is ambiguous too, so it makes a fourth. **One human being,
+unbounded profiles, and the store degrading the more it hears.** Reported from a
+real session as "there are a lot of speakers getting created".
+
+Discovering and abstaining are different answers and the code now says so:
+
+```rust
+pub enum Resolution {
+    Identified(Identity),                  // matched, or genuinely new
+    Ambiguous { best: f32, second: f32 },  // two fit — report nobody
+}
+```
+
+Ambiguity publishes no event and creates nothing. The host carries the previous
+identity forward, which is the same behaviour it already has for speech too
+short to identify. It is logged to stderr with both scores, because from outside
+an ambiguous stretch and a silent one look identical.
+
+### The threshold is now a setting, and it reads backwards
+
+`--speaker-threshold`, default 0.65, surfaced in the Speakers pane. The
+direction is the trap: **lower merges, higher splits.** A bigger number means a
+voice must sound *more* like itself to be recognised, so it produces *more*
+profiles — the opposite of what "raise the matching strength" suggests. Measured
+end to end on `two-speakers.wav`:
+
+| `--speaker-threshold` | profiles |
+| --- | --- |
+| 0.15 | 2 |
+| 0.65 (default) | 2 |
+| 0.95 | 4 |
+
+The window therefore labels it by consequence ("drag left when one person keeps
+turning into several") rather than by similarity, and states plainly that
+lowering it does **not** merge rows that already exist. Nothing here is ever
+joined behind the user's back; duplicates are deleted by hand.
+
+The app's slider is 0.35–0.90 against the core's 0.05–0.99. The ends of the core
+range are not preferences: near 0 everyone in the room becomes whoever spoke
+first, near 1 every sentence is a stranger.
+
+### Profiles keep the audio that created them
+
+A roster of `speaker_3 · 4 recordings` is unnameable. The core now writes the
+window that minted each profile to `speaker-clips/<id>.wav` beside the store,
+and reports the path in the `speakers` event; the pane plays it. One clip per
+speaker, ~64 KB, written once on discovery — not per utterance.
+
+Three properties worth keeping:
+
+* **`forget` deletes the WAV.** Forgetting someone while leaving their voice on
+  disk is not forgetting them.
+* **The path is stdout-only.** The ZeroMQ form of `speakers` omits it: a
+  consumer on another machine cannot open it, and would learn only where this
+  user's home directory is.
+* **Ids are validated before becoming paths.** `forget` takes an id from the
+  host and that id reaches `remove_file`; anything but `[A-Za-z0-9_-]` is
+  refused rather than walked.
+
+This makes §14.5 sharper rather than answering it: the product now stores
+biometric data *and* raw voice recordings by default when the feature is on.
+Still blocking, still a legal question.
+
+### The threshold was not the cause — a log from a real session
+
+Reported the same day: *"I said 2 phrases with this enabled and each time there
+is a new speaker being created"*, with a ZeroMQ trace and a roster whose ids had
+reached `speaker_179`. Two further defects, both invisible without the log, and
+neither fixable by any setting.
+
+**A running guess was creating permanent people.** `resolve` took a `teach`
+flag, and a provisional answer passed `false` — so it could not *teach* a
+profile, for the good reason that a guess mid-stretch may belong to whoever is
+about to be interrupted. But when it matched nobody it still *created* one, which
+is strictly worse: a profile no answer was allowed to improve. In the trace,
+utterance 11's first identification carries `"score": 1.0` — the value a freshly
+minted profile gets — for the same person saying the same sentence that had
+matched `speaker_178` at 0.78 ten seconds earlier.
+
+`teach: bool` became `Trust::{Provisional, Settled}`, and provisional now does
+neither. The cost is deliberate and worth stating: **the first time a voice is
+ever heard, identity arrives when they stop talking rather than while they
+talk.** That contradicts "identity arrives before the transcript" above — for
+strangers only. For anyone already known, the running answer still comes first.
+
+**Settled identifications were failing silently.** `Cadence::stop()` gated on
+`window_frames`, but a settled voiceprint discards the closing silence before
+embedding — so it needs `window + silence_frames` of collected audio to have a
+full window left. Between the two gates lies a dead zone: at 2 s window and 0.64 s
+silence, any stretch of 2.0–2.6 s passed the cadence and then failed inside
+`embed` with *"need 32000 samples, got 31360"*, on stderr. Utterance 10 in the
+trace is exactly that — a running answer and then no settled one. **Nothing was
+ever taught, so no profile ever sharpened, so the next utterance matched nothing
+either.** Every profile in that roster sits at one or two samples.
+
+**And the diagnostics were the real gap.** `speaker_identified` carries the
+score of the match it made, which for a new profile is the meaningless 1.0. The
+number that decides everything — what the best *existing* profile scored — was
+never printed. Now every identification logs the full ranking and the window's
+RMS:
+
+```text
+speaker: Provisional 2.0s rms 4482 vs [speaker_0 0.781]
+speaker: nobody known fits (best 0.000); a running guess does not create profiles
+```
+
+0.63 against a known voice is a threshold that needs lowering. 0.11 is something
+wrong with the audio, and no setting fixes it. Those two cases were previously
+indistinguishable from outside.
+
+### Measuring it, at last: `raneen-core voiceprint`
+
+The open question at the top of this section — *does CAM++ separate real
+people* — has blocked tuning for four sessions, and the repo had no way to
+answer it. It does now:
+
+```bash
+./tools/record-voice-trial.sh zeeshan 5     # 5 takes of a fixed sentence
+./tools/record-voice-trial.sh <other> 5
+./crates/raneen-core/target/release/raneen-core voiceprint trial/*.wav
+```
+
+`voiceprint` prints the cosine matrix with no registry, threshold or matching
+involved, groups files by the name before the first `-`, and reports the two
+distributions that decide everything: same-person pairs and different-person
+pairs. If they are separated it names the threshold that sits between them. If
+they overlap it says so — and then no setting works, and the window or the
+input is what has to change.
+
+**Until that table exists, every threshold in this system is a guess**, including
+the 0.65 default.
+
+### The table, at last — and the 0.65 default was wrong
+
+Two real people, two takes each of one sentence, 2 s window:
+
+```text
+             hiba-1  hiba-2  zeesh-1 zeesh-2
+  hiba-1      1.000   0.726   0.238   0.291
+  hiba-2      0.726   1.000   0.221   0.318
+  zeeshan-1   0.238   0.221   1.000   0.686
+  zeeshan-2   0.291   0.318   0.686   1.000
+
+  same person       0.686 … 0.726
+  different people  0.221 … 0.318
+```
+
+**CAM++ separates these two real people cleanly** — a 0.37 gap, not a marginal
+one. That closes the four-session-old question of whether the feature is worth
+125 MB: for this pair, on this hardware, yes.
+
+It also condemns the default. **0.65 sat 0.026 below the worst same-person
+pair.** A merely average recording of somebody already known scored under it and
+became a stranger — the reported symptom, arriving from a number rather than
+from a bug. Changed to **0.50**, the midpoint of the two measured ranges. The
+asymmetry argues for erring low anyway: too low merges two people, which is
+visible in the roster and one slider away from fixed; too high mints profiles
+without limit.
+
+Six pairs from one session is a starting point, not a settled number.
+
+### Correction: the window instability is not synthetic audio
+
+The section above blames the erratic window sweep on `say` voices being out of
+distribution for a VoxCeleb-trained model. **That explanation does not survive
+real recordings**, which show the same non-monotonicity:
+
+```text
+  window        1.0    1.5    2.0    3.0    4.0    6.0
+  same, worst   0.907  0.615  0.686  0.839  0.781  0.838
+  diff, best    0.692  0.371  0.318  0.797  0.336  0.339
+  gap           0.215  0.244  0.368  0.042  0.445  0.499
+```
+
+At 3 s these two people score up to **0.797** against each other — barely
+distinguishable from the 0.839 they score against themselves. At 2 s and 4 s the
+same recordings separate cleanly. A window length either side of the shipping
+default nearly collapses the feature.
+
+*Round two settled it, and the answer was neither guess. See below.*
+
+### The root cause: CAM++ pools time in 2-second segments
+
+With a second sentence recorded per person — ten files, 45 pairs — the sweep
+resolved into a **perfect sawtooth with period 200 frames**. The best score
+between two *different* people, where lower is better:
+
+```text
+  frames  100   200   220   240   300   360   400   420   500   600
+  diff   .733  .318  .949  .954  .809  .395  .336  .948  .753  .342
+```
+
+It resets at every multiple of 200 and decays smoothly in between. Just past a
+boundary two different people score **0.95** — the embeddings collapse toward a
+common vector and identity is simply gone.
+
+**ONNX Runtime reproduces this to three decimals.** So it is not tract, not the
+fbank port, and not synthetic audio. It is the model, and the graph says why:
+
+```text
+/xvector/tdnn/linear/Conv    strides [2]                    time ÷ 2
+…/cam_layer/AveragePool      kernel [100] stride [100]
+                             ceil_mode 1, count_include_pad 1
+```
+
+CAM++'s context-aware masking pools the time axis in non-overlapping segments of
+100 internal frames, and the TDNN halves time before it — so a segment is **200
+input frames, 2.0 seconds**. `ceil_mode` plus `count_include_pad` mean a partial
+final segment is zero-padded and then averaged *as if it were full*. A 2.2 s
+window computes its last segment's context from 20 frames of speech and 80 of
+nothing, a fifth of the true value — and that context is multiplied back into the
+features. The mask is the mechanism, so poisoning it poisons everything after it.
+
+The window is now snapped to a multiple of 200 frames in
+`SpeakerIdentifier::load`, and the app offers 2/4/6/8 s as fixed choices. **Its
+previous control was a 0.5-second slider, so six of its nine positions were
+silently producing garbage.**
+
+### What this invalidates
+
+**Every threshold this document has recommended, including the two above.** The
+0.65 original, and the 0.50 derived one section earlier, were both read off
+sweeps that were partly measuring the sawtooth. So was the "synthetic voices are
+out of distribution" conclusion, twice. The numbers were real; what they measured
+was a pooling artefact.
+
+Re-measured at a legal window (4 s), ten recordings, two sentences:
+
+```text
+  same person       0.518 … 0.860
+  different people  0.103 … 0.336
+```
+
+Default threshold **0.40**, default window **4 s**. Longer is better where the
+speech exists — the same-vs-different gap is +0.008 at 2 s, +0.182 at 4 s and
++0.211 at 6 s — so 2 s is legal but weak, and it is what shipped.
+
+### The window is now time spent speaking, not one unbroken turn
+
+Snapping the window to 2/4/6/8 s created a problem it did not have before: a
+settled identification needed that much *continuous* speech, and ordinary
+dictation turns are two to four seconds. The two utterances in the reported
+session were 2.6 s and 3.4 s. At the 4 s default, **neither would have been
+identified** — the fix for one bug would have produced a worse one.
+
+So the voiceprint buffer now holds **speech only, and survives pauses shorter
+than `--speaker-gap`** (default 2 s). Three 1.6-second turns fill a 4-second
+window between them. Demonstrated on `two-sentences.wav`, whose sentences are
+each too short alone:
+
+```text
+  --speaker-gap 2.0   speaker_0  settled  spoke 0.96–7.60 s
+  --speaker-gap 0     NO IDENTIFICATION
+```
+
+The second line is the old behaviour, and it is what the user was seeing.
+
+Two things fell out of implementing it:
+
+* **The buffer takes only frames the detector called speech.** An utterance
+  stays open through its own closing silence, so `is_active` was including up to
+  `silence_frames` of quiet at the end of every settled voiceprint. That is the
+  bug the previous section describes fixing with a trim; gating on
+  `VoiceActivityTracker::silence_run() == 0` removes the need for the trim
+  entirely, and with it the class of off-by-one it created.
+* **`Cadence` no longer counts anything.** The caller reports how much speech is
+  buffered and the cadence decides whether that is enough. The two used to keep
+  separate counts and disagree, which is how a stretch could pass the gate and
+  then fail inside `embed`.
+
+**The cost is stated plainly because it is real:** two people alternating faster
+than `--speaker-gap` blend into one voiceprint, which then matches neither.
+`--speaker-gap 0` restores per-stretch isolation and gives up short turns. There
+is no setting that gets both, because deciding whether the voice after a pause
+is the same voice is the very thing being computed.
+
+### Every identification now says when
+
+`speaker_identified` carries `started_at` and `ended_at`: seconds of audio since
+ingest began, describing **the run of speech** rather than the voiceprint (which
+is only its most recent few seconds). Not wall clock — events are asynchronous,
+so when a host *reads* a line says nothing about when the speech happened.
+
+This is the field that makes the eventual goal possible: attributing dictated
+text to a named person rather than merely noting who is in the room. Aligning it
+against a transcript needs the transcript to carry the same clock, which it does
+not yet — that is the next step, not this one.
+
+### Automatic discovery was the wrong default, and is now off
+
+Reported after all of the above shipped: *"I was still seeing speaker profiles
+being created… when it actually does not match then we think we should create a
+new profile, which is not true all the time."*
+
+Correct, and it is the same asymmetry as `MATCH_MARGIN` applied one level up. A
+voiceprint that matches nobody has two explanations — a person nobody enrolled,
+or a poor recording of somebody who is — and **nothing in the audio
+distinguishes them.** Creating a profile assumes the first every time. Being
+wrong costs a permanent entry that makes every subsequent comparison more
+ambiguous, which makes the next failure likelier; being wrong the other way
+costs one unlabelled utterance.
+
+So `--speaker-discover` is off by default. An unrecognised voice is reported as
+the reserved id `unknown` — **reported, not silently dropped**, because going
+quiet is indistinguishable from nobody having spoken, and "somebody spoke here
+and we cannot say who" is a perfectly good thing to write against a transcript.
+
+This reverses §1's framing and the pane's original "profiles are discovered, not
+created" note, both of which are now wrong. It also removes the awkwardness that
+note was working around: with deliberate enrolment the person pressing the
+button knows who they are, where a match score was guessing.
+
+    {"cmd":"learn","name":"Zeeshan"}
+
+attaches the next few seconds of speech to that name. **Repeating it with the
+same name teaches rather than duplicates** — the cheapest available fix for the
+position sensitivity a single window still carries, since each sample averages
+another few seconds of that person into the centroid. The settings pane exposes
+it as "Add a person…" and a per-row "Improve".
+
+Verified end to end against a live helper on `two-sentences.wav`:
+
+```text
+  1. empty registry            → unknown, nothing stored
+  2. learn "Zeeshan", speak    → speaker_0 / Zeeshan
+  3. speak again               → speaker_0 / Zeeshan  (matched, not re-created)
+  4. roster                    → one profile, 2 samples
+```
+
+### Still unbuilt
+
+* **Averaging several embeddings within one run.** Position sensitivity is still
+  large even at legal window lengths: same-person scores ranged 0.05–0.86 across
+  window offsets at 4 s. The count-weighted centroid already averages *across*
+  turns; doing it within one would cut the variance the single-window design
+  still carries.
+* **A clock on `transcript`.** Without it, `started_at` can be compared only to
+  other speaker events.
+
+### A conformance case that pins the actual failure
+
+The old speaker case asserted "at least 4 speaker events" from
+`two-speakers.wav` — and was passing *because* of the bug, since each running
+guess minted a speaker. It now asserts on `two-sentences.wav` instead: **one
+voice, two turns, exactly one speaker**, with the second turn's running answer
+recognising the profile the first created.
+
+Synthetic audio costs nothing there. It compares a voice with *itself*, which is
+fidelity — the thing `say` output can answer honestly — rather than
+discrimination, which it cannot.
 
 ---
 

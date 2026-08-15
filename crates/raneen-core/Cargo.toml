@@ -26,6 +26,10 @@ zmq = "0.10.0"
 # Wake word. Pure Rust, compiles in — see src/hotword/mod.rs for why
 # this rather than ONNX Runtime.
 tract-onnx = "0.21"
+# Speaker identification: the 80-dim Kaldi fbank CAM++ takes. A pure-Rust
+# port — realfft and thiserror, no cmake and no bindgen. Deliberately NOT
+# `knf-rs`, which vendors C++ and needs libclang at build time.
+kaldi-native-fbank = "0.1"
 
 [profile.release]
 # The bundle-size half of the story: LTO plus one codegen unit lets the

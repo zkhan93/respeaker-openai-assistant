@@ -137,7 +137,7 @@ Which is why the same engine also runs two other products:
 
 | | Where | What |
 | --- | --- | --- |
-| **The engine** | [`crates/raneen-core`](crates/raneen-core) | local + remote + streaming STT, Silero VAD, wake words, always-on recorder, ZeroMQ — [its own README](crates/raneen-core/README.md) covers driving it directly |
+| **The engine** | [`crates/raneen-core`](crates/raneen-core) | local + remote + streaming STT, Silero VAD, wake words, continuous speaker identification, always-on recorder, ZeroMQ — [its own README](crates/raneen-core/README.md) covers driving it directly |
 | **Pi appliance** | [`packages/voice-assistant`](packages/voice-assistant) | a ReSpeaker voice assistant: wake word → agent → speaker, LED ring, music ducking |
 | **Desktop CLI** | [`packages/voice-desktop`](packages/voice-desktop) | dictation and the assistant from a terminal — Linux, Windows, macOS |
 | **The contract** | [`protocol/`](protocol) | the wire spec, plus a conformance harness that checks any implementation |

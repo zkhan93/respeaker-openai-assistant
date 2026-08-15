@@ -48,6 +48,13 @@ def main() -> int:
                         help="do not send arm/disarm — for triggers that own their boundaries")
     parser.add_argument("--expect-transcripts", type=int, default=None,
                         help="fail unless exactly N transcripts arrive")
+    parser.add_argument("--expect-speakers", type=int, default=None,
+                        help="fail unless exactly N DISTINCT speaker ids are identified")
+    parser.add_argument("--min-speaker-events", type=int, default=None,
+                        help="fail unless at least N speaker_identified events arrive")
+    parser.add_argument("--expect-speaker-ids", default=None,
+                        help="comma-separated ids the speaker events must name exactly "
+                             "— 'unknown' is the reserved one for a voice nobody knows")
     parser.add_argument("--expect-text", default=None,
                         help="fail unless this appears in a transcript (case-insensitive)")
     args = parser.parse_args()
@@ -149,6 +156,11 @@ def main() -> int:
     print(f"  levels     : {levels}")
     print(f"  rss        : {resident:.0f} MB (with model resident)")
     print(f"  shutdown   : {exited}")
+    speakers = [e for e in events if e.get("event") == "speaker_identified"]
+    distinct = sorted({e.get("speaker") for e in speakers})
+    if speakers:
+        settled = sum(1 for e in speakers if e.get("settled"))
+        print(f"  speakers   : {distinct} ({len(speakers)} events, {settled} settled)")
     if transcripts:
         for i, text in enumerate(transcripts, 1):
             print(f"  transcript {i}: {text!r}")
@@ -177,6 +189,19 @@ def main() -> int:
             failures.append("no transcript")
     elif len(transcripts) != args.expect_transcripts:
         failures.append(f"expected {args.expect_transcripts} transcripts, got {len(transcripts)}")
+    if args.min_speaker_events is not None and len(speakers) < args.min_speaker_events:
+        failures.append(
+            f"expected at least {args.min_speaker_events} speaker events, got {len(speakers)}")
+    if args.expect_speakers is not None and len(distinct) != args.expect_speakers:
+        failures.append(
+            f"expected {args.expect_speakers} distinct speakers, got {len(distinct)}: {distinct}")
+    if args.expect_speaker_ids is not None:
+        # Whether a voice became a profile or stayed 'unknown' is the
+        # difference between two whole policies, and counting distinct
+        # ids cannot see it — both are 1.
+        wanted = sorted(x for x in args.expect_speaker_ids.split(",") if x)
+        if distinct != wanted:
+            failures.append(f"expected speakers {wanted}, got {distinct}")
     if args.expect_text:
         joined = " ".join(transcripts).lower()
         if args.expect_text.lower() not in joined:

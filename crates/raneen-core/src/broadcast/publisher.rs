@@ -216,6 +216,41 @@ fn to_wire(event: &Event) -> Value {
             "type": "transcription_failed", "ts": ts, "message": message, "seconds": seconds
         }),
         Event::State { pattern } => json!({"type": "state", "ts": ts, "pattern": pattern}),
+        // A reply to the host's own query. It goes on the wire too so a
+        // network consumer can learn the roster, but nothing asks for it
+        // there and nothing depends on it arriving.
+        Event::Speakers { profiles } => json!({
+            "type": "speakers", "ts": ts,
+            // No `clip`: it is a path on this machine, so a consumer over
+            // the network could not open it and would learn only where
+            // this user's home directory is.
+            "speakers": profiles.iter().map(|p| json!({
+                "id": p.id, "name": p.name, "samples": p.samples
+            })).collect::<Vec<_>>(),
+        }),
+        Event::SpeakerIdentified {
+            speaker,
+            name,
+            score,
+            settled,
+            started_at,
+            ended_at,
+        } => json!({
+            "type": "speaker_identified", "ts": ts,
+            "speaker": speaker,
+            // `source` carries the same value under the name every other
+            // event uses, so one consumer can read one field across all of
+            // them (AD-7). `hotword_detected` does the same thing.
+            "source": speaker,
+            "name": name,
+            "score": score,
+            "settled": settled,
+            // Seconds of audio since ingest began, not wall clock — the
+            // answer to "who was talking then", and the field a consumer
+            // aligns against a transcript.
+            "started_at": started_at,
+            "ended_at": ended_at,
+        }),
     }
 }
 

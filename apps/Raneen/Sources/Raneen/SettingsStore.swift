@@ -31,6 +31,10 @@ enum SettingsStore {
         static let wakeCooldown = "raneen.wake.cooldownFrames"
         static let broadcast = "raneen.broadcast.mode"
         static let broadcastPort = "raneen.broadcast.port"
+        static let identifySpeakers = "raneen.speaker.enabled"
+        static let speakerWindow = "raneen.speaker.window"
+        static let speakerInterval = "raneen.speaker.interval"
+        static let speakerThreshold = "raneen.speaker.threshold"
     }
 
     /// Valid ranges, and the only place they are written.
@@ -50,6 +54,18 @@ enum SettingsStore {
         static let wakePatience = 1...20
         static let wakeCooldown = 1...200
         static let broadcastPort = 1024...65535
+        /// **Multiples of 2 only** — the model pools time in 2 s
+        /// segments and anything else corrupts the embedding. The pane
+        /// offers exactly these; the range is here so a hand-edited
+        /// default cannot go outside it.
+        static let speakerWindowChoices: [Double] = [2, 4, 6, 8]
+        static let speakerWindow = 2.0...8.0
+        static let speakerInterval = 0.5...10.0
+        /// Narrower than the core's own 0.05–0.99, on purpose. The ends of
+        /// that range are not settings, they are two ways to break the
+        /// feature: near 0 everyone in the room becomes whoever spoke
+        /// first, and near 1 every sentence is a new stranger.
+        static let speakerThreshold = 0.20...0.90
     }
 
     /// What the core should be launched with right now.
@@ -114,6 +130,15 @@ enum SettingsStore {
             defaults, Key.wakeCooldown, in: Limits.wakeCooldown, or: config.wakeCooldownFrames)
         config.broadcastPort = int(
             defaults, Key.broadcastPort, in: Limits.broadcastPort, or: config.broadcastPort)
+        config.identifySpeakers =
+            defaults.object(forKey: Key.identifySpeakers) as? Bool ?? config.identifySpeakers
+        config.speakerWindow = double(
+            defaults, Key.speakerWindow, in: Limits.speakerWindow, or: config.speakerWindow)
+        config.speakerInterval = double(
+            defaults, Key.speakerInterval, in: Limits.speakerInterval, or: config.speakerInterval)
+        config.speakerThreshold = double(
+            defaults, Key.speakerThreshold, in: Limits.speakerThreshold,
+            or: config.speakerThreshold)
 
         return config
     }
@@ -171,6 +196,10 @@ enum SettingsStore {
         defaults.set(config.wakeCooldownFrames, forKey: Key.wakeCooldown)
         defaults.set(config.broadcast.rawValue, forKey: Key.broadcast)
         defaults.set(config.broadcastPort, forKey: Key.broadcastPort)
+        defaults.set(config.identifySpeakers, forKey: Key.identifySpeakers)
+        defaults.set(config.speakerWindow, forKey: Key.speakerWindow)
+        defaults.set(config.speakerInterval, forKey: Key.speakerInterval)
+        defaults.set(config.speakerThreshold, forKey: Key.speakerThreshold)
     }
 }
 

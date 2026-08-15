@@ -70,6 +70,55 @@ pub enum Event {
     TranscriptionFailed { message: String, seconds: f32 },
     /// Indicator pattern: listen / think / armed / disarmed / error.
     State { pattern: String },
+    /// Who is speaking. Published continuously while someone talks, not
+    /// once per turn — a room has people interrupting and handing over
+    /// mid-sentence, and one answer per turn cannot describe that.
+    ///
+    /// `settled` distinguishes a running answer from the final one for a
+    /// stretch of speech. A consumer that only wants one line per speaker
+    /// filters on it; a live indicator uses every event.
+    /// The known speakers, in reply to a `speakers` query.
+    ///
+    /// A *reply*, not a notification: nothing publishes it unprompted.
+    /// The host asks when it opens a settings window, and tracks live
+    /// changes from `SpeakerIdentified` in between.
+    Speakers { profiles: Vec<SpeakerSummary> },
+    SpeakerIdentified {
+        speaker: String,
+        name: Option<String>,
+        score: f32,
+        settled: bool,
+        /// When this person started talking, in seconds of audio since
+        /// the helper began ingesting.
+        ///
+        /// **The run, not the voiceprint.** The voiceprint is only the
+        /// most recent few seconds; this is when the run of speech it
+        /// belongs to began, which is the answer to "who was talking
+        /// then" and what a host needs to attribute text to a person.
+        /// It survives short pauses, on the same rule the voiceprint
+        /// does — see `--speaker-gap`.
+        started_at: f64,
+        /// The end of the most recent speech frame in that run, same
+        /// clock. Equal to `started_at` plus the run's length including
+        /// its internal pauses.
+        ended_at: f64,
+    },
+}
+
+/// One known speaker, as the host sees them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerSummary {
+    pub id: String,
+    pub name: Option<String>,
+    /// How many voiceprints have taught this profile. A proxy for how
+    /// well it is known — one sample is a guess, twenty is a person.
+    pub samples: u32,
+    /// A WAV of the audio that created this profile, if anything is being
+    /// persisted. **A local filesystem path**, which is why it goes to the
+    /// host on stdout and not onto the ZeroMQ wire: a consumer on another
+    /// machine cannot open it, and would only learn the user's home
+    /// directory from it.
+    pub clip: Option<String>,
 }
 
 /// A subscriber. One instance, one thread, one ordered stream.

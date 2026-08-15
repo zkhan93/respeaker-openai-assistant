@@ -85,6 +85,22 @@ impl Consumer for ProtocolConsumer {
                 self.writer
                     .error(&format!("{message} ({seconds:.1}s of speech lost)"));
             }
+            Event::Speakers { profiles } => self.writer.speakers(profiles),
+            Event::SpeakerIdentified {
+                speaker,
+                name,
+                score,
+                settled,
+                started_at,
+                ended_at,
+            } => self.writer.speaker(
+                speaker,
+                name.as_deref(),
+                *score,
+                *settled,
+                *started_at,
+                *ended_at,
+            ),
             // Not in the protocol. A consumer ignoring an event it has no
             // use for is normal; the bus does not need to know who wants
             // what.
@@ -266,6 +282,7 @@ pub fn run(
     // Cursors are just a read position, so making them early is free.
     let level_cursor = bus.create_reader();
     let recorder_cursor = bus.create_reader();
+    let speaker_cursor = bus.create_reader();
     let mut segment_cursor = bus.create_reader();
 
     // Socket -> AudioBus. Does nothing else, so a slow consumer can
@@ -360,6 +377,60 @@ pub fn run(
             .map_err(|e| format!("could not spawn the meta thread: {e}"))?;
     }
 
+    // Continuous speaker identification, on its own cursor. Like the
+    // recorder it is a consumer, not a mode: it never opens a turn, and
+    // switching it on changes nothing about dictation except the memory
+    // the model occupies.
+    //
+    // Built before the thread for the same reason the wake word is — a
+    // missing model or an unreadable profile store must be a startup
+    // error the shell sees, not a thread that dies quietly leaving the
+    // helper looking healthy and saying nothing.
+    let (speaker_tx, speaker_rx) = std::sync::mpsc::channel();
+    let speaker = match policy.speaker_window {
+        Some(window) => {
+            let identifier = crate::speaker::SpeakerIdentifier::load(
+                window,
+                policy.speaker_store.as_deref(),
+                policy.speaker_threshold,
+                policy.speaker_discover,
+            )?;
+            let mut cursor = speaker_cursor;
+            let events = Arc::clone(&events);
+            let running = Arc::clone(&running);
+            let detector = crate::pipeline::vad::build(policy.detector);
+            let silence_frames = policy.silence_frames;
+            let interval_frames = policy.speaker_interval_frames;
+            let gap_frames = policy.speaker_gap_frames;
+            Some(
+                std::thread::Builder::new()
+                    .name("audio:speaker".into())
+                    .spawn(move || {
+                        crate::speaker::consumer::run(
+                            &mut cursor,
+                            detector,
+                            identifier,
+                            events,
+                            running,
+                            silence_frames,
+                            interval_frames,
+                            gap_frames,
+                            speaker_rx,
+                        )
+                    })
+                    .map_err(|e| format!("could not spawn the speaker thread: {e}"))?,
+            )
+        }
+        None => {
+            // Consume both so they are not silently unused; dropping the
+            // receiver also makes any `enroll` command fail loudly rather
+            // than vanish into a channel nobody reads.
+            drop(speaker_cursor);
+            drop(speaker_rx);
+            None
+        }
+    };
+
     // The wake-word detector is built HERE, not inside the segment
     // thread, so an unreadable model or a mismatched input shape is a
     // startup error the shell sees — the same rule the audio format
@@ -419,7 +490,7 @@ pub fn run(
         if line.is_empty() {
             continue;
         }
-        if !handle(line, &writer, &turn, &events) {
+        if !handle(line, &writer, &turn, &events, &speaker_tx) {
             break;
         }
     }
@@ -435,6 +506,11 @@ pub fn run(
     // orphaned for hours.
     running.store(false, Ordering::Relaxed);
     let _ = segmenter.join();
+    if let Some(handle) = speaker {
+        // Joined before the engine drains: it owns the profile store and
+        // saves on the way out.
+        let _ = handle.join();
+    }
     if let Some(recorder) = recorder {
         let _ = recorder.join();
     }
@@ -445,7 +521,28 @@ pub fn run(
 }
 
 /// Returns false when the command loop should stop.
-fn handle(line: &str, writer: &EventWriter, turn: &Mutex<Turn>, events: &EventBus) -> bool {
+/// Forward a registry command, or say why it cannot be served.
+///
+/// The receiver is dropped when identification is off, so a `send` that
+/// fails means exactly that — and saying so beats a command that vanishes
+/// into a channel nobody reads.
+fn send_speaker(
+    writer: &EventWriter,
+    speakers: &std::sync::mpsc::Sender<crate::speaker::consumer::SpeakerCommand>,
+    command: crate::speaker::consumer::SpeakerCommand,
+) {
+    if speakers.send(command).is_err() {
+        writer.error("speaker identification is not enabled (see --speaker-window)");
+    }
+}
+
+fn handle(
+    line: &str,
+    writer: &EventWriter,
+    turn: &Mutex<Turn>,
+    events: &EventBus,
+    speakers: &std::sync::mpsc::Sender<crate::speaker::consumer::SpeakerCommand>,
+) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         writer.error("malformed JSON");
         return true;
@@ -466,6 +563,69 @@ fn handle(line: &str, writer: &EventWriter, turn: &Mutex<Turn>, events: &EventBu
             let armed = turn.lock().unwrap_or_else(|e| e.into_inner()).armed;
             writer.pong(armed);
         }
+        // Naming is the caller's job, not the core's: the core can say
+        // "this is the same voice as speaker_0", and only the host knows
+        // that is Zeeshan. The first *stateful* command in the protocol.
+        "enroll" => {
+            let speaker = value.get("speaker").and_then(|v| v.as_str());
+            let name = value.get("name").and_then(|v| v.as_str());
+            match (speaker, name) {
+                (Some(speaker), Some(name)) if !speaker.is_empty() && !name.is_empty() => {
+                    send_speaker(
+                        writer,
+                        speakers,
+                        crate::speaker::consumer::SpeakerCommand::Enrol {
+                            speaker: speaker.to_string(),
+                            name: name.to_string(),
+                        },
+                    );
+                }
+                _ => writer.error("enroll wants non-empty 'speaker' and 'name' fields"),
+            }
+        }
+        // The roster, for a host that wants to show it. Answered with a
+        // `speakers` event rather than a return value, because every other
+        // answer this protocol gives is an event too.
+        // Enrolment on purpose: the *next* few seconds of speech become
+        // this person. The core does not guess who anybody is any more
+        // (see `--speaker-discover`), so this is how anyone gets into the
+        // registry at all — and it is the better way regardless, because
+        // somebody pressing a button knows who they are where a match
+        // score is guessing.
+        "learn" => match value.get("name").and_then(|v| v.as_str()) {
+            Some(name) => send_speaker(
+                writer,
+                speakers,
+                crate::speaker::consumer::SpeakerCommand::Learn {
+                    name: name.to_string(),
+                },
+            ),
+            // An absent name cancels, so a settings sheet that was opened
+            // and dismissed does not leave the microphone armed to enrol
+            // whoever speaks next.
+            None => send_speaker(
+                writer,
+                speakers,
+                crate::speaker::consumer::SpeakerCommand::Learn {
+                    name: String::new(),
+                },
+            ),
+        },
+        "speakers" => send_speaker(
+            writer,
+            speakers,
+            crate::speaker::consumer::SpeakerCommand::List,
+        ),
+        "forget" => match value.get("speaker").and_then(|v| v.as_str()) {
+            Some(speaker) if !speaker.is_empty() => send_speaker(
+                writer,
+                speakers,
+                crate::speaker::consumer::SpeakerCommand::Forget {
+                    speaker: speaker.to_string(),
+                },
+            ),
+            _ => writer.error("forget wants a non-empty 'speaker' field"),
+        },
         "quit" => return false,
         other => {
             // Answered rather than ignored, so a host built against a

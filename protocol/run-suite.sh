@@ -159,6 +159,88 @@ if [ -n "$HELPER_VAD" ]; then
     skipped=$((skipped + 1))
   fi
 
+  # --- speaker identification -------------------------------------------
+  #
+  # Two cases, and between them they pin the property that actually broke
+  # in the field: **one person must not become several.**
+  #
+  # `two-sentences.wav` is one voice saying two things with a gap. It is
+  # the stronger case despite being the simpler audio, because it compares
+  # a voice with *itself* — that is fidelity, which synthetic audio can
+  # answer honestly, rather than discrimination, which it cannot. One
+  # speaker across two stretches, and the second stretch's running answer
+  # recognises the profile the first one created, which is the only place
+  # continuous re-identification is observable: a voice nobody knows yet
+  # gets no running answer at all, by design.
+  #
+  # A regression here is what a user reported as "a lot of speakers
+  # getting created" — 180 profiles from one household, because every
+  # provisional guess that failed to match minted a permanent person.
+  #
+  # NOT pinned: that two speakers get two profiles. The only multi-speaker
+  # audio here is `say`-synthesised, and CAM++ is trained on real
+  # recordings; measured against the Python reference, two synthetic
+  # voices score 0.22 at a 2.0 s window and 0.91 at 2.5 s. A test asserting
+  # separation would pass on the window length rather than on the code.
+  # Real two-speaker audio is what that needs — see
+  # ./tools/record-voice-trial.sh and `raneen-core voiceprint`.
+  SPEAKER_DIR="${RANEEN_SPEAKER_DIR:-$HOME/.cache/raneen/speaker}"
+  if [ -f "$SPEAKER_DIR/campplus.onnx" ]; then
+    run "speaker · one voice stays one person across two turns" \
+      --wav "$FIXTURES/two-sentences.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
+      --helper "$BIN serve {model} --audio-socket {socket} --trigger vad \
+                --speaker-window 2.0 --speaker-interval 2.0 --speaker-discover" \
+      --expect-transcripts 2 --expect-speakers 1 --min-speaker-events 3
+
+    run "speaker · identifies without disturbing dictation" \
+      --wav "$FIXTURES/two-speakers.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
+      --helper "$BIN serve {model} --audio-socket {socket} --trigger vad \
+                --speaker-window 2.0 --speaker-interval 2.0 --speaker-discover" \
+      --expect-transcripts 2 --min-speaker-events 2
+
+    # Turns shorter than the window still identify somebody.
+    #
+    # The window can only be 2, 4, 6 or 8 seconds — CAM++ pools time in
+    # 2 s segments and anything else corrupts the embedding — while real
+    # dictation turns run two to four. Neither sentence in this fixture
+    # fills a 4 s window on its own, so identification only happens
+    # because the voiceprint buffer survives the gap between them.
+    #
+    # **Run this with `--speaker-gap 0` and it produces no identification
+    # at all**, which is what a user reported: speaker identification
+    # switched on, nobody ever identified, a new profile each time.
+    run "speaker · short turns add up to one voiceprint" \
+      --wav "$FIXTURES/two-sentences.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
+      --helper "$BIN serve {model} --audio-socket {socket} --trigger vad \
+                --speaker-window 4.0 --speaker-interval 2.0 --speaker-gap 2.0 \
+                --speaker-discover" \
+      --expect-transcripts 2 --expect-speakers 1 --min-speaker-events 1
+
+    # The default: a voice nobody enrolled is reported, not enrolled.
+    #
+    # Same audio and same flags as the case above minus --speaker-discover,
+    # and the answer changes from `speaker_0` to `unknown`. That is the
+    # whole policy: a failed match means either a new person or a poor
+    # recording of a known one, the audio cannot say which, and guessing
+    # 'new person' every time is what filled one user's registry with 180
+    # fragments of the same voice.
+    #
+    # **Reporting it matters as much as not storing it.** Going quiet
+    # would be indistinguishable from nobody having spoken.
+    run "speaker · an unrecognised voice is reported, not enrolled" \
+      --wav "$FIXTURES/two-sentences.wav" --settle 10 --no-arm "${MODEL_ARG[@]}" \
+      --helper "$BIN serve {model} --audio-socket {socket} --trigger vad \
+                --speaker-window 4.0 --speaker-interval 2.0 --speaker-gap 2.0" \
+      --expect-transcripts 2 --expect-speaker-ids unknown
+  else
+    echo "── speaker · one voice stays one person across two turns"
+    echo "── speaker · identifies without disturbing dictation"
+    echo "── speaker · short turns add up to one voiceprint"
+    echo "── speaker · an unrecognised voice is reported, not enrolled"
+    echo "  SKIPPED — run ./tools/fetch-speaker-models.sh"
+    skipped=$((skipped + 4))
+  fi
+
   # --- remote STT -------------------------------------------------------
   #
   # A stand-in server rather than a real one, so this runs in CI with no

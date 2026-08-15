@@ -241,6 +241,20 @@ impl VoiceActivityTracker {
         self.active
     }
 
+    /// Consecutive quiet frames right now, before the run is long enough
+    /// to close the utterance.
+    ///
+    /// **Zero means the frame just processed was speech.** That is the
+    /// distinction `Transition` cannot make: an utterance stays open
+    /// through its own closing silence, so `is_active` is true for
+    /// frames that contain nothing. Anything collecting audio *to embed*
+    /// rather than to transcribe wants this instead — silence in a
+    /// voiceprint is not neutral, it drags the result toward whatever
+    /// silence embeds as.
+    pub fn silence_run(&self) -> usize {
+        self.silence_run
+    }
+
     /// Feed one frame; get an edge back if one just occurred.
     pub fn process(&mut self, frame: &[i16]) -> Option<Transition> {
         let probability = self.detector.speech_probability(frame);

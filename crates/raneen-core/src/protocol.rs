@@ -78,6 +78,58 @@ impl EventWriter {
         self.send(json!({"event": "level", "peak": peak, "rms": rms}));
     }
 
+    /// Who is speaking. Additive and optional, like `partial`: a host
+    /// that ignores the line behaves exactly as one that never saw it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn speaker(
+        &self,
+        speaker: &str,
+        name: Option<&str>,
+        score: f32,
+        settled: bool,
+        started_at: f64,
+        ended_at: f64,
+    ) {
+        // `event`, not `type`. **The two wire formats differ on purpose**
+        // and it is easy to copy the wrong one: stdout has always keyed on
+        // `event`, while the ZeroMQ side keys on `type` because that is
+        // what the Pi's existing consumers read. Getting this wrong here
+        // produced a line the host could not classify at all — which the
+        // conformance harness showed as `None` in its event list.
+        self.send(serde_json::json!({
+            "event": "speaker_identified",
+            "speaker": speaker,
+            "name": name,
+            "score": score,
+            "settled": settled,
+            // Seconds of audio since ingest began — a clock the host can
+            // align a transcript against. Not wall time: events are
+            // asynchronous, so the moment a line is *read* says nothing
+            // about when the speech in it happened.
+            "started_at": started_at,
+            "ended_at": ended_at,
+        }));
+    }
+
+    /// The known speakers, in reply to `{"cmd":"speakers"}`.
+    pub fn speakers(&self, profiles: &[crate::bus::event_bus::SpeakerSummary]) {
+        let listed: Vec<serde_json::Value> = profiles
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "samples": p.samples,
+                    // A path, and only useful because the host is a child
+                    // process on this filesystem. See `SpeakerSummary::clip`
+                    // for why the ZeroMQ side does not carry it.
+                    "clip": p.clip,
+                })
+            })
+            .collect();
+        self.send(serde_json::json!({"event": "speakers", "speakers": listed}));
+    }
+
     pub fn error(&self, message: &str) {
         self.send(json!({"event": "error", "message": message}));
     }

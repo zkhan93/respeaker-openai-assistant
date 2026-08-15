@@ -70,8 +70,9 @@ cargo clippy --release --manifest-path crates/raneen-core/Cargo.toml -- -D warni
 cargo build --release --manifest-path crates/raneen-core/Cargo.toml
 
 # Conformance — spawns a real helper, streams real audio, asserts on transcripts
-./protocol/run-suite.sh rust        # 10 cases; `python` runs the same against the reference
+./protocol/run-suite.sh rust        # 15 cases; `python` runs the same against the reference
 ./tools/fetch-wakeword-models.sh    # wake-word models, needed by the wakeword case
+./tools/fetch-speaker-models.sh     # CAM++, needed by the speaker case
 
 # macOS app (from apps/Raneen)
 make app                            # build core + assemble the bundle
@@ -97,6 +98,7 @@ compile from source. Later builds are seconds.
 | `src/bus/` | `AudioBus` — ring buffer with independent read cursors and `rewind()` for pre-roll. `EventBus` — one thread per `Consumer`, FIFO |
 | `src/pipeline/` | `SpeechDetector` (Silero, energy), the turn tracker, `TriggerMode`, `Policy` |
 | `src/hotword/` | openWakeWord on `tract` — the shared mel+embedding chain, one classifier per word |
+| `src/speaker/` | CAM++ on `tract` — Kaldi fbank, voiceprints, the profile registry, the continuous consumer |
 | `src/stt/` | the frame-level `Stt` trait plus `whisper_cpp`, `remote`, `realtime`, `buffered`, `fallback` |
 | `src/broadcast/` | ZeroMQ publisher and the always-on recorder |
 | `src/serve.rs` | the protocol loop — the composition root |
@@ -117,15 +119,52 @@ Three properties to keep in mind before changing anything here:
   `--trigger wakeword` lets it open a turn. Never couple the two — a dictation
   host arms a detector to *report*, and auto-selecting the trigger would take
   push-to-talk away silently.
+- **Speaker identification is a `Consumer` too, and it is continuous.** Its own
+  cursor, its own VAD, re-identifying every `--speaker-interval` seconds while
+  speech lasts plus once when it stops. Only the settled answer teaches a
+  profile. It is off by default because the model costs ~125 MB resident.
+- **Only a settled answer may create or teach a profile.** A running guess
+  (`settled: false`) names someone already known or nobody at all —
+  `Trust::Provisional`. It was always barred from teaching; letting it *create*
+  was worse, and turned one household into 180 speakers.
+- **A voice nobody recognises is `unknown`, not a new profile.** Automatic
+  creation is off (`--speaker-discover` restores it) because a failed match is
+  as often a bad recording of a known person as a new one, and guessing wrong
+  compounds. People get in through the `learn` command, which is deliberate;
+  repeating it with the same name teaches that profile rather than adding one.
+- **An ambiguous voiceprint creates nobody.** `Resolution::Ambiguous` — two
+  profiles fitting equally well — publishes no event and mints no speaker.
+  Collapsing it back into "no match, so a new speaker" makes one person breed
+  profiles without limit, because every duplicate makes the next one likelier.
+  `--speaker-threshold` is the knob, and it reads backwards: **lower merges,
+  higher splits.**
+- **A voiceprint is time spent speaking, not one unbroken turn.** The buffer
+  takes only frames where `silence_run() == 0` and survives pauses shorter than
+  `--speaker-gap`, so three short turns fill a 4 s window between them. Without
+  it no dictation turn is ever long enough and *nobody is identified at all* —
+  reproduce with `--speaker-gap 0`. The cost: two people alternating faster than
+  the gap blend into one voiceprint.
+- **`--speaker-window` must be a multiple of 2 s, and is snapped to one.** CAM++
+  pools time in 2-second segments and zero-pads a partial one, so a 2.2 s window
+  builds a fifth of its context from silence and two different people then score
+  0.95. Reproduced identically by ONNX Runtime, so it is the model — see
+  `speaker::SEGMENT_FRAMES`. **Any measurement taken at another length is
+  meaningless**, which invalidated two earlier threshold recommendations and one
+  explanation blaming synthetic audio. Re-derive with `raneen-core voiceprint`.
+- **The two wire formats key differently.** stdout uses `event`, ZeroMQ uses
+  `type` — the latter because the Pi's consumers already read it. Copying the
+  wrong one produces a line the host cannot classify at all.
 - **Every `AudioBus` cursor is created before the ingest thread starts.** A reader
   only sees frames written after it exists, so creating one late silently eats the
   first frames — which cost the beginning of the wake word once (`AD-19`).
 
 ### Protocol summary
 
-Commands in: `arm`, `disarm`, `toggle`, `ping`, `quit`. EOF on stdin means the
+Commands in: `arm`, `disarm`, `toggle`, `ping`, `speakers`, `enroll`, `forget`,
+`quit`. EOF on stdin means the
 shell died and the helper must exit. Events out: `ready`, `state`, `partial`,
-`transcript`, `level`, `error`, `pong`, `bye`. A turn is
+`transcript`, `level`, `error`, `pong`, `speaker_identified`, `speakers`,
+`bye`. A turn is
 `armed`/`listen` → `think` → `transcript` → `disarmed`/`off`; publishing the
 closing state early flashes the indicator backwards, publishing none leaves it
 stuck lit. Both have happened.

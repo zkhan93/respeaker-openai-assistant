@@ -48,6 +48,42 @@ final class SettingsModel: ObservableObject {
     /// Models found on disk, for the picker.
     @Published private(set) var models: [WhisperModel]
 
+    /// Voices the core has learned, newest last.
+    ///
+    /// **Owned by the core, mirrored here.** The store on disk is the
+    /// truth; this is what the last `speakers` reply said. Editing a name
+    /// sends a command and waits for the reply rather than mutating this
+    /// directly — otherwise a rename the core rejected would still show as
+    /// applied.
+    @Published private(set) var speakers: [Helper.SpeakerProfile] = []
+
+    /// Whether the voiceprint model is on this Mac. Cached for the same
+    /// reason `wakeFeatureModelsAvailable` is: `body` runs often and this
+    /// is a filesystem check.
+    @Published private(set) var speakerModelAvailable: Bool = false
+
+    /// Talking to the running core about speakers. Owned by `AppDelegate`,
+    /// which is the only thing that holds the process.
+    var onSpeakerCommand: ((SpeakerCommand) -> Void)?
+
+    /// What the window can ask the core to do to the roster.
+    enum SpeakerCommand {
+        case list
+        case name(id: String, name: String)
+        case forget(id: String)
+        /// Attach the next few seconds of speech to this name; an empty
+        /// name cancels.
+        case learn(name: String)
+    }
+
+    /// Who the core is currently waiting to hear, if anyone.
+    ///
+    /// Drives the "say something" state in the pane. Cleared when a
+    /// `speaker_identified` arrives carrying that name, which is the
+    /// core confirming it actually heard them — not when the command is
+    /// sent, because that only means the request left.
+    @Published private(set) var learning: String?
+
     /// Fetches models from the catalogue.
     ///
     /// Owned here rather than by `AppDelegate` because it is settings-window
@@ -127,6 +163,63 @@ final class SettingsModel: ObservableObject {
 
     func apply() {
         onApply?()
+    }
+
+    /// Ask the core for the roster. Cheap, and the reply refreshes
+    /// `speakers`.
+    func refreshSpeakers() {
+        speakerModelAvailable = SettingsModel.speakerModelIsInstalled
+        onSpeakerCommand?(.list)
+    }
+
+    func nameSpeaker(_ id: String, as name: String) {
+        onSpeakerCommand?(.name(id: id, name: name))
+    }
+
+    func forgetSpeaker(_ id: String) {
+        onSpeakerCommand?(.forget(id: id))
+    }
+
+    func learnSpeaker(named name: String) {
+        learning = name
+        onSpeakerCommand?(.learn(name: name))
+    }
+
+    func cancelLearning() {
+        learning = nil
+        onSpeakerCommand?(.learn(name: ""))
+    }
+
+    /// Called when the core reports a voice it just learned.
+    func learned(_ name: String?) {
+        guard let name, learning == name else { return }
+        learning = nil
+        onSpeakerCommand?(.list)
+    }
+
+    /// Called by `AppDelegate` when a `speakers` reply arrives.
+    func speakersChanged(to profiles: [Helper.SpeakerProfile]) {
+        speakers = profiles
+    }
+
+    /// A voice was heard. Only used to notice someone *new* — the roster
+    /// itself comes from the core, so this asks rather than guesses.
+    func speakerHeard(id: String) {
+        guard !speakers.contains(where: { $0.id == id }) else { return }
+        onSpeakerCommand?(.list)
+    }
+
+    /// Where the core looks for the voiceprint model, in the same order.
+    private static var speakerModelIsInstalled: Bool {
+        var roots: [String] = []
+        if let override = ProcessInfo.processInfo.environment["RANEEN_SPEAKER_DIR"] {
+            roots.append(override)
+        }
+        roots.append(Bundle.main.bundlePath + "/Contents/Resources/helper")
+        roots.append(NSHomeDirectory() + "/.cache/raneen/speaker")
+        return roots.contains {
+            FileManager.default.fileExists(atPath: $0 + "/campplus.onnx")
+        }
     }
 
     /// Keep the stored settings self-consistent, then persist them.

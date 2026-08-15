@@ -26,6 +26,7 @@ mod mem;
 mod pipeline;
 mod protocol;
 mod serve;
+mod speaker;
 mod stt;
 
 use crate::pipeline::{DetectorKind, Policy, TriggerMode};
@@ -41,9 +42,12 @@ raneen-core — audio in, text out
 
 USAGE:
     raneen-core bench <model.bin> <audio.wav> [--repeats N] [--language L] [--threads N]
+    raneen-core voiceprint <a.wav> <b.wav> [...] [--window SECS]
     raneen-core serve [model.bin] --audio-socket <path> [--trigger MODE] [--vad KIND]
                       [--stt KIND] [--stt-url URL] [--stt-model NAME] [--stt-key KEY]
                       [--stt-timeout SECS] [--stt-fallback none]
+                      [--speaker-window SECS] [--speaker-store PATH]
+                      [--speaker-threshold N]
                       [--silence-frames N] [--pre-roll-frames N] [--max-seconds N]
                       [--min-confidence N] [--language L] [--threads N]
 
@@ -136,6 +140,122 @@ WAKE WORD (--wake-word, any trigger mode):
     shipped in the bundle; fetch them with
     ./tools/fetch-wakeword-models.sh.
 
+SPEAKER IDENTIFICATION (--speaker-window SECONDS, off by default):
+    Who is speaking, continuously. A consumer with its own cursor and its
+    own VAD — like the recorder, it never opens a turn and changes nothing
+    about dictation.
+
+    Re-identifies every --speaker-interval seconds *while someone keeps
+    talking*, and once more when they stop. One answer per turn would miss
+    an interruption or a hand-over mid-sentence, which is most of what a
+    room actually does.
+
+        {'type':'speaker_identified','speaker':'speaker_0','name':null,
+         'score':0.87,'settled':true}
+
+    `settled` separates a running answer from the final one for a stretch
+    of speech. **Only a settled answer teaches a profile, and only a
+    settled answer creates one.** A running guess may name someone
+    already known and nothing else — so the first time a voice is heard,
+    identity arrives when they stop rather than while they talk. Letting
+    the guess create profiles is what turned one household into 180
+    speakers: every couple of seconds of unmatched speech became a
+    permanent person, and each duplicate made the next one likelier.
+
+    --speaker-window N   seconds of speech per voiceprint, default 4.0.
+                         **Must be a multiple of 2.0 and is rounded to
+                         one.** CAM++ pools time in 2-second segments and
+                         pads a partial one with zeros, so a 2.2s window
+                         computes its last segment's context from 80%
+                         nothing: two different people then score 0.95
+                         and identity is gone. This is a property of the
+                         model, reproduced identically by ONNX Runtime.
+                         Longer is better where the speech exists — the
+                         gap between same-person and different-person
+                         scores measured +0.008 at 2s, +0.182 at 4s and
+                         +0.211 at 6s. It costs latency, not memory: 4s
+                         and 6s differ by ~4 MB against ~125 MB total.
+                         Stretches shorter than the window are NOT
+                         identified — 'yes' and 'stop' are under a
+                         second, and a voiceprint from that little audio
+                         is noise wearing a name. Carry the last identity
+                         forward instead.
+    --speaker-interval N seconds between re-identifications, default 2.0.
+    --speaker-store PATH where voiceprints persist, as JSON. Absent means
+                         a fresh start every run: speaker_0 is whoever
+                         talks first and means nothing tomorrow.
+                         RANEEN_SPEAKER_STORE also sets it.
+                         A few seconds of each new voice is kept as a WAV
+                         in speaker-clips/ beside it, so a person can be
+                         recognised and named. Forgetting them deletes it.
+    --speaker-discover   let a voice nobody recognises become a new
+                         profile by itself. **Off by default**, and that
+                         is the correction to the original design: a
+                         failed match means either a new person or a poor
+                         recording of a known one, and nothing in the
+                         audio says which. Assuming 'new person' fills the
+                         registry with fragments of one voice, and every
+                         fragment makes the next match more ambiguous —
+                         which makes the next failure likelier.
+
+                         Without it, an unrecognised voice is reported as
+                         speaker 'unknown' and nothing is written. People
+                         get into the registry by being enrolled on
+                         purpose:
+
+                             {'cmd':'learn','name':'Zeeshan'}
+
+                         which attaches the next few seconds of speech to
+                         that name. Repeating it with the same name adds a
+                         sample to that profile rather than making a
+                         second one, which is the cheapest way to make a
+                         profile more reliable.
+    --speaker-gap N      seconds of quiet a voiceprint may span before
+                         it starts over, default 2.0. **This is what
+                         makes short turns identifiable at all**: a 4s
+                         window needs 4s of speech, and dictation turns
+                         are two to four seconds, so requiring one
+                         unbroken stretch means nobody is ever
+                         identified. Carrying across pauses makes the
+                         window 'the last 4s they spoke'. Set 0 for a
+                         room where people alternate quickly — anyone
+                         swapping faster than this blends into one
+                         voiceprint, which then matches neither of them.
+    --speaker-threshold N
+                         cosine similarity required to call two
+                         voiceprints the same person, default 0.50 —
+                         measured with `voiceprint` on two real people,
+                         not chosen. See DEFAULT_MATCH_THRESHOLD.
+                         **Lower merges, higher splits** — the opposite of
+                         the intuitive reading. One person turning into
+                         five wants a SMALLER number; two people sharing
+                         one profile wants a bigger one.
+
+    When the best two profiles are within 0.03 of each other, nobody is
+    reported at all: the audio cannot say which of them it is, and
+    inventing a third profile — which is what an earlier version did —
+    makes every later utterance from that person ambiguous too.
+
+    RANEEN_SPEAKER=1 switches it on with defaults, for hosts with a fixed
+    argv. campplus.onnx is looked for beside the executable then in
+    ~/.cache/raneen/speaker; RANEEN_SPEAKER_DIR overrides. Not shipped in
+    the bundle — fetch it with ./tools/fetch-speaker-models.sh.
+
+    **This costs ~125 MB of resident memory** for as long as it is on.
+
+MEASURING IT (raneen-core voiceprint a.wav b.wav …):
+    Prints the cosine matrix for a set of 16 kHz mono recordings — no
+    registry, no threshold, no matching. The filename before the first
+    '-' is the person, so zeeshan-1.wav and zeeshan-2.wav are one voice.
+
+    Every argument about the threshold is downstream of two numbers: how
+    alike two recordings of the SAME person are, and how alike two
+    recordings of DIFFERENT people are. If those ranges are separated,
+    the threshold belongs between them and this prints where. If they
+    overlap, no setting anywhere works and the input is the problem.
+
+    ./tools/record-voice-trial.sh records the takes.
+
 VAD (--vad silero|energy, default silero):
     silero  neural, weights compiled in. Rejects non-speech noise.
     energy  adaptive noise floor. No model; cannot tell a voice from a
@@ -175,6 +295,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("bench") => run_bench(&args[1..]),
         Some("serve") => run_serve(&args[1..]),
+        Some("voiceprint") => run_voiceprint(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -191,6 +312,159 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The cosine matrix for a set of recordings — no registry, no
+/// threshold, no matching. Just how alike the model thinks they are.
+///
+/// **This is the measurement the whole feature rests on and the repo
+/// could not previously make.** Every threshold, every "is it working",
+/// every argument about the window length is downstream of two numbers:
+/// how alike two recordings of the *same* person are, and how alike two
+/// recordings of *different* people are. If those two ranges overlap, no
+/// setting anywhere separates them and the model is the wrong tool for
+/// the room. If they are far apart, the threshold belongs between them
+/// and can be read straight off this table.
+///
+/// Files are grouped by the part of the name before the first `-`, so
+/// `zeeshan-1.wav` and `zeeshan-2.wav` are the same person.
+fn run_voiceprint(args: &[String]) -> Result<(), String> {
+    // Skip flags *and the value after them* — `--window 3.0` otherwise
+    // leaves `3.0` looking like a filename, which it then fails to open.
+    let mut paths: Vec<&String> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg.starts_with("--") {
+            rest.next();
+        } else {
+            paths.push(arg);
+        }
+    }
+    if paths.len() < 2 {
+        return Err("voiceprint needs at least two wav files".into());
+    }
+    let window: f32 = flag(args, "--window")
+        .map(|v| v.parse().map_err(|_| "--window wants seconds".to_string()))
+        .transpose()?
+        .unwrap_or(2.0);
+
+    // No registry involved, so neither threshold nor discovery matters.
+    let identifier = speaker::SpeakerIdentifier::load(window, None, 0.65, false)?;
+    let want = identifier.window_samples();
+
+    let mut names: Vec<String> = Vec::new();
+    let mut prints: Vec<Vec<f32>> = Vec::new();
+    for path in &paths {
+        let mut reader = hound::WavReader::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let spec = reader.spec();
+        if spec.sample_rate != 16_000 || spec.channels != 1 {
+            return Err(format!(
+                "{path}: needs 16 kHz mono, got {} Hz x{}",
+                spec.sample_rate, spec.channels
+            ));
+        }
+        let samples: Vec<i16> = reader.samples::<i16>().filter_map(Result::ok).collect();
+        if samples.len() < want {
+            return Err(format!(
+                "{path}: {:.1}s is shorter than the {window}s window",
+                samples.len() as f32 / 16_000.0
+            ));
+        }
+        // The middle of the recording, not the start: the first moments
+        // are where a talker settles into their voice, and this is meant
+        // to measure the model rather than the run-up.
+        let middle = (samples.len() - want) / 2;
+        prints.push(identifier.voiceprint(&samples[middle..middle + want])?);
+        names.push(
+            std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| (*path).clone()),
+        );
+    }
+
+    // Columns are numbered rather than named. Truncating the names to
+    // fit produced a header of `eeshan-1 eeshan-2`, which is unreadable
+    // in exactly the case this tool exists for: telling two people apart.
+    let width = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| n.len() + format!("[{}] ", i + 1).len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    print!("{:width$}  ", "", width = width);
+    for i in 0..names.len() {
+        print!("{:>8}", format!("[{}]", i + 1));
+    }
+    println!();
+    for (i, a) in prints.iter().enumerate() {
+        print!(
+            "{:width$}  ",
+            format!("[{}] {}", i + 1, names[i]),
+            width = width
+        );
+        for b in &prints {
+            print!("{:>8.3}", speaker::registry::cosine(a, b));
+        }
+        println!();
+    }
+
+    // The two distributions, which is the actual answer.
+    let (mut same, mut different) = (Vec::new(), Vec::new());
+    for i in 0..prints.len() {
+        for j in (i + 1)..prints.len() {
+            let score = speaker::registry::cosine(&prints[i], &prints[j]);
+            if person(&names[i]) == person(&names[j]) {
+                same.push(score);
+            } else {
+                different.push(score);
+            }
+        }
+    }
+    println!();
+    report("same person     ", &same);
+    report("different people", &different);
+    match (
+        same.iter().cloned().fold(f32::INFINITY, f32::min),
+        different.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+    ) {
+        (lowest_same, highest_other) if same.is_empty() || different.is_empty() => {
+            let _ = (lowest_same, highest_other);
+            println!("\nName files <person>-<n>.wav for both groups to get a threshold.");
+        }
+        (lowest_same, highest_other) if lowest_same > highest_other => println!(
+            "\nSeparated. Any --speaker-threshold between {highest_other:.2} and \
+             {lowest_same:.2} tells these people apart; {:.2} is the middle.",
+            (lowest_same + highest_other) / 2.0
+        ),
+        (lowest_same, highest_other) => println!(
+            "\n**They overlap** — the worst same-person pair ({lowest_same:.2}) scores \
+             below the best different-person pair ({highest_other:.2}). No threshold \
+             separates these recordings; the input or the window is the problem, not \
+             the setting."
+        ),
+    }
+    Ok(())
+}
+
+/// Everything before the first `-` — the person, by convention.
+fn person(name: &str) -> &str {
+    name.split('-').next().unwrap_or(name)
+}
+
+fn report(label: &str, scores: &[f32]) {
+    if scores.is_empty() {
+        println!("{label}: none");
+        return;
+    }
+    let lowest = scores.iter().cloned().fold(f32::INFINITY, f32::min);
+    let highest = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mean = scores.iter().sum::<f32>() / scores.len() as f32;
+    println!(
+        "{label}: {:>2} pairs   {lowest:.3} … {highest:.3}   mean {mean:.3}",
+        scores.len()
+    );
 }
 
 fn run_bench(args: &[String]) -> Result<(), String> {
@@ -264,6 +538,60 @@ fn run_serve(args: &[String]) -> Result<(), String> {
     if let Some(language) = flag(args, "--language") {
         policy.language = language;
     }
+    // Speaker identification. Off unless asked for: the model is ~125 MB
+    // resident whether or not anyone ever speaks.
+    if let Some(value) = flag(args, "--speaker-window") {
+        policy.speaker_window = Some(
+            value
+                .parse()
+                .map_err(|_| "--speaker-window wants seconds, e.g. 2.0".to_string())?,
+        );
+    } else if std::env::var_os("RANEEN_SPEAKER").is_some() {
+        // The fixed-argv escape hatch, same as RANEEN_ZMQ_PUB and
+        // RANEEN_WAKE_WORD: a host that spawns the helper with a frozen
+        // command line has no other way to switch this on.
+        policy.speaker_window = Some(4.0);
+    }
+    if let Some(value) = flag(args, "--speaker-interval") {
+        let seconds: f32 = value
+            .parse()
+            .map_err(|_| "--speaker-interval wants seconds".to_string())?;
+        if seconds <= 0.0 {
+            return Err("--speaker-interval must be greater than 0".into());
+        }
+        policy.speaker_interval_frames = ((seconds * 1000.0 / 80.0).round() as usize).max(1);
+    }
+    if let Some(path) =
+        flag(args, "--speaker-store").or_else(|| std::env::var("RANEEN_SPEAKER_STORE").ok())
+    {
+        policy.speaker_store = Some(PathBuf::from(path));
+    }
+    if args.iter().any(|a| a == "--speaker-discover") {
+        policy.speaker_discover = true;
+    }
+    if let Some(value) = flag(args, "--speaker-gap") {
+        let seconds: f32 = value
+            .parse()
+            .map_err(|_| "--speaker-gap wants seconds, e.g. 2.0".to_string())?;
+        if seconds < 0.0 {
+            return Err("--speaker-gap cannot be negative".into());
+        }
+        policy.speaker_gap_frames = (seconds * 1000.0 / 80.0).round() as usize;
+    }
+    if let Some(value) = flag(args, "--speaker-threshold") {
+        let threshold: f32 = value
+            .parse()
+            .map_err(|_| "--speaker-threshold wants a similarity, e.g. 0.6".to_string())?;
+        // Cosine similarity runs -1 to 1, but a threshold at or below 0
+        // matches everyone to whoever spoke first and one at 1.0 matches
+        // nobody ever. Both are configuration mistakes rather than
+        // choices, and both look like the feature is broken.
+        if !(0.05..=0.99).contains(&threshold) {
+            return Err("--speaker-threshold must be between 0.05 and 0.99".into());
+        }
+        policy.speaker_threshold = threshold;
+    }
+
     if let Some(value) = flag(args, "--min-confidence") {
         policy.min_confidence = value
             .parse()

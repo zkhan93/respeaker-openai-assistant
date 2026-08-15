@@ -19,7 +19,8 @@ crates/raneen-core/target/release/raneen-core --help
 raneen-core bench <model.bin> <audio.wav> [--repeats N]
 raneen-core serve [model.bin] --audio-socket <path> [--trigger hold|vad|toggle|wakeword]
                   [--vad silero|energy] [--stt local|remote|realtime] [--stt-url URL]
-                  [--wake-word word.onnx] [--zmq-pub tcp://*:5555] [--language L]
+                  [--wake-word word.onnx] [--zmq-pub tcp://*:5555]
+                  [--speaker-window SECS] [--speaker-store PATH] [--language L]
                   [--silence-frames N] [--pre-roll-frames N] [--max-seconds S]
 ```
 
@@ -58,6 +59,23 @@ Watch what a running core publishes:
 ```bash
 .venv/bin/python tools/zmq-watch.py --audio off
 ```
+
+- **`--speaker-window` tracks who is speaking, continuously.** Another consumer
+  with its own cursor and its own VAD: it re-identifies every
+  `--speaker-interval` seconds *while* someone talks, plus once when they stop,
+  and publishes `speaker_identified` with a `settled` flag separating running
+  answers from final ones. `--speaker-store` persists voiceprints as JSON;
+  without it every run rediscovers `speaker_0`. Naming is the host's job —
+  `{"cmd":"enroll","speaker":"speaker_0","name":"Zeeshan"}`.
+
+  Speech shorter than the window produces *no event* rather than a bad guess.
+  Costs **~125 MB resident** while enabled, which is why it is off by default.
+  Fetch the model with `./tools/fetch-speaker-models.sh`.
+
+  One caveat worth reading before relying on it: the port is verified against
+  sherpa-onnx to cosine 0.998, but **whether it separates real people is
+  untested** — the only multi-speaker audio here is synthesised, and CAM++ is
+  trained on real recordings. See `docs/DIARIZATION-SPEC.md`.
 
 ## Where the rest lives
 

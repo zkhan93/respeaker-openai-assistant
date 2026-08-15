@@ -35,6 +35,10 @@ the shell is expected to capture — it is where a crash will explain itself.
 | `{"cmd":"disarm"}` | close the open turn |
 | `{"cmd":"toggle"}` | arm if idle, disarm if armed |
 | `{"cmd":"ping"}` | liveness check → `pong` |
+| `{"cmd":"speakers"}` | list known voices → `speakers` |
+| `{"cmd":"learn","name":"Zeeshan"}` | the next few seconds of speech are this person; no `name` cancels |
+| `{"cmd":"enroll","speaker":"speaker_0","name":"Zeeshan"}` | rename a voice already in the registry |
+| `{"cmd":"forget","speaker":"speaker_0"}` | forget a voice; the id is never reused |
 | `{"cmd":"quit"}` | orderly shutdown |
 
 An unknown command must be answered with an `error` event, never ignored — a
@@ -53,6 +57,8 @@ lifecycle guarantee a pipe buys and a socket does not.
 | `transcript` | `text` |
 | `level` | `peak` (0–32767), `rms` (4 per frame) |
 | `error` | `message` |
+| `speaker_identified` | `speaker`, `name` (nullable), `score`, `settled`, `started_at`, `ended_at` |
+| `speakers` | `speakers[]` of `{id, name, samples, clip}` |
 | `pong` | `armed` |
 | `bye` | — sent last |
 
@@ -76,6 +82,75 @@ needed no change when it was introduced. Two rules for anyone consuming it:
 model, `openai-api@<host>` for a remote service, `openai-api@<host>+whisper-rs`
 when a local fallback is armed behind it. It is the fastest way to tell what is
 actually transcribing when a remote setup misbehaves.
+
+**`speaker_identified` is additive and optional**, like `partial`. It arrives
+*continuously* while someone talks — every couple of seconds, not once per turn
+— because a room has people interrupting and handing over mid-sentence. `settled`
+separates a running answer from the final one for a stretch of speech; a consumer
+wanting one line per speaker filters on it.
+
+**Every speaker command answers with the full roster**, including one that
+failed. `enroll` and `forget` act on another thread, so their errors cannot be
+returned to the caller — and a host told nothing would show a deletion that
+never happened. Replying with the truth means the host converges either way, and
+needs no follow-up query.
+
+`speaker` is an id the core invented (`speaker_0`), not a person. **Naming is the
+host's job** — only it knows that voice is Zeeshan — which is what `enroll` is
+for, and it is the protocol's first *stateful* command. Speech shorter than the
+identification window produces no event at all rather than a bad guess.
+
+**A voice nobody recognises is reported as `unknown`, not enrolled.** That is
+the default, and it is the correction to an earlier design in which an
+unmatched voiceprint became a new profile. A failed match means either a new
+person *or* a poor recording of somebody already enrolled, and nothing in the
+audio distinguishes them — so assuming "new person" fills the registry with
+fragments of one voice, and each fragment makes the next match more ambiguous.
+One user's registry reached 180 profiles this way.
+
+`unknown` is reserved and can never be a profile id, which are always
+`speaker_N`. **Reporting it matters as much as not storing it**: going quiet
+would be indistinguishable from nobody having spoken, and "somebody spoke here
+and we cannot say who" is a perfectly good thing to write against a transcript.
+
+People enter the registry through `learn`, which attaches the next few seconds
+of speech to a name. Repeating it with the same name adds a sample to that
+profile rather than creating a second — the cheapest way to make recognition
+more reliable, since each sample averages another few seconds into the centroid.
+`--speaker-discover` restores automatic creation for a host that wants it.
+
+**Silence still has meanings of its own.** No event at all arrives when nobody
+spoke long enough to fill a window, or when two profiles fit equally well. A
+host should carry the last identity forward, not clear it.
+
+That last case is the important one. **A `settled: false` event only ever names
+somebody already known.** A running answer is a guess taken from the middle of
+someone's speech, before the stretch is over; it was always barred from teaching
+a profile for that reason, and it is now equally barred from creating one. The
+consequence is deliberate: the first time a voice is ever heard, identity arrives
+only when they stop talking. Letting the guess create profiles produced 180 of
+them from one household — every couple of seconds of unmatched speech became a
+permanent person, and each duplicate made the next one likelier.
+
+**`started_at` and `ended_at` are seconds of audio since the helper began
+ingesting, not wall clock.** Events are asynchronous, so the moment a host
+*reads* a line says nothing about when the speech in it happened — which makes a
+receive timestamp useless for the thing this field exists for: putting a name
+against a stretch of transcript.
+
+They describe the **run of speech**, not the voiceprint. The voiceprint is only
+its most recent few seconds; the run is everything the person has said since
+they started, including pauses shorter than `--speaker-gap`. So `started_at`
+answers "when did this person start talking", which is the question, and it
+moves backwards through a conversation only when somebody new begins.
+
+`clip` is a **local filesystem path** to a few seconds of WAV: the audio that
+created that profile. It exists so a human can hear a voice and put a name to
+it, because `speaker_3 · 4 recordings` identifies nobody. It is `null` when
+voiceprints are not being persisted, and `forget` deletes the file along with
+the profile. Deliberately absent from the ZeroMQ form of this event — a consumer
+on another machine cannot open the path and would learn only where the user's
+home directory is.
 
 ### Audio
 
@@ -130,8 +205,10 @@ which no single-implementation test could have surfaced.
 | File | What it proves |
 | --- | --- |
 | `spike.wav` | 5.8 s, one sentence. The baseline. Also the tail-padding case — it ends *on speech*, which is where whisper.cpp drops the last word. |
-| `two-sentences.wav` | Two sentences with a 1.5 s gap. VAD segmentation: should yield **two** transcripts and two `listen` states, with no hotkey. |
+| `two-sentences.wav` | Two sentences with a 1.5 s gap. VAD segmentation: should yield **two** transcripts and two `listen` states, with no hotkey. Also the speaker suite's strongest case — **one voice must stay one person** across both, and the second turn's running answer must recognise the profile the first one created. Being synthetic costs nothing here: it compares a voice with *itself*. |
 | `noise-then-speech.wav` | Door slam → rattling keys → one sentence. Detector quality: Silero opens **1** turn, energy opens **3**. |
+| `two-speakers.wav` | Two voices, a gap between them. Pins that identification runs *continuously* (several events per file) and that switching it on leaves dictation alone. **It does not pin that the two are told apart** — the audio is synthesised and CAM++ is trained on real recordings, so that would test the window length, not the code. |
+| `speaker-a.wav`, `speaker-b.wav` | One utterance each, same words, different synthetic voices. Feed the identifier without the protocol. |
 | `wake-word.wav` | "alexa" then a sentence. The wake word opens the turn and the **VAD closes it**, so one transcript proves both halves of AD-12's split boundary. **Its speech starts at sample 0, deliberately** — no lead-in, because that is what caught the segment cursor being created after the ingest thread and losing the first two frames of every run. Any leading silence hides that bug. |
 
 Committed as WAVs rather than generated, because `say` is macOS-only and its

@@ -31,8 +31,31 @@ broken for a day because **a script nobody runs in CI cannot fail visibly.**
 | `live.py` | The microphone streamed continuously, transcripts printed as they arrive |
 | `drive-helper.py` | Drive the helper's JSON protocol by hand. **Probably obsolete** — see below |
 | `fetch-wakeword-models.sh` | Download openWakeWord models into `~/.cache/raneen/wakeword` |
+| `fetch-speaker-models.sh` | Download CAM++ into `~/.cache/raneen/speaker` |
+| `record-voice-trial.sh` | Record real people saying one fixed sentence, for `raneen-core voiceprint` |
 
 Every one resolves paths from the repo root, so they work from any directory.
+
+### `record-voice-trial.sh`
+
+```bash
+./tools/record-voice-trial.sh zeeshan 5
+./tools/record-voice-trial.sh sam 5
+./crates/raneen-core/target/release/raneen-core voiceprint trial/*.wav
+```
+
+Two people, one sentence, five takes each — and `voiceprint` prints the cosine
+matrix with no registry, threshold or matching in the way.
+
+**This is the measurement every speaker setting depends on and the repo could
+not previously make.** Same-person and different-person similarities are two
+distributions; if they are separated the threshold belongs between them, and if
+they overlap no setting works and the window or the microphone is the problem.
+Everything before this — including the 0.65 default — was a guess.
+
+Needs `ffmpeg`. The name before the first `-` is the person, so
+`zeeshan-1.wav` and `zeeshan-2.wav` are one voice. Recordings land in `trial/`,
+which is not committed: they are the most personal data this repo can produce.
 
 ### `zmq-watch.py`
 

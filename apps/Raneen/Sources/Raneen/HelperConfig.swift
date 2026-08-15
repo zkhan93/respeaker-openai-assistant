@@ -80,6 +80,55 @@ struct HelperConfig: Equatable {
     var broadcast: BroadcastMode = .off
     var broadcastPort: Int = 5555
 
+    // MARK: - Speaker identification
+
+    /// Whether the core tracks who is speaking.
+    ///
+    /// **Off by default, and the reason is memory rather than taste.** The
+    /// voiceprint model costs about 125 MB resident for as long as it is
+    /// loaded, whether or not anyone ever speaks — roughly tripling an app
+    /// that otherwise idles around 65 MB. Nobody should pay that without
+    /// asking for it.
+    var identifySpeakers: Bool = false
+    /// Seconds of speech per voiceprint. Speech shorter than this is not
+    /// identified at all, rather than identified badly.
+    ///
+    /// **Only multiples of 2 are valid**, which is why the window offers
+    /// four fixed choices rather than a slider. CAM++ pools time in
+    /// 2-second segments and pads a partial one with zeros, so a 2.5 s
+    /// window computes a quarter of its context from silence and two
+    /// different people come out scoring 0.95. The core rounds anything
+    /// else, and an earlier version of this pane shipped a 0.5-step
+    /// slider whose every other position was quietly broken.
+    var speakerWindow: Double = 4.0
+    /// Seconds between re-identifications while one person keeps talking.
+    var speakerInterval: Double = 2.0
+    /// Seconds of quiet a voiceprint may span before it starts over.
+    ///
+    /// **This is what makes dictation identifiable at all.** A voiceprint
+    /// needs a whole window of speech, the window can only be 2/4/6/8 s,
+    /// and dictation turns run two to four seconds — so requiring one
+    /// unbroken turn identified nobody. Carrying across short pauses
+    /// makes the window "the last few seconds you spoke". Not in the
+    /// pane: the trade it controls (short turns against telling apart two
+    /// people who alternate quickly) is a room-shaped decision, and this
+    /// app's room is one person at a keyboard.
+    var speakerGap: Double = 2.0
+    /// How alike two recordings must be to count as the same person.
+    ///
+    /// **Lower merges, higher splits**, which is the opposite of how a
+    /// "match strength" slider usually reads and the reason the window
+    /// labels it by consequence rather than by number. Someone whose
+    /// single voice keeps becoming three speakers wants this *lower*.
+    ///
+    /// 40% comes from ten real recordings at the 4 s window — see the
+    /// core's `DEFAULT_MATCH_THRESHOLD`. It replaced a guessed 65%, which
+    /// sat *below* the worst same-person score and so turned one person
+    /// into several. Two earlier estimates were measured at window
+    /// lengths that silently corrupt the embedding; re-derive with
+    /// `raneen-core voiceprint` rather than adjusting by feel.
+    var speakerThreshold: Double = 0.40
+
     // MARK: - Values that depend on the trigger
 
     /// How long a pause is tolerated before the turn closes, per trigger.
@@ -179,7 +228,33 @@ struct HelperConfig: Equatable {
             args += ["--zmq-pub", endpoint]
         }
 
+        if identifySpeakers {
+            args += ["--speaker-window", trimmed(speakerWindow)]
+            args += ["--speaker-interval", trimmed(speakerInterval)]
+            args += ["--speaker-threshold", String(format: "%.2f", speakerThreshold)]
+            args += ["--speaker-gap", trimmed(speakerGap)]
+            args += ["--speaker-store", HelperConfig.speakerStorePath]
+        }
+
         return args
+    }
+
+    /// Where voiceprints live.
+    ///
+    /// Application Support rather than the model cache: these are *user
+    /// data*, not a redownloadable artefact. Clearing caches must not
+    /// forget who anyone is.
+    static var speakerStorePath: String {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("Raneen", isDirectory: true)
+        if let base {
+            try? FileManager.default.createDirectory(
+                at: base, withIntermediateDirectories: true)
+            return base.appendingPathComponent("speakers.json").path
+        }
+        return NSHomeDirectory() + "/.raneen-speakers.json"
     }
 
     /// `30.0` reads as a mistake in a command line; `30` does not.

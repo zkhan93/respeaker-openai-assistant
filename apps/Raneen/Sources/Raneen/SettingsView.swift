@@ -96,6 +96,7 @@ struct SettingsView: View {
         case .models: ModelsView(model: model)
         case .detection: detection
         case .wakeWord: wakeWord
+        case .speakers: SpeakersView(model: model)
         case .recording: recording
         }
     }
