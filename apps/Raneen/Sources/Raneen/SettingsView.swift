@@ -233,9 +233,7 @@ struct SettingsView: View {
                 HStack {
                     Spacer(minLength: 0)
                     Button("Close It Between Turns") { model.closeMicrophoneBetweenTurns() }
-                        .help(
-                            "Forgets the armed wake words and switches recording and "
-                                + "speaker identification off. Apply to make it so.")
+                        .help("Forgets the armed wake words and switches recording off. Apply to make it so.")
                 }
             }
         }

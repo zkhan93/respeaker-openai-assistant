@@ -1683,7 +1683,7 @@ business keeping it open.
 | `--trigger vad` or `--trigger wakeword` | open continuously — sound opens the turn |
 | `--wake-word` under a keyed trigger | open continuously — reported in every mode, scored on every frame |
 | `--zmq-pub` (recording) | open continuously |
-| the `--speaker-*` flags (speaker identification) | open continuously |
+| the `--speaker-*` flags (speaker identification) | ~~open continuously~~ — **not a reason**, see the amendment |
 
 **The rule is one sentence: continuous only when a feature needs continuous audio.** The
 reasons are enumerated, not reduced to a boolean, because the window and the menu bar say
@@ -1726,9 +1726,25 @@ setting the user can switch off.
   still leave the shell holding the device.
 
 **Consequences.** The Dictation pane gains a Microphone row stating the current rule, with
-a callout naming every reason when the device cannot close. Wake Word, Speakers and
-Recording each warn at the switch that keeps it open. The menu bar carries the same one
-line. macOS's own indicator becomes trustworthy: it appears while you hold the key.
+a callout naming every reason when the device cannot close. Wake Word and Recording each
+warn at the switch that keeps it open. The menu bar carries the same one line. macOS's own
+indicator becomes trustworthy: it appears while you hold the key.
+
+*Amended 2026-09-06 — speaker identification is not a reason, and the shell writes a
+silence tail.* The first version listed identification as a reason to keep the device open.
+That was a misreading of "continuous consumer": the consumer has its own cursor and
+detector, not a need for continuous audio, and it identifies whoever spoke during whatever
+turn it is given. The user objected and was right. Removing it exposed the one thing the
+consumer *does* need — to see the turn end. It settles its identification, the only answer
+trusted to teach or create a profile, on its detector's `Stopped`, which takes
+`silence_frames` consecutive silent frames; a device closed on the core's `disarmed` shows
+it none, so nothing ever settled and enrolment never completed. `SilenceTail` is the fix:
+after the device stops, the shell writes `silence_frames + 2` frames of zeros to the audio
+socket in one go. Not a trick — a closed microphone is silence, and the byte stream is the
+shell's to shape (AD-16). Written whether or not identification is on, because any consumer
+with a detector falls off the same cliff. The alternative, having the core treat a stalled
+cursor as silence, was rejected as wall-clock semantics in a component that is otherwise a
+pure function of its frames.
 
 ---
 
@@ -1752,6 +1768,6 @@ That review set four priorities. Their status, and how this roadmap interacts:
 
 ---
 
-*Last updated 2026-09-05 (AD-23: the microphone is open only while something needs it;
-AD-12 amended to point at it).
+*Last updated 2026-09-06 (AD-23 amended: speaker identification is not a reason to hold the
+microphone open; the shell writes a silence tail before closing it).
 Amend decisions in place; do not delete rationale.*

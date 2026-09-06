@@ -464,10 +464,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Close the microphone if nothing needs it: not the policy, not an
     /// open turn, not a key still held. Safe to call from anywhere the
     /// answer might have changed.
+    ///
+    /// **The device stops first, then the silence is written.** The other
+    /// order would let a live frame land after the tail, and a detector
+    /// that has just been told "silence" must not then hear the room.
+    /// `stop()` removes the tap synchronously, so nothing live follows.
     private func closeMicrophoneIfIdle() {
         guard !microphonePolicy.isContinuous, !isArmed, !keyHeld, capture != nil else { return }
         capture?.stop()
         capture = nil
+        // Long enough for every consumer's detector to report the stop —
+        // the speaker consumer settles its answer on it, and without it
+        // "Add a person" never completes. The running core's threshold,
+        // because that is what its detectors were built with; the default
+        // if nothing is running yet.
+        let threshold = settings.running?.silenceFrames ?? HelperConfig().silenceFrames
+        _ = audioSocket?.send(SilenceTail.data(silenceFrames: threshold))
         rebuildMenu()
     }
 
