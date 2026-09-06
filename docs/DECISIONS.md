@@ -414,6 +414,11 @@ flowing into the ring buffer, so resume is instant and the pre-roll still has hi
 behind it. A segment already in flight finishes and publishes: pause means "stop taking new
 dictation", not "discard the sentence I just said".
 
+*Amended 2026-09-05.* This holds inside the core, and on the Pi, where the microphone is
+the product. It was carried unexamined into the Mac shell, which then held the device open
+all day for a hold-to-talk user. AD-23 reverses that at the shell: the core still gates the
+trigger, but the device it reads from is now opened per turn unless a feature needs the room.
+
 **Hotkey defaults are bare modifiers** — Right Option to hold, Right Command to toggle.
 pynput can only suppress keystrokes by suppressing *everything*, so whatever we bind is
 still delivered to the app being dictated into. A bare modifier emits no character on
@@ -1657,8 +1662,75 @@ the result, which is also how the window height, the option-pill width and
 the models pane's trailing alignment were settled. Vibrancy and live
 animation are the two things only the real window can confirm.
 
----
+### AD-23 — The microphone is open only while something needs it
 
+**Date:** 2026-09-05. **Status:** landed (macOS shell).
+
+**The problem.** `AppDelegate` opened the microphone when the helper started and closed
+it at quit, in every trigger mode. A hold-to-talk user therefore had a live device — and
+macOS's orange recording indicator — all day, for a feature that listens for a few
+seconds at a time. Nothing needed that. It was AD-12's "gate the trigger, not the source"
+carried from the Pi appliance, where the microphone *is* the product, into a shell where
+the trigger is a key you are holding. The person using it said it made them anxious, and
+they were right to be: a design that cannot say why the microphone is open has no
+business keeping it open.
+
+**Decision.** `MicrophonePolicy`, derived from `HelperConfig` and nothing else:
+
+| the configuration says | the microphone is |
+|---|---|
+| `hold` or `toggle`, nothing else on | open from key-down until the core reports the turn closed |
+| `--trigger vad` or `--trigger wakeword` | open continuously — sound opens the turn |
+| `--wake-word` under a keyed trigger | open continuously — reported in every mode, scored on every frame |
+| `--zmq-pub` (recording) | open continuously |
+| the `--speaker-*` flags (speaker identification) | open continuously |
+
+**The rule is one sentence: continuous only when a feature needs continuous audio.** The
+reasons are enumerated, not reduced to a boolean, because the window and the menu bar say
+*why* — "always open" with no cause is exactly what made it uneasy, and each reason is a
+setting the user can switch off.
+
+**Mechanics, all in the shell (AD-16).** The core and the protocol are untouched.
+
+* Key down opens the device, then arms — in that order, so a device that fails to open
+  leaves "microphone unavailable" in the menu bar instead of an armed turn that hears
+  nothing.
+* The device closes on the *core's* `disarmed`/`off`, not on key-up: in toggle mode the
+  VAD ends the turn well after the key came up.
+* `keyHeld` is tracked beside `isArmed`. Release and press again quickly and the previous
+  turn's `disarmed` lands after the new press; the key being down is what says "do not
+  close it" while the new `arm` is in flight.
+* Device-change handling respects the policy: a closed-by-policy device is not "knocked
+  over" and is not reopened; a change deferred past a turn closes rather than reopens.
+* Every spawn re-derives the policy, so switching recording off closes the device on
+  Apply, not at the next launch.
+
+**What it costs.**
+
+* **Pre-roll in hold mode.** The core kept 240 ms of idle audio and hands it to the engine
+  when the key goes down; there is none now, so a word begun before the press is clipped.
+  AD-12 calls the press an exact instant, and the arm earcon now marks the moment the
+  device is live, which is the honest cue to speak after.
+* **An engine start per press.** Logged as `microphone opened in N ms` on every press so
+  the number is known rather than assumed: tens of milliseconds on the built-in
+  microphone, longer for a Bluetooth headset. `engine.prepare()` ahead of the press was
+  considered and deferred until a measurement says it is needed.
+
+**Rejected.**
+
+* *Muting instead of closing.* The device stays open and macOS keeps showing the
+  indicator, which is the anxiety, not the audio.
+* *A boolean "privacy mode" toggle.* It would either lie (on, but recording is also on) or
+  silently disable features. The reasons are the toggle.
+* *Doing it in the core.* The core takes bytes (AD-16). A core that stopped reading would
+  still leave the shell holding the device.
+
+**Consequences.** The Dictation pane gains a Microphone row stating the current rule, with
+a callout naming every reason when the device cannot close. Wake Word, Speakers and
+Recording each warn at the switch that keeps it open. The menu bar carries the same one
+line. macOS's own indicator becomes trustworthy: it appears while you hold the key.
+
+---
 
 ## 8. Relationship to the 2026-07-06 architecture review
 
@@ -1680,6 +1752,6 @@ That review set four priorities. Their status, and how this roadmap interacts:
 
 ---
 
-*Last updated 2026-08-12 (AD-21: pinned model catalogue, verified downloads;
-AD-22: the settings window's design language).
+*Last updated 2026-09-05 (AD-23: the microphone is open only while something needs it;
+AD-12 amended to point at it).
 Amend decisions in place; do not delete rationale.*

@@ -324,6 +324,25 @@ final class SettingsModel: ObservableObject {
         config.wakeWords.removeAll { paths.contains($0) }
     }
 
+    /// Switch off everything that keeps the microphone open between turns.
+    ///
+    /// The three reasons live on three different panes, and a person who
+    /// has just read "always open because a wake word is armed, recording
+    /// is on and speaker identification is on" should not have to go and
+    /// find each one. The trigger is left alone: if it is speech or a wake
+    /// word, the microphone *is* the trigger, and changing that is a
+    /// different decision made on the row above. Armed wake words are
+    /// forgotten rather than disabled — a wake word here is a path to a
+    /// file that stays on disk, and there is no "armed but not listening"
+    /// state for a detector that runs on every frame.
+    func closeMicrophoneBetweenTurns() {
+        var adjusted = config
+        adjusted.wakeWords = []
+        adjusted.broadcast = .off
+        adjusted.identifySpeakers = false
+        config = adjusted
+    }
+
     /// The language a model can actually produce.
     ///
     /// An `.en` model given other speech does not fail — it transliterates
