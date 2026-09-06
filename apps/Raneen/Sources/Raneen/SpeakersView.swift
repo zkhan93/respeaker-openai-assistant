@@ -28,6 +28,11 @@ struct SpeakersView: View {
     @State private var adding = false
     @State private var draftName: String = ""
 
+    /// Whether something else keeps the microphone open. Decides how the
+    /// pane says to enrol someone: speaking is enough when the room is
+    /// heard, and otherwise they speak while the key is held.
+    private var microphoneIsContinuous: Bool { MicrophonePolicy(for: model.config).isContinuous }
+
     private var trimmedDraft: String {
         draftName.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -57,14 +62,14 @@ struct SpeakersView: View {
                     SettingsSwitch(isOn: $model.config.identifySpeakers)
                 }
 
-                if model.config.identifySpeakers {
-                    // Memory is the cost the disclosure explains; this is
-                    // the other one, and it is not folded away because a
-                    // live microphone is not a detail (AD-23).
+                if model.config.identifySpeakers && !microphoneIsContinuous {
+                    // Said because the first version of this pane claimed
+                    // the opposite. Identification runs on the turns it is
+                    // given; it does not keep the device open (AD-23).
                     SettingsCallout(
-                        .security,
-                        "Identifying speakers keeps the microphone open the whole time "
-                            + "Raneen runs.")
+                        .info,
+                        "Identifies whoever speaks during a turn. The microphone still "
+                            + "closes between turns.")
 
                     // **Four fixed choices, not a slider.** The model
                     // pools time in 2-second segments and pads a partial
@@ -204,7 +209,11 @@ struct SpeakersView: View {
                             ProgressView()
                                 .controlSize(.small)
                                 .tint(SettingsPalette.brand)
-                            Text("Listening for \(learning) — say a couple of sentences.")
+                            Text(
+                                microphoneIsContinuous
+                                    ? "Listening for \(learning) — say a couple of sentences."
+                                    : "Listening for \(learning) — hold \(TriggerKey.current.label) "
+                                        + "and say a couple of sentences.")
                                 .font(SettingsType.label)
                                 .foregroundStyle(.secondary)
                             Spacer(minLength: 8)
@@ -241,7 +250,10 @@ struct SpeakersView: View {
                             }
                             .disabled(model.running?.identifySpeakers != true)
                             .help(model.running?.identifySpeakers == true
-                                ? "Type a name, then have them speak for a few seconds."
+                                ? (microphoneIsContinuous
+                                    ? "Type a name, then have them speak for a few seconds."
+                                    : "Type a name, then hold \(TriggerKey.current.label) while "
+                                        + "they speak for a few seconds.")
                                 : "Apply the change first — the core has to be listening.")
                         }
                     }
@@ -259,8 +271,8 @@ struct SpeakersView: View {
     private var emptyMessage: String {
         model.running?.identifySpeakers == true
             ? "Nobody yet. Add a person below, then have them speak for a few "
-                + "seconds. Until somebody is here, every voice is reported as "
-                + "unknown."
+                + "seconds\(microphoneIsContinuous ? "" : " while the key is held"). "
+                + "Until somebody is here, every voice is reported as unknown."
             : "Nobody yet. Apply the change, then add a person below."
     }
 

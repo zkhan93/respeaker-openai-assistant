@@ -13,7 +13,7 @@ import Foundation
 /// milliseconds.
 ///
 /// The rule is one sentence: **the microphone is open continuously only
-/// when a feature needs continuous audio.** Otherwise it opens when the
+/// when a feature needs to hear the room between turns.** Otherwise it opens when the
 /// trigger key goes down and closes when the core reports the turn over.
 /// The reasons are enumerated rather than reduced to a boolean because the
 /// settings window and the menu bar both say *why* — "always open" with no
@@ -48,8 +48,6 @@ enum MicrophonePolicy: Equatable {
         case wakeWordArmed
         /// `--zmq-pub`: the always-on recorder.
         case recording
-        /// The `--speaker-*` flags: the continuous speaker consumer.
-        case speakerIdentification
 
         /// Read after "because", in the user's terms.
         var label: String {
@@ -58,7 +56,6 @@ enum MicrophonePolicy: Equatable {
             case .wakeWordTrigger: return "the trigger is a wake word"
             case .wakeWordArmed: return "a wake word is armed"
             case .recording: return "recording is on"
-            case .speakerIdentification: return "speaker identification is on"
             }
         }
     }
@@ -79,7 +76,13 @@ enum MicrophonePolicy: Equatable {
             if !config.wakeWords.isEmpty { reasons.append(.wakeWordArmed) }
         }
         if config.broadcast != .off { reasons.append(.recording) }
-        if config.identifySpeakers { reasons.append(.speakerIdentification) }
+        // Speaker identification is deliberately *not* a reason. The
+        // consumer runs on whatever frames arrive and identifies whoever
+        // spoke during the turn; it needs no room-listening of its own. It
+        // was listed at first because the core calls it "continuous", which
+        // means it has its own cursor and detector, not that it needs
+        // continuous audio. What it does need is to see the turn *end* —
+        // see `SilenceTail`.
         self = reasons.isEmpty ? .whileArmed : .continuous(reasons)
     }
 

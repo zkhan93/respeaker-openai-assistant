@@ -56,30 +56,32 @@ final class MicrophonePolicyTests: XCTestCase {
         }
     }
 
-    func testSpeakerIdentificationKeepsItOpen() {
+    /// Identification works on the turns it is given and needs nothing
+    /// between them. Listing it as a reason was the first version's
+    /// mistake, and the thing a user rightly objected to.
+    func testSpeakerIdentificationDoesNotKeepItOpen() {
         var config = HelperConfig()
         config.identifySpeakers = true
-        XCTAssertEqual(MicrophonePolicy(for: config), .continuous([.speakerIdentification]))
+        XCTAssertEqual(MicrophonePolicy(for: config), .whileArmed)
     }
 
-    /// Reasons accumulate in a fixed order — trigger first, then the two
-    /// consumers — so the sentence reads the same way every time.
+    /// Reasons accumulate in a fixed order — trigger first, then the
+    /// recorder — so the sentence reads the same way every time.
     func testReasonsAccumulateInAStableOrder() {
         var config = HelperConfig()
         config.trigger = .hold
         config.wakeWords = ["/tmp/alexa.onnx"]
         config.broadcast = .loopback
         config.identifySpeakers = true
-        XCTAssertEqual(
-            MicrophonePolicy(for: config).reasons,
-            [.wakeWordArmed, .recording, .speakerIdentification])
+        XCTAssertEqual(MicrophonePolicy(for: config).reasons, [.wakeWordArmed, .recording])
     }
 
     // MARK: - The way back
 
     /// The button under the callout must actually get the user to
-    /// `whileArmed`, whatever combination of the three reasons was on —
+    /// `whileArmed`, whatever combination of the keyed reasons was on —
     /// and leave the trigger, which is a different decision, untouched.
+    /// Speaker identification is not a reason, so it is left on too.
     func testClosingBetweenTurnsRemovesEveryKeyedReason() {
         let suite = "raneen.tests.micpolicy"
         let defaults = UserDefaults(suiteName: suite)!
@@ -97,6 +99,7 @@ final class MicrophonePolicyTests: XCTestCase {
 
         XCTAssertEqual(MicrophonePolicy(for: model.config), .whileArmed)
         XCTAssertEqual(model.config.trigger, .hold)
+        XCTAssertTrue(model.config.identifySpeakers, "identification was not a reason to touch")
     }
 
     /// The same action under a wake-word trigger cannot reach `whileArmed`
@@ -133,9 +136,8 @@ final class MicrophonePolicyTests: XCTestCase {
             MicrophonePolicy.continuous([.wakeWordArmed, .recording]).reasonClause,
             "a wake word is armed and recording is on")
         XCTAssertEqual(
-            MicrophonePolicy.continuous([.wakeWordArmed, .recording, .speakerIdentification])
-                .reasonClause,
-            "a wake word is armed, recording is on and speaker identification is on")
+            MicrophonePolicy.continuous([.speechTrigger, .wakeWordArmed, .recording]).reasonClause,
+            "the trigger listens for speech, a wake word is armed and recording is on")
     }
 
     /// The menu-bar line names the actual key, and says why when it cannot
