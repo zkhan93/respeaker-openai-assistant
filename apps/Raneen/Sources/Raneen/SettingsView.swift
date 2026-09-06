@@ -144,6 +144,8 @@ struct SettingsView: View {
                 keyCap(TriggerKey.current.label)
             }
 
+            microphoneRow
+
             if model.config.trigger == .wakeword && model.config.wakeWords.isEmpty {
                 SettingsCallout(
                     .warning, "No wake word is configured, so nothing will open a turn.")
@@ -187,6 +189,55 @@ struct SettingsView: View {
             // needs the Apply button, and leaving this one to look the
             // same would have people restarting the core for a colour.
             SettingsCallout(.info, "Takes effect immediately — the core is not involved.")
+        }
+    }
+
+    /// Whether the microphone stays open — derived from what is on screen,
+    /// not from what is running, so it changes as the trigger is picked and
+    /// the user sees the consequence before pressing Apply.
+    private var microphonePolicy: MicrophonePolicy { MicrophonePolicy(for: model.config) }
+
+    /// When the microphone is open, said plainly on the pane that decides it.
+    ///
+    /// **This row exists because the device used to be open all day and the
+    /// window never said so** (AD-23). The badge is the fact; the callout
+    /// under it, shown only when the microphone cannot close, names every
+    /// reason — each one is a setting on some pane of this window, so the
+    /// sentence is also the way to switch it off.
+    @ViewBuilder
+    private var microphoneRow: some View {
+        let policy = microphonePolicy
+        SettingsRow(
+            "Microphone",
+            caption: policy.isContinuous
+                ? "Open the whole time Raneen runs."
+                : "Opens when you press \(TriggerKey.current.label) and closes when the turn ends."
+        ) {
+            if policy.isContinuous {
+                SettingsBadge("Always open", style: .warning)
+            } else {
+                SettingsBadge("Only while you hold the key")
+            }
+        }
+
+        if policy.isContinuous {
+            SettingsCallout(
+                .security,
+                "The microphone stays open because \(policy.reasonClause). macOS shows "
+                    + "its orange microphone indicator the whole time.")
+
+            // One click, not three panes. Offered only when the trigger is
+            // a key: for speech or a wake word the microphone is the
+            // trigger, and the fix is the row above, not a button here.
+            if model.config.trigger == .hold || model.config.trigger == .toggle {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button("Close It Between Turns") { model.closeMicrophoneBetweenTurns() }
+                        .help(
+                            "Forgets the armed wake words and switches recording and "
+                                + "speaker identification off. Apply to make it so.")
+                }
+            }
         }
     }
 
@@ -462,6 +513,16 @@ struct SettingsView: View {
                 }
             }
 
+            if microphonePolicy.reasons.contains(.wakeWordArmed) {
+                // The consequence a hotkey user would not expect: the word
+                // never opens a turn here, but the detector scores every
+                // frame, so arming one is what keeps the device open.
+                SettingsCallout(
+                    .security,
+                    "Arming a wake word keeps the microphone open the whole time Raneen "
+                        + "runs, even though only the key opens a turn.")
+            }
+
             HStack {
                 Spacer(minLength: 0)
                 Button("Add a Wake Word Model…") { chooseWakeWord() }
@@ -564,6 +625,13 @@ struct SettingsView: View {
                         format: .number.grouping(.never)
                     )
                 }
+            }
+
+            if model.config.broadcast != .off {
+                SettingsCallout(
+                    .security,
+                    "Publishing keeps the microphone open the whole time Raneen runs — "
+                        + "it has to hear the room to record it.")
             }
 
             if model.config.broadcast == .network {

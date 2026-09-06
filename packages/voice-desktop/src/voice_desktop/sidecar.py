@@ -156,6 +156,7 @@ LEVEL_EVERY_FRAMES = 1
 #: panel is for — so the FFT went and one number came back.
 LEVEL_BLOCKS_PER_FRAME = 4
 
+
 def level_loop(
     controller,
     writer: JsonLineWriter,

@@ -41,8 +41,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Whether a turn is open, mirrored from the helper's state events.
     /// Used to avoid reopening the microphone — or replacing the core —
-    /// mid-sentence.
+    /// mid-sentence, and to know when the microphone may close.
     private var isArmed = false
+
+    /// Whether the microphone may stay open while nothing is listening.
+    ///
+    /// Re-derived from the configuration on every spawn, because it is a
+    /// function of the flags the core was launched with and nothing else.
+    /// See `MicrophonePolicy` and AD-23.
+    private var microphonePolicy = MicrophonePolicy.whileArmed
+
+    /// The trigger key is down right now.
+    ///
+    /// Tracked separately from `isArmed`, which is the *core's* view and
+    /// arrives a round trip later. The gap matters in one case: release
+    /// and press again quickly, and the previous turn's `disarmed` lands
+    /// after the new press — closing the microphone under a key that is
+    /// being held, with the new `arm` already in flight. The key being
+    /// down is the fact that says "do not close it", whatever the core
+    /// has caught up to.
+    private var keyHeld = false
 
     /// Reopening the microphone after a device change. Named for capture
     /// specifically because there is now a second thing that defers on
@@ -123,11 +141,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Log.hotkey.info("event tap installed, bound to \(self.triggerKey.label)")
             hotkey.onPress = { [weak self] in
                 Log.hotkey.debug("down")
-                self?.helper?.arm()
+                self?.keyHeld = true
+                self?.openMicrophoneAndArm()
             }
             hotkey.onRelease = { [weak self] in
                 Log.hotkey.debug("up")
+                self?.keyHeld = false
                 self?.helper?.disarm()
+                // Normally the core's `disarmed` closes the microphone. If
+                // the core never confirmed the arm — it was restarting, or
+                // the mode publishes no arming state — nothing else will.
+                self?.closeMicrophoneIfIdle()
             }
         }
     }
@@ -218,7 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         player.prepare(device: DevicePreference.resolve(.output).device)
         earcons = player
 
-        startCapture(sending: socket)
+        // The microphone is *not* opened here any more. Whether it opens
+        // now or on the first key press depends on the configuration, which
+        // `spawnHelper` reads — so the decision lives there (AD-23).
         watchForDeviceChanges()
 
         spawnHelper(sending: socket)
@@ -241,6 +267,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // settings change rather than repeat the launch configuration.
         let config = SettingsStore.current()
         let arguments = config.argv(audioSocket: socket.path)
+
+        // Before the spawn, so a continuous microphone is already feeding
+        // the socket when the core connects — as it always was — and a
+        // microphone that is no longer allowed to stay open is closed
+        // before the new core could mistake its silence for a quiet room.
+        applyMicrophonePolicy(for: config, socket: socket)
 
         // The whole configuration, in one line, every spawn. Worth its space
         // in the log: "why is it behaving like that" is answerable from it
@@ -362,9 +394,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { self?.audioDeviceChanged() }
         }
         let (device, honoured) = DevicePreference.resolve(.input)
+        let began = CFAbsoluteTimeGetCurrent()
         do {
             try capture.start(device: device)
             self.capture = capture
+            // Worth a line every time now that this runs per key press:
+            // it is the number that decides whether "open on demand" costs
+            // the first syllable. Tens of milliseconds on the built-in
+            // microphone; a Bluetooth headset can take much longer.
+            Log.audio.info(
+                "microphone opened in \(Int((CFAbsoluteTimeGetCurrent() - began) * 1000)) ms")
             if !honoured {
                 // The chosen microphone is not plugged in. Working on the
                 // default beats not working, but silently listening to a
@@ -375,6 +414,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Log.audio.error("could not start capture: \(error)")
             state = "microphone unavailable"
         }
+    }
+
+    // MARK: - When the microphone is open
+
+    /// Decide, from the configuration about to run, whether the microphone
+    /// stays open or opens on demand — and make it so.
+    ///
+    /// Called on every spawn, which is also every settings change, so
+    /// switching recording off closes the device the moment Apply is
+    /// pressed rather than at the next restart of the app.
+    private func applyMicrophonePolicy(for config: HelperConfig, socket: AudioSocket) {
+        microphonePolicy = MicrophonePolicy(for: config)
+        switch microphonePolicy {
+        case .continuous(let reasons):
+            Log.audio.info("microphone stays open: \(reasons)")
+            if capture == nil { startCapture(sending: socket) }
+        case .whileArmed:
+            Log.audio.info("microphone opens on the trigger key only")
+            closeMicrophoneIfIdle()
+        }
+    }
+
+    /// The trigger key went down: make sure the microphone is open, then arm.
+    ///
+    /// **Arm only once the device is actually open.** Arming first would
+    /// open a turn the core hears nothing of if the device fails, which is
+    /// the silent kind of failure — the earcon plays, the indicator lights,
+    /// and no words arrive. Failing here instead leaves the menu bar saying
+    /// "microphone unavailable", which at least says what happened.
+    ///
+    /// The cost of opening on demand is the pre-roll: the core keeps 240 ms
+    /// of idle audio in hold mode and there is none now, so a word begun
+    /// before the press is clipped. AD-12 already calls the press an exact
+    /// instant, and the arm earcon marks the moment the device is live.
+    private func openMicrophoneAndArm() {
+        guard let helper, let socket = audioSocket else { return }
+        if capture == nil {
+            startCapture(sending: socket)
+            guard capture != nil else {
+                show(.error)
+                rebuildMenu()
+                return
+            }
+        }
+        helper.arm()
+    }
+
+    /// Close the microphone if nothing needs it: not the policy, not an
+    /// open turn, not a key still held. Safe to call from anywhere the
+    /// answer might have changed.
+    private func closeMicrophoneIfIdle() {
+        guard !microphonePolicy.isContinuous, !isArmed, !keyHeld, capture != nil else { return }
+        capture?.stop()
+        capture = nil
+        rebuildMenu()
     }
 
     /// Rebuild the menu, and follow the device, when the hardware changes.
@@ -423,6 +517,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func audioDeviceChanged() {
         guard audioSocket != nil else { return }
 
+        if !microphonePolicy.isContinuous && capture == nil {
+            // Closed on purpose, not knocked over. There is nothing to
+            // follow; the next key press resolves the device afresh.
+            return
+        }
+
         let target = DevicePreference.resolve(.input).device
         let sameDevice = capture?.openedDevice?.uid == target?.uid
         let stillRunning = capture?.isEngineRunning == true
@@ -465,6 +565,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         capture?.stop()
         capture = nil
+
+        if !microphonePolicy.isContinuous && !isArmed && !keyHeld {
+            // The change arrived mid-turn and was deferred; the turn is
+            // over now, and under this policy "over" means closed, not
+            // reopened on the new device.
+            captureRestartAttempts = 0
+            rebuildMenu()
+            return
+        }
         startCapture(sending: socket)
 
         if capture != nil {
@@ -558,6 +667,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // closes the turn there exactly as `disarmed` does for hold.
                 isArmed = false
                 panel.hide()
+                // The turn is over, so under `whileArmed` the microphone
+                // closes here — on the core's word rather than the key's,
+                // because in toggle mode the VAD ends the turn well after
+                // the key came up.
+                closeMicrophoneIfIdle()
                 // A device changed while the turn was open. Now that the
                 // sentence is finished, follow it.
                 if captureRestartPending { scheduleCaptureRestart() }
@@ -615,6 +729,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .exited(let status):
             state = "helper exited (\(status))"
             show(.stopped)
+            // No core, no turn. Without this a core that died mid-sentence
+            // left `isArmed` true forever and the microphone open with it.
+            isArmed = false
+            panel.hide()
+            closeMicrophoneIfIdle()
         case .unknown(let raw):
             Log.helper.error("unrecognised event: \(raw)")
         }
@@ -647,6 +766,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(Self.caption(state))
         menu.addItem(Self.caption("Hold \(triggerKey.label) to talk"))
         menu.addItem(Self.caption(micDescription))
+        // The one line a person anxious about the microphone is looking
+        // for: is it open now, and if it stays open, because of what.
+        menu.addItem(Self.caption(microphonePolicy.summary(key: triggerKey.label)))
 
         if lastTranscript != "—" {
             menu.addItem(.separator())
@@ -759,6 +881,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// the one we would pick if we opened now.
     private var micDescription: String {
         guard let format = capture?.inputFormat, let device = capture?.openedDevice else {
+            // Closed by policy is the ordinary case now, and it must not
+            // read as a fault.
+            if !microphonePolicy.isContinuous && !keyHeld { return "Mic: closed" }
             return "Mic: unavailable"
         }
         return String(format: "Mic: %@ · %.0f kHz", device.name, format.sampleRate / 1000)

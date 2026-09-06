@@ -57,10 +57,12 @@ impl FrameBuffer {
 
         let mut frames = Vec::new();
         while self.carry.len() >= CHUNK_BYTES {
-            let frame: Vec<i16> = self.carry[..CHUNK_BYTES]
-                .chunks_exact(2)
-                .map(|p| i16::from_le_bytes([p[0], p[1]]))
-                .collect();
+            // `as_chunks` rather than `chunks_exact(2)`: the chunk size is a
+            // constant, so the compiler can hand back `[u8; 2]` directly and
+            // the little-endian decode needs no bounds checks. `CHUNK_BYTES`
+            // is even, so the remainder is always empty and is dropped.
+            let (pairs, _) = self.carry[..CHUNK_BYTES].as_chunks::<2>();
+            let frame: Vec<i16> = pairs.iter().map(|p| i16::from_le_bytes(*p)).collect();
             self.carry.drain(..CHUNK_BYTES);
             frames.push(frame);
         }

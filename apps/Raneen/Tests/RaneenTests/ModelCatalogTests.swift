@@ -238,12 +238,17 @@ final class ModelCatalogTests: XCTestCase {
         XCTAssertEqual(partial.deletingLastPathComponent(), destination.deletingLastPathComponent())
     }
 
+    /// Compared as paths, not as URLs. `deletingLastPathComponent()` on a
+    /// file URL returns `…/models/` with a trailing slash on macOS 15's
+    /// Foundation and `…/models` on newer ones, and `URL ==` treats those
+    /// as different places. `path` drops the slash either way, and the
+    /// claim being tested is about the directory, not its spelling.
     func testDestinationIsInTheDownloadDirectory() {
         for model in ModelCatalog.all {
             XCTAssertEqual(
                 ModelInstall.destination(for: model.filename).deletingLastPathComponent()
-                    .standardizedFileURL,
-                ModelInstall.directory.standardizedFileURL)
+                    .standardizedFileURL.path,
+                ModelInstall.directory.standardizedFileURL.path)
         }
     }
 

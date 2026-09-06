@@ -447,23 +447,50 @@ struct SettingsSwitch: View {
 /// rather than good news, and uses the neutral fill.
 struct SettingsBadge: View {
 
-    private let text: String
-    private let isQuiet: Bool
+    enum Style {
+        /// Good news, or the brand: "included", "recommended".
+        case brand
+        /// Merely true: "unnamed".
+        case quiet
+        /// A state the user should notice: "always open".
+        case warning
 
-    init(_ text: String, quiet: Bool = false) {
+        var foreground: Color {
+            switch self {
+            case .brand: return SettingsPalette.brand
+            case .quiet: return Color.secondary
+            case .warning: return SettingsPalette.warning
+            }
+        }
+
+        var fill: Color {
+            switch self {
+            case .brand: return SettingsPalette.brand.opacity(0.12)
+            case .quiet: return SettingsPalette.quietFill
+            case .warning: return SettingsPalette.warning.opacity(0.14)
+            }
+        }
+    }
+
+    private let text: String
+    private let style: Style
+
+    init(_ text: String, style: Style = .brand) {
         self.text = text
-        self.isQuiet = quiet
+        self.style = style
+    }
+
+    init(_ text: String, quiet: Bool) {
+        self.init(text, style: quiet ? .quiet : .brand)
     }
 
     var body: some View {
         Text(text)
             .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(isQuiet ? Color.secondary : SettingsPalette.brand)
+            .foregroundStyle(style.foreground)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(
-                Capsule().fill(
-                    isQuiet ? SettingsPalette.quietFill : SettingsPalette.brand.opacity(0.12)))
+            .background(Capsule().fill(style.fill))
             .lineLimit(1)
             .fixedSize()
     }

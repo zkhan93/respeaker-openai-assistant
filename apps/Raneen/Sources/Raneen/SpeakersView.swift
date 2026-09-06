@@ -58,6 +58,14 @@ struct SpeakersView: View {
                 }
 
                 if model.config.identifySpeakers {
+                    // Memory is the cost the disclosure explains; this is
+                    // the other one, and it is not folded away because a
+                    // live microphone is not a detail (AD-23).
+                    SettingsCallout(
+                        .security,
+                        "Identifying speakers keeps the microphone open the whole time "
+                            + "Raneen runs.")
+
                     // **Four fixed choices, not a slider.** The model
                     // pools time in 2-second segments and pads a partial
                     // one with zeros, so anything between these values

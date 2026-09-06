@@ -184,9 +184,17 @@ enum ModelInstall {
     }
 
     /// Whether a model on disk is one this app is allowed to delete.
+    ///
+    /// Compared as paths, not as URLs. `deletingLastPathComponent()` on a
+    /// file URL keeps a trailing slash on macOS 15's Foundation and drops
+    /// it on later ones, and `URL ==` treats `…/models/` and `…/models` as
+    /// different places — so on macOS 15 this returned `false` for every
+    /// model the app itself had downloaded, and the trash button never
+    /// appeared. `path` is the same string either way. Caught by CI, which
+    /// runs on macOS 15 while development happens on newer.
     static func isRemovable(path: String) -> Bool {
-        URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent()
-            == directory.standardizedFileURL
+        URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent().path
+            == directory.standardizedFileURL.path
     }
 
     /// Discard leftover `.part` files.
