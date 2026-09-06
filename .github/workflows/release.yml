@@ -137,6 +137,11 @@ jobs:
       - name: Fetch wake-word models
         run: ./tools/fetch-wakeword-models.sh
 
+      # The speaker cases need CAM++ too, and strict mode counts a skip as a
+      # failure — see tests.yml for the three weeks this cost.
+      - name: Fetch speaker model
+        run: ./tools/fetch-speaker-models.sh
+
       - name: Install pyzmq
         run: python3 -m pip install --user --break-system-packages pyzmq
 

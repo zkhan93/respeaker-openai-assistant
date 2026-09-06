@@ -75,8 +75,13 @@ jobs:
 
   # The desktop suite is structural only — it asserts the sounddevice
   # adapters still match the voice-core audio ports and never opens a
-  # device, so it runs fine on a CI box with no audio hardware. sounddevice
-  # itself installs from a wheel with PortAudio bundled.
+  # device, so it runs fine on a CI box with no audio hardware.
+  #
+  # **sounddevice's Linux wheel does not bundle PortAudio** — only the
+  # macOS and Windows wheels do — so importing it raises `PortAudio library
+  # not found` at collection time and every test file errors before a
+  # single assertion runs. The system library is enough: nothing here
+  # opens a device, it only has to be loadable.
   voice-desktop:
     name: voice-desktop unit tests
     runs-on: ubuntu-latest
@@ -85,6 +90,9 @@ jobs:
         working-directory: packages/voice-desktop
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install PortAudio (shared library only)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -200,6 +208,22 @@ jobs:
       - name: Fetch wake-word models
         if: steps.wakeword.outputs.cache-hit != 'true'
         run: ./tools/fetch-wakeword-models.sh
+
+      # 29 MB of ONNX for the speaker cases. Without it the speaker group
+      # skips, and under strict mode that is a failure — which is exactly
+      # what happened for three weeks after the group was added: the suite
+      # printed "11 passed, 4 SKIPPED" and the job went red for want of a
+      # download step nobody had written.
+      - name: Cache speaker model
+        id: speaker
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/raneen/speaker
+          key: speaker-${{ hashFiles('tools/fetch-speaker-models.sh') }}
+
+      - name: Fetch speaker model
+        if: steps.speaker.outputs.cache-hit != 'true'
+        run: ./tools/fetch-speaker-models.sh
 
       # Same reasoning: the two cases that cover always-on recording and
       # concurrent dictation need a Python that can import zmq.
