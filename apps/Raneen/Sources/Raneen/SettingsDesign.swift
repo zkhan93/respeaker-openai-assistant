@@ -57,10 +57,17 @@ enum SettingsMetric {
     static let rowSpacing: CGFloat = 13
     static let calloutPadding: CGFloat = 10
 
-    static let cardRadius: CGFloat = 10
-    static let calloutRadius: CGFloat = 7
-    static let tileRadius: CGFloat = 6
+    /// Twelve rather than the ten it was: the platform's own grouped
+    /// surfaces have rounded further with each release, and at ten the
+    /// cards read as a form from the previous decade next to them.
+    static let cardRadius: CGFloat = 12
+    static let calloutRadius: CGFloat = 8
     static let pillRadius: CGFloat = 7
+    /// Hover on a list row inside a card — a model, a person, a wake word.
+    static let listRowRadius: CGFloat = 6
+    /// How far a list row's hover fill reaches past its content, so the
+    /// fill has some air around the text without the text itself moving.
+    static let listRowInset: CGFloat = 8
 
     /// Trailing control widths. Fixed rather than intrinsic so that a
     /// pop-up whose selection changes, or a slider next to a stepper, does
@@ -92,20 +99,20 @@ enum SettingsPalette {
     /// the indicator should be visibly the same application.
     static let brand = Color(nsColor: StatusIcon.brandColor)
 
-    /// The selection pill, and the only place a saturated fill is used.
+    /// The selected sidebar row.
     ///
-    /// **Darker than the mark's orange, because white 13pt sits on it.**
-    /// `#F58B2E` against white is about 2.3:1, which is not text; these two
-    /// are 3.5:1 and 4.5:1, which is where Apple's own accent-coloured
-    /// sidebar rows land. Written out rather than computed with
-    /// `blended(withFraction:of:)` — that returns an optional, because it
-    /// fails when two colours cannot be brought into one colour space, and
-    /// a `??` fallback would silently ship a different orange.
-    static let pill = LinearGradient(
-        colors: [rgb(0xC9, 0x72, 0x26), rgb(0x98, 0x56, 0x1D)],
-        startPoint: .top,
-        endPoint: .bottom
-    )
+    /// A translucent fill, as every Mac sidebar now draws it, rather than
+    /// the saturated orange gradient this replaced. That gradient was
+    /// darkened to `#C97226`→`#98561D` so white text on it reached 4.5:1,
+    /// and it worked — but it was the loudest object in a window that
+    /// otherwise speaks in hairlines, and it read as a decade-old
+    /// selection style beside the platform's own. The brand now sits on
+    /// the selected glyph alone; see `SettingsSidebarRow` for the trade.
+    /// Stronger than `hoverFill`, so a hovered row and the selected row
+    /// are never confused for each other.
+    static let selection = Color(
+        nsColor: dynamic(
+            light: NSColor(white: 0, alpha: 0.09), dark: NSColor(white: 1, alpha: 0.12)))
 
     /// The pane behind the cards.
     static let pane = Color(nsColor: .windowBackgroundColor)
@@ -119,11 +126,21 @@ enum SettingsPalette {
     static let card = Color(
         nsColor: dynamic(light: .white, dark: NSColor(white: 1, alpha: 0.055)))
 
-    /// The hairline round a card. Doing the work a shadow would otherwise
-    /// do: a shadow under fifteen cards is mud, an edge is an edge.
+    /// The hairline round a card. Doing most of the work a shadow would
+    /// otherwise do: a shadow under fifteen cards is mud, an edge is an edge.
     static let cardBorder = Color(
         nsColor: dynamic(
-            light: NSColor(white: 0, alpha: 0.09), dark: NSColor(white: 1, alpha: 0.09)))
+            light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.09)))
+
+    /// The small amount of lift a card is allowed.
+    ///
+    /// Light mode only, and faint — a white card on a near-white pane is
+    /// otherwise held up by its hairline alone, which is flat in the way a
+    /// wireframe is flat. In dark mode the card is already a lighter wash
+    /// on the pane, and a shadow under it would be black on black, so it
+    /// resolves to clear rather than to a smaller alpha.
+    static let cardShadow = Color(
+        nsColor: dynamic(light: NSColor(white: 0, alpha: 0.05), dark: .clear))
 
     /// Separator inside a card, for lists of like things.
     static let hairline = Color(nsColor: .separatorColor)
@@ -151,8 +168,22 @@ enum SettingsPalette {
     static let warning = Color(nsColor: .systemOrange)
     static let neutral = Color(nsColor: .secondaryLabelColor)
 
-    /// sRGB from the hex a designer reads, since the two literals above are
-    /// the only fixed colours in the window.
+    /// The one filled button in the window.
+    ///
+    /// Brand orange, but held a step darker than the mark's `#F58B2E`
+    /// because white 13pt semibold sits on it: the mark's own orange is
+    /// about 2.3:1 against white, and this pair is 3.1:1 at the top and
+    /// 3.9:1 at the bottom, which is where the platform's own accent
+    /// buttons land. Written out rather than derived with
+    /// `blended(withFraction:of:)` — that returns an optional and a `??`
+    /// fallback would silently ship a different orange.
+    static let primaryAction = LinearGradient(
+        colors: [rgb(0xE2, 0x76, 0x22), rgb(0xBC, 0x5F, 0x19)],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    /// sRGB from the hex a designer reads, for the two literals above.
     private static func rgb(_ red: Int, _ green: Int, _ blue: Int) -> Color {
         Color(.sRGB, red: Double(red) / 255, green: Double(green) / 255, blue: Double(blue) / 255)
     }
@@ -266,9 +297,12 @@ struct SettingsCard<Accessory: View, Content: View>: View {
         }
         .padding(SettingsMetric.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // The shadow is on the shape, not on the card: a `.shadow` on the
+        // whole view would also shadow every line of text inside it.
         .background(
-            SettingsPalette.card,
-            in: RoundedRectangle(cornerRadius: SettingsMetric.cardRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: SettingsMetric.cardRadius, style: .continuous)
+                .fill(SettingsPalette.card)
+                .shadow(color: SettingsPalette.cardShadow, radius: 10, y: 3)
         )
         .overlay(
             RoundedRectangle(cornerRadius: SettingsMetric.cardRadius, style: .continuous)
@@ -377,6 +411,128 @@ struct SettingsDivider: View {
             .fill(SettingsPalette.hairline)
             .frame(height: 1)
             .padding(.leading, 2)
+    }
+}
+
+// MARK: - Switch
+
+/// An on/off setting, drawn the same way everywhere.
+///
+/// A switch rather than the checkbox `Toggle` defaults to on macOS: every
+/// one of these turns a capability on, which is what a switch means, and it
+/// is what every settings surface on the platform now uses. Tinted with the
+/// brand so the one saturated control on a card is not a different colour
+/// from the sidebar and the Apply button. Before this existed one pane
+/// tinted its switch and another did not, which is exactly the kind of
+/// drift a shared vocabulary is for.
+struct SettingsSwitch: View {
+
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle("", isOn: $isOn)
+            .toggleStyle(.switch)
+            .tint(SettingsPalette.brand)
+            .labelsHidden()
+    }
+}
+
+// MARK: - Badge
+
+/// A short fact attached to a name — "included", "recommended".
+///
+/// A capsule in the brand tint at caption size: small enough that it
+/// annotates the thing beside it rather than competing with it, coloured
+/// so it is found by scanning. `quiet` is for a fact that is merely true
+/// rather than good news, and uses the neutral fill.
+struct SettingsBadge: View {
+
+    private let text: String
+    private let isQuiet: Bool
+
+    init(_ text: String, quiet: Bool = false) {
+        self.text = text
+        self.isQuiet = quiet
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(isQuiet ? Color.secondary : SettingsPalette.brand)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule().fill(
+                    isQuiet ? SettingsPalette.quietFill : SettingsPalette.brand.opacity(0.12)))
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
+// MARK: - Empty state
+
+/// A list with nothing in it yet, saying so on purpose.
+///
+/// A glyph and a sentence, centred, at footnote weight. A bare "None." in
+/// the middle of a card reads as a missing feature; this reads as a place
+/// where something will be, and says what to do about it. Hand-built
+/// because `ContentUnavailableView` is macOS 14 and this app runs on 13.
+struct SettingsEmptyState: View {
+
+    private let symbol: String
+    private let text: String
+
+    init(symbol: String, _ text: String) {
+        self.symbol = symbol
+        self.text = text
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(text)
+                .font(SettingsType.prose)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+    }
+}
+
+// MARK: - List row hover
+
+/// The faint fill under a list row while the pointer is over it.
+///
+/// Rows inside a card — models, people, wake words — are clickable, and
+/// nothing about a line of text says so. A hover fill is the cheapest
+/// honest answer: it appears only under the pointer and only where a click
+/// does something. The fill reaches `listRowInset` past the content on each
+/// side and is pulled back by the same amount, so the text does not move
+/// when it appears.
+struct SettingsListRowHover: ViewModifier {
+
+    let isActive: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, SettingsMetric.listRowInset)
+            .background(
+                RoundedRectangle(cornerRadius: SettingsMetric.listRowRadius, style: .continuous)
+                    .fill(isActive ? SettingsPalette.hoverFill : Color.clear)
+            )
+            .padding(.horizontal, -SettingsMetric.listRowInset)
+    }
+}
+
+extension View {
+    /// See `SettingsListRowHover`.
+    func settingsListRowHover(_ isActive: Bool) -> some View {
+        modifier(SettingsListRowHover(isActive: isActive))
     }
 }
 
@@ -645,7 +801,62 @@ struct SettingsActionBar<Actions: View>: View {
         }
         .padding(.horizontal, SettingsMetric.gutter)
         .padding(.vertical, 12)
-        .background(.bar)
+        // The pane's own colour with a hairline above, not the `.bar`
+        // material it was. That material is a toolbar's — a lighter grey
+        // strip that read as a second piece of chrome under the content,
+        // and with the pane and the sidebar already two materials, a third
+        // was one too many. Now the bar recedes and the button is the only
+        // object on it.
+        .background(SettingsPalette.pane)
+        .overlay(alignment: .top) {
+            Rectangle().fill(SettingsPalette.hairline).frame(height: 1)
+        }
+    }
+}
+
+// MARK: - Primary button
+
+/// The window's one filled button.
+///
+/// A capsule in the brand gradient, with white semibold text — the shape
+/// every current Mac surface gives its single confirming action, and a
+/// deliberate step away from `.borderedProminent`, whose disabled state is
+/// a grey slab that looks like a control from a system several versions
+/// back. Disabled, this is a quiet capsule with secondary text: still
+/// legibly a button, so the eye knows where Apply will appear, but with no
+/// weight until there is something to apply.
+struct SettingsPrimaryButtonStyle: ButtonStyle {
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(isEnabled ? Color.white : Color.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 7)
+            .background(
+                Capsule().fill(
+                    isEnabled
+                        ? AnyShapeStyle(SettingsPalette.primaryAction)
+                        : AnyShapeStyle(SettingsPalette.quietFill))
+            )
+            // A hairline of light along the top edge, which is what gives
+            // a filled capsule its slight convexity instead of a flat fill.
+            .overlay(
+                Capsule().strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(isEnabled ? 0.28 : 0), Color.clear],
+                        startPoint: .top, endPoint: .center),
+                    lineWidth: 1)
+            )
+            .shadow(
+                color: SettingsPalette.brand.opacity(isEnabled ? 0.28 : 0),
+                radius: 6, y: 2)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .contentShape(Capsule())
     }
 }
 

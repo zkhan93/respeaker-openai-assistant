@@ -37,6 +37,13 @@ final class SettingsWindow {
         }
 
         let hosting = NSHostingController(rootView: SettingsView(model: model))
+        // The window is sized here, once, from `SettingsMetric.windowSize`
+        // — not by the hosting controller, which would otherwise keep
+        // re-fitting the window to its content *plus* the titlebar it lies
+        // under, and grow a 640pt design into a 672pt window with a bare
+        // band above the sidebar. The view is a fixed size by design, so
+        // there is nothing for automatic sizing to track.
+        hosting.sizingOptions = []
         let window = NSWindow(contentViewController: hosting)
         // Still set, though nothing draws it: the Window menu, ⌘` cycling
         // and VoiceOver all read this, and an untitled window is announced
@@ -58,6 +65,22 @@ final class SettingsWindow {
         window.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        // No line under the (invisible) titlebar: the sidebar's vibrancy is
+        // meant to run to the top edge unbroken, and the pane draws its own
+        // header. Nothing here is a document with a toolbar over it.
+        window.titlebarSeparatorStyle = .none
+        // There is no visible titlebar to grab, so the whole surface drags
+        // — as System Settings and every other titleless window does.
+        window.isMovableByWindowBackground = true
+
+        // **Sized after the style mask, on purpose.** `init(contentViewController:)`
+        // measured the view at 640pt and added a titlebar's height to the
+        // frame; switching to `.fullSizeContentView` afterwards then hands
+        // that extra height back to the content, and a 640pt view inside a
+        // 672pt content area sits at the bottom with a 32pt band of bare
+        // window showing above the sidebar. It was live for one build and
+        // looked like a seam between two materials.
+        window.setContentSize(SettingsMetric.windowSize)
 
         window.isReleasedWhenClosed = false
         window.center()

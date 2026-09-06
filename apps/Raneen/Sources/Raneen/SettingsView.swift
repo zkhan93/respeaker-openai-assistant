@@ -51,6 +51,15 @@ struct SettingsView: View {
             detail
         }
         .frame(width: SettingsMetric.windowSize.width, height: SettingsMetric.windowSize.height)
+        // The window's transparent titlebar arrives here as a safe area.
+        // Honouring it would lay this 640pt view out *below* the titlebar,
+        // and the hosting view would then report 672pt as its intrinsic
+        // height and grow the window to match — leaving a 32pt band of bare
+        // window above the sidebar, which shipped in one build and looked
+        // like a seam between two materials. The design already keeps its
+        // own clearance for the traffic lights (`titlebarInset`), so the
+        // safe area has nothing to add.
+        .ignoresSafeArea()
         .onAppear { model.refreshLibraries() }
     }
 
@@ -73,14 +82,13 @@ struct SettingsView: View {
             }
             .background(SettingsPalette.pane)
 
-            Divider()
             SettingsActionBar(status: status) {
-                Button("Apply & Restart Core") { model.apply() }
-                    .buttonStyle(.borderedProminent)
-                    // Brand orange rather than the system accent, matching
-                    // the sidebar selection: this window is the product, and
-                    // it should look like one application.
-                    .tint(SettingsPalette.brand)
+                // "Apply", and the restart it implies lives in the status
+                // sentence beside it. "Apply & Restart Core" was honest but
+                // it made the button a clause, and the fact belongs with the
+                // explanation of why the button is lit, not on the button.
+                Button("Apply") { model.apply() }
+                    .buttonStyle(SettingsPrimaryButtonStyle())
                     .keyboardShortcut(.defaultAction)
                     .disabled(!model.isDirty)
             }
@@ -103,10 +111,10 @@ struct SettingsView: View {
 
     private var status: SettingsStatus? {
         if model.isDirty {
-            return .pending("The core is still running the previous settings.")
+            return .pending("Unapplied changes. Applying restarts the core.")
         }
         if model.running != nil {
-            return .settled("Running these settings.")
+            return .settled("The core is running these settings.")
         }
         return nil
     }
@@ -298,15 +306,10 @@ struct SettingsView: View {
                 TextField("Model name", text: $model.config.remoteModel, prompt: Text("whisper-1"))
             }
             SettingsRow("Fall back to the local model on failure") {
-                Toggle("", isOn: $model.config.remoteFallback)
-                    // A switch, not the checkbox `Toggle` defaults to on
-                    // macOS: this is a capability being turned on, which is
-                    // what a switch means, and it is also what every
-                    // settings surface on the platform now uses. Tinted with
-                    // the brand so the one saturated control in the window
-                    // is not a different colour from the rest of it.
-                    .toggleStyle(.switch)
-                    .tint(SettingsPalette.brand)
+                // The shared switch, so this and the Speakers toggle are
+                // visibly the same control — see `SettingsSwitch` for why
+                // it is a switch and why it is orange.
+                SettingsSwitch(isOn: $model.config.remoteFallback)
             }
         }
     }
@@ -347,9 +350,10 @@ struct SettingsView: View {
                 """,
             accessory: {
                 if model.timingsAreRecommended {
-                    Text("recommended for “\(model.config.trigger.label)”")
-                        .font(SettingsType.caption)
-                        .foregroundStyle(.secondary)
+                    // A badge rather than a grey sentence: the fact being
+                    // reported is good news — nothing to do here — and a
+                    // tinted capsule is read before a caption is.
+                    SettingsBadge("Recommended for “\(model.config.trigger.label)”")
                 } else {
                     // A small bordered button rather than the `.link` style
                     // it was: a link paints itself in the system accent,
@@ -445,7 +449,9 @@ struct SettingsView: View {
                 """
         ) {
             if model.config.wakeWords.isEmpty {
-                SettingsFootnote("None. Any openWakeWord classifier (.onnx) works.")
+                SettingsEmptyState(
+                    symbol: "ear.badge.waveform",
+                    "No wake words yet. Any openWakeWord classifier (.onnx) works.")
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(model.config.wakeWords.enumerated()), id: \.element) {

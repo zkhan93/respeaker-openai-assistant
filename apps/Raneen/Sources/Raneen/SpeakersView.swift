@@ -53,8 +53,9 @@ struct SpeakersView: View {
                     did before.
                     """
             ) {
-                Toggle("Identify who is speaking", isOn: $model.config.identifySpeakers)
-                    .toggleStyle(.switch)
+                SettingsRow("Identify who is speaking") {
+                    SettingsSwitch(isOn: $model.config.identifySpeakers)
+                }
 
                 if model.config.identifySpeakers {
                     // **Four fixed choices, not a slider.** The model
@@ -69,7 +70,10 @@ struct SpeakersView: View {
                         caption: "Speech shorter than this is not identified at all, "
                             + "rather than badly. Longer recognises people more "
                             + "reliably but skips more of what they say — most "
-                            + "dictation turns are under four seconds."
+                            + "dictation turns are under four seconds.",
+                        // The same width as every other pop-up in the window,
+                        // so the segmented control ends where the pickers do.
+                        controlWidth: SettingsMetric.pickerWidth
                     ) {
                         Picker("", selection: $model.config.speakerWindow) {
                             ForEach(SettingsStore.Limits.speakerWindowChoices, id: \.self) {
@@ -77,24 +81,21 @@ struct SpeakersView: View {
                             }
                         }
                         .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 212)
                     }
 
+                    // The value sits in the row's value column, like every
+                    // slider on Detection, rather than in a private HStack
+                    // with its own width: the number is what is being read,
+                    // and it lands in the same place on every pane.
                     SettingsRow(
                         "Check again every",
                         caption: "People interrupt and hand over mid-sentence, so this "
                             + "re-checks while someone is still talking rather than "
-                            + "deciding once per turn."
+                            + "deciding once per turn.",
+                        value: String(format: "%.1f s", model.config.speakerInterval),
+                        controlWidth: SettingsMetric.sliderWidth
                     ) {
-                        HStack(spacing: 8) {
-                            Slider(value: $model.config.speakerInterval, in: 0.5...10, step: 0.5)
-                                .frame(width: 160)
-                            Text("\(model.config.speakerInterval, specifier: "%.1f") s")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 44, alignment: .trailing)
-                        }
+                        Slider(value: $model.config.speakerInterval, in: 0.5...10, step: 0.5)
                     }
 
                     // **The slider runs backwards from how it reads.** Its
@@ -108,26 +109,22 @@ struct SpeakersView: View {
                         caption: "Drag left when one person keeps turning into several. "
                             + "Drag right when two people end up sharing a profile. "
                             + "Existing profiles are left alone — this only changes "
-                            + "what happens from now on."
+                            + "what happens from now on.",
+                        value: "\(Int(model.config.speakerThreshold * 100))%",
+                        controlWidth: SettingsMetric.sliderWidth
                     ) {
-                        HStack(spacing: 8) {
-                            Slider(
-                                value: $model.config.speakerThreshold,
-                                in: SettingsStore.Limits.speakerThreshold,
-                                step: 0.01
-                            )
-                            .frame(width: 160)
-                            Text("\(Int(model.config.speakerThreshold * 100))%")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 44, alignment: .trailing)
-                        }
+                        Slider(
+                            value: $model.config.speakerThreshold,
+                            in: SettingsStore.Limits.speakerThreshold,
+                            step: 0.01
+                        )
                     }
 
-                    Text(thresholdAdvice)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // Boxed as a note rather than left as a loose caption:
+                    // it is the one line here that changes as the slider
+                    // moves, and it should look like a reading, not a
+                    // footnote that happens to be nearby.
+                    SettingsCallout(.info, thresholdAdvice)
                 }
             }
 
@@ -160,47 +157,85 @@ struct SpeakersView: View {
                         """
                 ) {
                     if model.speakers.isEmpty {
-                        Text(emptyMessage)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        SettingsEmptyState(symbol: "person.crop.circle.badge.plus", emptyMessage)
                     } else {
-                        ForEach(model.speakers) { profile in
-                            row(for: profile)
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(model.speakers.enumerated()), id: \.element.id) {
+                                index, profile in
+                                if index > 0 { SettingsDivider() }
+                                SpeakerRow(
+                                    profile: profile,
+                                    clips: clips,
+                                    isEditing: editing == profile.id,
+                                    draftName: $draftName,
+                                    beginEditing: {
+                                        draftName = profile.name ?? ""
+                                        editing = profile.id
+                                    },
+                                    commit: { commit(profile) },
+                                    cancelEditing: { editing = nil },
+                                    improve: { name in model.learnSpeaker(named: name) },
+                                    forget: {
+                                        // Stop first: the core deletes the recording
+                                        // along with the profile, and a player holding
+                                        // a file that is about to vanish is a needless
+                                        // race.
+                                        if clips.playing == profile.id { clips.stop() }
+                                        model.forgetSpeaker(profile.id)
+                                    }
+                                )
+                            }
                         }
                     }
 
-                    Divider().padding(.vertical, 2)
-
                     if let learning = model.learning {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
+                        // Tinted like the download bar on Models: this is the
+                        // one thing in the pane that is actually happening,
+                        // and it should be found without reading.
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(SettingsPalette.brand)
                             Text("Listening for \(learning) — say a couple of sentences.")
+                                .font(SettingsType.label)
                                 .foregroundStyle(.secondary)
-                            Spacer()
+                            Spacer(minLength: 8)
                             Button("Cancel") { model.cancelLearning() }
                         }
+                        .padding(SettingsMetric.calloutPadding)
+                        .background(
+                            SettingsPalette.brand.opacity(0.08),
+                            in: RoundedRectangle(
+                                cornerRadius: SettingsMetric.calloutRadius, style: .continuous)
+                        )
                     } else if adding {
                         HStack(spacing: 8) {
                             TextField("Name", text: $draftName)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(maxWidth: 200)
                                 .onSubmit { beginLearning() }
-                            Button("Start listening") { beginLearning() }
+                            Spacer(minLength: 8)
+                            Button("Cancel") { adding = false; draftName = "" }
+                            Button("Start Listening") { beginLearning() }
+                                .buttonStyle(.borderedProminent)
+                                .tint(SettingsPalette.brand)
                                 .keyboardShortcut(.defaultAction)
                                 .disabled(trimmedDraft.isEmpty)
-                            Button("Cancel") { adding = false; draftName = "" }
                         }
                     } else {
-                        Button {
-                            draftName = ""
-                            adding = true
-                        } label: {
-                            Label("Add a person…", systemImage: "plus")
+                        HStack {
+                            Spacer(minLength: 0)
+                            Button {
+                                draftName = ""
+                                adding = true
+                            } label: {
+                                Label("Add a Person…", systemImage: "plus")
+                            }
+                            .disabled(model.running?.identifySpeakers != true)
+                            .help(model.running?.identifySpeakers == true
+                                ? "Type a name, then have them speak for a few seconds."
+                                : "Apply the change first — the core has to be listening.")
                         }
-                        .disabled(model.running?.identifySpeakers != true)
-                        .help(model.running?.identifySpeakers == true
-                            ? "Type a name, then have them speak for a few seconds."
-                            : "Apply the change first — the core has to be listening.")
                     }
                 }
             }
@@ -242,84 +277,6 @@ struct SpeakersView: View {
         }
     }
 
-    @ViewBuilder
-    private func row(for profile: Helper.SpeakerProfile) -> some View {
-        HStack(spacing: 10) {
-            // Playing the clip is the whole reason this row can be named,
-            // so it takes the leading position the icon used to hold.
-            // Profiles stored before clips existed have none; those keep
-            // the plain icon rather than an button that would do nothing.
-            if let clip = profile.clip {
-                Button {
-                    clips.toggle(profile.id, url: clip)
-                } label: {
-                    Image(
-                        systemName: clips.playing == profile.id
-                            ? "stop.circle.fill" : "play.circle")
-                        .font(.title3)
-                }
-                .buttonStyle(.borderless)
-                .help("Hear the recording this profile was created from.")
-                .frame(width: 18)
-            } else {
-                Image(systemName: "person.wave.2")
-                    .foregroundStyle(profile.name == nil ? .secondary : .primary)
-                    .frame(width: 18)
-            }
-
-            if editing == profile.id {
-                TextField("Name", text: $draftName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 200)
-                    .onSubmit { commit(profile) }
-                Button("Save") { commit(profile) }
-                    .keyboardShortcut(.defaultAction)
-                Button("Cancel") { editing = nil }
-            } else {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(profile.name ?? profile.id)
-                        .fontWeight(profile.name == nil ? .regular : .medium)
-                        .foregroundStyle(profile.name == nil ? .secondary : .primary)
-                    // The sample count is the honest measure of how well
-                    // this profile is known, and it is why a fresh one
-                    // sometimes fails to match — worth showing rather
-                    // than hiding behind a name.
-                    Text(profile.name == nil
-                        ? "\(profile.samples) recording\(profile.samples == 1 ? "" : "s")"
-                        : "\(profile.id) · \(profile.samples) recording\(profile.samples == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(profile.name == nil ? "Name…" : "Rename…") {
-                    draftName = profile.name ?? ""
-                    editing = profile.id
-                }
-                // Another recording of somebody already here. The single
-                // most effective thing in this pane: one voiceprint is
-                // one four-second slice of a person, and recognition
-                // improves faster with more samples than with any slider.
-                if let name = profile.name {
-                    Button("Improve") { model.learnSpeaker(named: name) }
-                        .help("Have them say a couple more sentences. This "
-                            + "sharpens their profile rather than adding a second one.")
-                }
-                Button {
-                    // Stop first: the core deletes the recording along with
-                    // the profile, and a player holding a file that is
-                    // about to vanish is a needless race.
-                    if clips.playing == profile.id { clips.stop() }
-                    model.forgetSpeaker(profile.id)
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .help("Forget this voice. Their id is never reused, so anything "
-                    + "already recorded against it keeps meaning what it meant.")
-            }
-        }
-        .padding(.vertical, 2)
-    }
-
     private func commit(_ profile: Helper.SpeakerProfile) {
         let name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty name is a cancel, not a request to store "". The core
@@ -328,5 +285,126 @@ struct SpeakersView: View {
             model.nameSpeaker(profile.id, as: name)
         }
         editing = nil
+    }
+}
+
+/// One enrolled voice: how to hear it, what it is called, and what to do
+/// about it.
+///
+/// Its own view rather than a `row(for:)` on the pane so it can hold hover
+/// state: the delete control appears under the pointer, as it does on
+/// Models, because a column of permanently visible trash cans reads as a
+/// list of things to destroy. Rename and Improve stay visible — for an
+/// unnamed voice, "Name…" is the thing the row is asking for, and a button
+/// that only exists on hover is a button nobody finds.
+private struct SpeakerRow: View {
+
+    let profile: Helper.SpeakerProfile
+    @ObservedObject var clips: SpeakerClipPlayer
+    let isEditing: Bool
+    @Binding var draftName: String
+
+    let beginEditing: () -> Void
+    let commit: () -> Void
+    let cancelEditing: () -> Void
+    let improve: (String) -> Void
+    let forget: () -> Void
+
+    @State private var isHovered = false
+
+    private var isNamed: Bool { profile.name != nil }
+
+    private var recordings: String {
+        "\(profile.samples) recording\(profile.samples == 1 ? "" : "s")"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // Playing the clip is the whole reason this row can be named,
+            // so it takes the leading position the icon used to hold.
+            // Profiles stored before clips existed have none; those keep
+            // the plain icon rather than a button that would do nothing.
+            if let clip = profile.clip {
+                Button {
+                    clips.toggle(profile.id, url: clip)
+                } label: {
+                    Image(systemName: clips.playing == profile.id ? "stop.circle.fill" : "play.circle")
+                        .font(.system(size: 17))
+                        .foregroundStyle(
+                            clips.playing == profile.id ? SettingsPalette.brand : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Hear the recording this profile was created from.")
+                .frame(width: 20)
+            } else {
+                Image(systemName: "person.wave.2")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20)
+            }
+
+            if isEditing {
+                TextField("Name", text: $draftName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 200)
+                    .onSubmit(commit)
+                Spacer(minLength: 8)
+                Button("Cancel", action: cancelEditing)
+                Button("Save", action: commit)
+                    .buttonStyle(.borderedProminent)
+                    .tint(SettingsPalette.brand)
+                    .keyboardShortcut(.defaultAction)
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(profile.name ?? profile.id)
+                            .font(SettingsType.label)
+                            .fontWeight(isNamed ? .medium : .regular)
+                            .foregroundStyle(isNamed ? Color.primary : Color.secondary)
+                        if !isNamed {
+                            SettingsBadge("unnamed", quiet: true)
+                        }
+                    }
+                    // The sample count is the honest measure of how well
+                    // this profile is known, and it is why a fresh one
+                    // sometimes fails to match — worth showing rather
+                    // than hiding behind a name.
+                    Text(isNamed ? "\(profile.id) · \(recordings)" : recordings)
+                        .font(SettingsType.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+
+                HStack(spacing: 6) {
+                    Button(isNamed ? "Rename…" : "Name…", action: beginEditing)
+                    // Another recording of somebody already here. The single
+                    // most effective thing in this pane: one voiceprint is
+                    // one four-second slice of a person, and recognition
+                    // improves faster with more samples than with any slider.
+                    if let name = profile.name {
+                        Button("Improve") { improve(name) }
+                            .help("Have them say a couple more sentences. This "
+                                + "sharpens their profile rather than adding a second one.")
+                    }
+                }
+                .controlSize(.small)
+
+                Button(action: forget) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Forget this voice. Their id is never reused, so anything "
+                    + "already recorded against it keeps meaning what it meant.")
+                .frame(width: 16)
+                // Revealed on hover, as on Models.
+                .opacity(isHovered ? 1 : 0)
+            }
+        }
+        .padding(.vertical, 5)
+        .settingsListRowHover(isHovered && !isEditing)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .accessibilityElement(children: .contain)
     }
 }

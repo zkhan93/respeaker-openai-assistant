@@ -97,7 +97,8 @@ struct ModelsView: View {
     private var addedCard: some View {
         SettingsCard("Added by you") {
             if model.addedModels.isEmpty {
-                SettingsFootnote(
+                SettingsEmptyState(
+                    symbol: "square.stack.3d.up.badge.a",
                     "Nothing yet. Any ggml Whisper model works, including one you "
                         + "converted or quantised yourself.")
             } else {
@@ -231,13 +232,7 @@ private struct ModelRow: View {
                 HStack(spacing: 6) {
                     Text(title).font(SettingsType.label)
                     if isBundled {
-                        Text("included")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(SettingsPalette.brand)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(
-                                Capsule().fill(SettingsPalette.brand.opacity(0.12)))
+                        SettingsBadge("included")
                     }
                 }
                 Text(caption)
@@ -256,7 +251,11 @@ private struct ModelRow: View {
             // would shuffle sideways under the pointer.
             trash.frame(width: 16)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
+        // Lit under the pointer only where a click selects — a row that
+        // offers a download is a button's row, not a selectable one, and
+        // lighting it would promise a click it does not honour.
+        .settingsListRowHover(isHovered && isInstalled)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
         // Only where a click means something. A row offering a download is

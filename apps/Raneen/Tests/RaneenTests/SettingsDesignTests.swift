@@ -129,11 +129,13 @@ final class SettingsDesignTests: XCTestCase {
     ///
     /// Models sits next to Transcription because it is where that section's
     /// most consequential choice happens, not at the end with the extras.
+    /// Speakers comes after Wake Word and before Recording: it is the other
+    /// thing that listens alongside dictation without changing it.
     func testDictationComesFirst() {
         XCTAssertEqual(SettingsSection.allCases.first, .dictation)
         XCTAssertEqual(
             SettingsSection.allCases,
-            [.dictation, .transcription, .models, .detection, .wakeWord, .recording])
+            [.dictation, .transcription, .models, .detection, .wakeWord, .speakers, .recording])
     }
 
     // MARK: - The window fits

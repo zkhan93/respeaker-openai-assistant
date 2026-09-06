@@ -128,6 +128,20 @@ enum StatusIcon: Equatable {
 
     private static func markImage() -> NSImage? { cachedMark }
 
+    /// The mark at a given height, as a template, for surfaces other than
+    /// the menu bar — the settings sidebar signs itself with it. Template
+    /// so the caller chooses the colour; `nil` outside a bundle, where the
+    /// caller falls back to a symbol exactly as the menu bar does.
+    static func brandMark(height: CGFloat) -> NSImage? {
+        guard let mark = cachedMark else { return nil }
+        let source = mark.size
+        guard source.height > 0 else { return nil }
+        let copy = mark.copy() as? NSImage ?? mark
+        copy.size = NSSize(width: source.width * height / source.height, height: height)
+        copy.isTemplate = true
+        return copy
+    }
+
     /// Scale to the menu-bar height, preserving aspect. Returns a copy so
     /// the cached original is never mutated.
     private static func resized(_ image: NSImage, isTemplate: Bool = false) -> NSImage {
