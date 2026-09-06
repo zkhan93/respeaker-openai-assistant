@@ -91,8 +91,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PortAudio (shared library only)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
+      # xvfb because pynput chooses its backend at import time and on Linux
+      # that is X11: with no display, `pynput.keyboard` cannot be imported
+      # and the keyboard-sink and hotkey tests fail at import. Its `dummy`
+      # backend was tried first and rejected — it defines a single key, so
+      # `test_real_key_names_are_accepted` would report every real key
+      # name as unknown. A virtual display costs ten seconds and lets the
+      # tests run against the same backend a Linux user gets.
+      - name: Install PortAudio and a virtual display
+        run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2 xvfb
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -103,16 +110,22 @@ jobs:
         run: uv venv .venv --python 3.11
 
       # --no-deps on the package itself skips the whisper/piper extras that
-      # voice-core[...] would pull in; the port-conformance tests only need
-      # voice-core's tiny base deps plus sounddevice.
+      # voice-core[...] would pull in, so the package's own light
+      # dependencies are named here instead: sounddevice for the port
+      # tests, typer because the CLI fitness tests import and spawn
+      # `cli.py`, and pynput because the keyboard-sink tests exercise the
+      # paste path, which imports `pynput.keyboard` even with the fake
+      # controller in place.
       - name: Install test dependencies
         run: |
-          uv pip install --python .venv/bin/python pytest sounddevice
+          uv pip install --python .venv/bin/python pytest sounddevice typer pynput
           uv pip install --python .venv/bin/python -e ../voice-core
           uv pip install --python .venv/bin/python -e . --no-deps
 
+      # Under the virtual display, so pynput's X11 backend has something to
+      # connect to. `-a` picks a free display number.
       - name: Run tests
-        run: .venv/bin/python -m pytest
+        run: xvfb-run -a .venv/bin/python -m pytest
 
   # The Rust core. Unit tests are pure and hermetic — bus, VAD state
   # machine, tail padding, hallucination markers — and need no model and
